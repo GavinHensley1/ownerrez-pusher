@@ -1,0 +1,7 @@
+{
+  "name": "ownerrez-pusher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Receives a SpotRates payload from the pricing engine and PATCHes it to OwnerRez. Pricing only. Dry-run by default.",
+  "engines": { "node": ">=18" }
+}
