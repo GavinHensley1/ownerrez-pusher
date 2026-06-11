@@ -98,7 +98,7 @@
 <script>
 const UNITS=[["486910","Bear Claw"],["486911","Flyin' Horse"],["486912","Mustang Manor"],["486913","Soaring Dreams"],["486891","Arrowhead"],["486914","Sunset Stampede"],["486915","Buffalo Run"],["486916","Scarlet Antler"],["486917","Cub House"],["486918","Flyin' Free"]];
 const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-let PW="", STATE=null, RATES=null, OCC=null, view={unit:"486910", y:0, m:0};
+let PW="", STATE=null, RATES=null, OCC=null, view={unit:"486910", y:0, m:0}; let HMIN=0,HMAX=0;
 const api=a=>'/api/app?action='+a;
 
 function unlock(){
@@ -191,7 +191,7 @@ async function onCell(ds){
   if(!r.ok){ alert("Save failed (auth?)."); return; }
   await applyPreview();
 }
-function moveMonth(d){ let idx=view.y*12+view.m+d; const min=2026*12+5,max=2027*12+11; idx=Math.max(min,Math.min(max,idx)); view.y=Math.floor(idx/12); view.m=idx%12; render(); }
+function moveMonth(d){ let idx=view.y*12+view.m+d; idx=Math.max(HMIN,Math.min(HMAX,idx)); view.y=Math.floor(idx/12); view.m=idx%12; render(); }
 function render(){
   view.unit=document.getElementById('unit').value;
   document.getElementById('monthLbl').textContent=MON[view.m]+" "+view.y;
@@ -210,8 +210,10 @@ function render(){
   document.getElementById('calStats').textContent=(n?`avg $${Math.round(sum/n)} · $${mn}–$${mx}`:"no preview")+(pins?` · ${pins} pinned`:"")+(bk?` · ${bk} booked`:"");
 }
 function boot(){
-  document.getElementById('horizon').textContent="Jun 2026 → Dec 2027";
+  const n=new Date(); const sY=n.getUTCFullYear(),sM=n.getUTCMonth(); const e=new Date(n); e.setUTCDate(e.getUTCDate()+365); const eY=e.getUTCFullYear(),eM=e.getUTCMonth();
+  HMIN=sY*12+sM; HMAX=eY*12+eM;
+  document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
-  view.y=2026; view.m=5; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview);
+  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview);
 }
 </script></body></html>
