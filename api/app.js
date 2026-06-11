@@ -20,15 +20,17 @@ const UNITS=[
 const SEED_TARGETS={1:{wd:.40,we:.60},2:{wd:.40,we:.60},3:{wd:.55,we:.78},4:{wd:.58,we:.80},5:{wd:.60,we:.82},6:{wd:.70,we:.90},7:{wd:.75,we:.92},8:{wd:.65,we:.85},9:{wd:.60,we:.82},10:{wd:.72,we:.92},11:{wd:.55,we:.78},12:{wd:.62,we:.85}};
 const WEEKEND_DAYS=[5,6];
 const UNIT_PREM={486891:1.14,486912:1.10,486917:1.08,486911:1.035}; // quality premium as a multiplier on the seasonal base
-const MODEL={UPSPAN:0.20,DOWNSPAN:0.30,MAXUP:0.45,MAXDOWN:0.22,SCAR_FAR:0.55,SCAR_NEAR:0.35,SCAR_GAIN:1.0,SCAR_CAP:0.40,UNIT_GAIN:0.40,UNIT_CAP:0.12,MULT_MIN:0.65,MULT_MAX:1.95,PEAK_MULT:1.30,PEAK_CEIL:300};
+const MODEL={UPSPAN:0.20,DOWNSPAN:0.30,MAXUP:0.27,MAXDOWN:0.14,SCAR_FAR:0.55,SCAR_NEAR:0.35,SCAR_GAIN:1.0,SCAR_CAP:0.40,UNIT_GAIN:0.40,UNIT_CAP:0.12,MULT_MIN:0.65,MULT_MAX:1.95,PEAK_MULT:1.30,PEAK_CEIL:300};
 const SENS=[[0,1.0],[14,0.95],[30,0.85],[60,0.65],[90,0.52],[120,0.45],[180,0.30],[270,0.20],[365,0.15]]; // how hard we react to pace, by lead days
 const GAP_SEED={1:0.25,2:0.15,3:0.10}; // seed orphan-gap discount depth by run length (weekday); weekend gaps get x0.4
 const KNOBS={weekendDays:WEEKEND_DAYS,...MODEL};
 function median(a){a=a.slice().sort((x,y)=>x-y);const n=a.length;return n?(n%2?a[(n-1)/2]:(a[n/2-1]+a[n/2])/2):0;}
 // Seed booking-pace curve = fraction of FINAL bookings on the books by `lead` days out (leisure STR).
-const PACE_SEED={
-  weekend:[[0,1],[7,.93],[14,.87],[30,.74],[60,.55],[90,.40],[120,.30],[180,.16],[270,.07],[365,.03]],
-  weekday:[[0,1],[7,.90],[14,.82],[30,.66],[60,.46],[90,.32],[120,.22],[180,.11],[270,.05],[365,.02]]
+const PACE_SEED={ // expected fraction of FINAL bookings already on the books by `lead` days out.
+  // Back-loaded for this drive-to glamping resort: bulk of bookings land inside 45 days; rare beyond 90 (so a
+  // far-out empty night reads as ~ON pace, not behind). Steep ramp inside 45 up to the target by the stay night.
+  weekend:[[0,1],[7,.85],[14,.72],[21,.62],[30,.50],[45,.35],[60,.22],[90,.12],[120,.08],[180,.05],[270,.03],[365,.02]],
+  weekday:[[0,1],[7,.82],[14,.68],[21,.57],[30,.45],[45,.30],[60,.18],[90,.10],[120,.07],[180,.04],[270,.025],[365,.015]]
 };
 const DEFAULTS={targets:SEED_TARGETS,auto_sync:false,overrides:{},icals:{}};
 const SKEY="parkside:state";
