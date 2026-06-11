@@ -32,6 +32,17 @@
   #gate{position:fixed;inset:0;background:#0b1219;display:flex;align-items:center;justify-content:center;z-index:50;flex-direction:column;gap:14px}
   #gate input{font-size:18px;text-align:center;padding:10px 14px;width:160px;letter-spacing:.3em}
   .legend{font-size:12px;color:var(--mut);margin-top:8px}
+  @media (max-width:640px){
+    .wrap{padding:12px 10px} header{padding:10px 12px;gap:8px 10px} h1{font-size:15px}
+    .card{padding:12px 11px;margin-bottom:14px} .card h2{font-size:12px}
+    .cal{gap:4px} .day{min-height:50px;padding:4px;border-radius:6px}
+    .day .p{font-size:13px;margin-top:2px} .day .d{font-size:10px}
+    .day .bk,.day .gapmark{font-size:8px} .day .pinmark{font-size:10px}
+    .tgrid input{width:44px;padding:5px 3px} .occ td,.occ th{padding:4px 6px;font-size:12px}
+    button{padding:9px 13px} select,input{padding:8px 8px}
+    .switch{width:50px;height:28px} .knob{width:22px;height:22px} .switch.on .knob{left:25px}
+    #monthLbl{min-width:110px!important}
+  }
 </style></head><body>
 
 <div id="gate">
@@ -69,8 +80,14 @@
   </div>
 
   <div class="card">
+    <h2>Learning status — self-tuning levers</h2>
+    <div class="legend" id="learnNote">Loading…</div>
+    <div class="scroll"><table class="occ" id="learnTable" style="margin-top:8px"></table></div>
+  </div>
+
+  <div class="card">
     <h2>Monthly occupancy targets (revenue-max holds these)</h2>
-    <table class="tgrid" id="targets"></table>
+    <div class="scroll"><table class="tgrid" id="targets"></table></div>
     <div style="margin-top:12px;display:flex;gap:10px">
       <button onclick="applyPreview()">Preview prices</button>
       <button class="ghost" onclick="saveTargets()">Save targets</button>
@@ -118,8 +135,8 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
 function buildTargets(){
   const t=STATE.targets, el=document.getElementById('targets');
   let h="<tr><th>Month</th>"+MON.map(m=>`<th>${m}</th>`).join("")+"</tr>";
-  h+="<tr><td class='muted'>Weekday %</td>"+MON.map((m,i)=>`<td><input id='wd${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].wd*100)}' oninput='schedulePreview()' onchange='applyPreview()'></td>`).join("")+"</tr>";
   h+="<tr><td class='muted'>Weekend %</td>"+MON.map((m,i)=>`<td><input id='we${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].we*100)}' oninput='schedulePreview()' onchange='applyPreview()'></td>`).join("")+"</tr>";
+  h+="<tr><td class='muted'>Weekday %</td>"+MON.map((m,i)=>`<td><input id='wd${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].wd*100)}' oninput='schedulePreview()' onchange='applyPreview()'></td>`).join("")+"</tr>";
   el.innerHTML=h;
 }
 function readTargets(){ const t={}; for(let i=1;i<=12;i++){ t[i]={wd:(+document.getElementById('wd'+i).value||0)/100, we:(+document.getElementById('we'+i).value||0)/100}; } return t; }
@@ -215,11 +232,25 @@ function render(){
   document.getElementById('grid').innerHTML=cells;
   document.getElementById('calStats').textContent=(n?`avg $${Math.round(sum/n)} · $${mn}–$${mx}`:"no preview")+(pins?` · ${pins} pinned`:"")+(bk?` · ${bk} booked`:"");
 }
+async function loadLearning(){
+  let j; try{ j=await (await fetch(api('logs'),{headers:{'x-app-password':PW}})).json(); }catch{ return; }
+  if(!j||j.error){ document.getElementById('learnNote').textContent='Learning data unavailable.'; return; }
+  const L=j.learned||{}; const rows=[];
+  const paceN=L.paceEvents?((L.paceEvents.weekend||0)+(L.paceEvents.weekday||0)):0;
+  rows.push(['Booking-pace curve (by lead time)','seeded STR curve','blended w/ learned',paceN+' bookings']);
+  const ud=L.unitPrem||{}; for(const k of Object.keys(ud)){ const d=ud[k]; rows.push(['Unit premium · '+d.name,'×'+d.seed,'×'+d.eff,(d.book||0)+'/'+(d.open||0)+' book/exposure']); }
+  const gd=L.gapDiscount||{}; for(const len of [1,2,3]){ const d=gd[len]; if(d) rows.push([len+'-night orphan discount',Math.round(d.seed*100)+'%',Math.round(d.eff*100)+'%',(d.open||0)+' exposure-days']); }
+  const p=L.premiumScale||{}; rows.push(['Premium aggressiveness','×1.00','×'+(p.scale!=null?p.scale:1),(p.premOpen||0)+'/'+(p.neuOpen||0)+' prem/neutral']);
+  let h="<tr><th style='text-align:left'>Lever</th><th>Seed</th><th>Learned now</th><th>Data so far</th></tr>";
+  for(const r of rows) h+=`<tr><td style='text-align:left'>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td class='muted'>${r[3]}</td></tr>`;
+  document.getElementById('learnTable').innerHTML=h;
+  document.getElementById('learnNote').textContent=`Each lever blends a seeded prior with what it learns from real booking outcomes; the learned weight grows with data, so today values sit ≈ seed. Logged so far: ${paceN} booking events + ${j.snapshotCells||0} nightly snapshot cells. Rules of thumb before a lever moves materially: pace curve ~150+ bookings; each unit premium ~60+ of its own bookings; each gap/premium lever dozens of exposure-days.`;
+}
 function boot(){
   const n=new Date(); const sY=n.getUTCFullYear(),sM=n.getUTCMonth(); const e=new Date(n); e.setUTCDate(e.getUTCDate()+365); const eY=e.getUTCFullYear(),eM=e.getUTCMonth();
   HMIN=sY*12+sM; HMAX=eY*12+eM;
-  document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0610e`;
+  document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611a`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
-  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview);
+  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning();
 }
 </script></body></html>
