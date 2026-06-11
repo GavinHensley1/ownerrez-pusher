@@ -115,6 +115,12 @@ async function logPhase1(rates,booked,today){
 }
 async function getLearned(){ const ev=(redis&&await redis.get("parkside:events"))||[]; return buildLearnedPace(ev); }
 
+function monthList(today,days){ const start=new Date(today+"T00:00:00Z"); const set={}; for(let i=0;i<days;i++){const d=new Date(start);d.setUTCDate(d.getUTCDate()+i); set[d.toISOString().slice(0,7)]=1;} return Object.keys(set).sort(); }
+function computePace(poolAgg,targets,learned,today,months){ const pace={};
+  for(const mk of months){ const lead=monthLead(mk+"-15",today); const tgt=targets[parseInt(mk.slice(5))]; const pa=poolAgg[mk]||[{b:0,t:0},{b:0,t:0}];
+    const f=(dt,dn,tv)=>{const act=pa[dt].t?Math.round(100*pa[dt].b/pa[dt].t):0; const exp=Math.round(100*tv*paceFrac(lead,dn,learned)); return {act,exp,status:act>=exp?"ahead":"behind"};};
+    pace[mk]={wknd:f(1,"weekend",tgt.we),wkdy:f(0,"weekday",tgt.wd)}; }
+  return pace; }
 module.exports=async(req,res)=>{
   try{
     const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
@@ -138,10 +144,7 @@ module.exports=async(req,res)=>{
       const months=Object.keys(monthTotal).sort(); const byUnit={};
       for(const u of UNITS){ const dates=Object.keys(booked.byUnit[u.orp]); const mc={}; for(const ds of dates){const mk=ds.slice(0,7); mc[mk]=(mc[mk]||0)+1;}
         const monthly={}; for(const mk of months) monthly[mk]=Math.round(100*((mc[mk]||0)/monthTotal[mk])); byUnit[u.orp]={booked:dates,monthly}; }
-      const pace={};
-      for(const mk of months){ const lead=monthLead(mk+"-15",today); const tgt=st.targets[parseInt(mk.slice(5))]; const pa=agg.poolAgg[mk]||[{b:0,t:0},{b:0,t:0}];
-        const mk2=(dt,dn,tv)=>{ const act=pa[dt].t?Math.round(100*pa[dt].b/pa[dt].t):0; const exp=Math.round(100*tv*paceFrac(lead,dn,learned)); return {act,exp,status:act>=exp?"ahead":"behind"}; };
-        pace[mk]={wknd:mk2(1,"weekend",tgt.we), wkdy:mk2(0,"weekday",tgt.wd)}; }
+      const pace=computePace(agg.poolAgg, st.targets, learned, today, months);
       return res.status(200).json({units:UNITS.map(u=>({orp:u.orp,name:u.name})),months,byUnit,pace,paceLearn:{weekend:learned.weekend.n||0,weekday:learned.weekday.n||0,blendWeight:Math.min(0.8,((learned.weekend.n||0)+(learned.weekday.n||0))/600).toFixed(2)},totalBooked:booked.total,channels:booked.channels});
     }
     if(action==="logs"){
@@ -155,7 +158,9 @@ module.exports=async(req,res)=>{
       let occ; if(b&&typeof b.mockOcc==="number") occ={hasData:true,mock:b.mockOcc};
       else { const bk=await getBooked(st,today,days); occ={hasData:bk.total>0, agg:buildAgg(bk,today,days)}; }
       const rates=compute(sig,targets,today,today,days,occ,st.overrides,learned); const amts=rates.map(r=>r.amount);
-      return res.status(200).json({mode:"PREVIEW",wrote:false,count:rates.length,coldStart:!occ.hasData,min:Math.min(...amts),max:Math.max(...amts),avg:Math.round(amts.reduce((a,c)=>a+c,0)/amts.length),overrideCount:rates.filter(r=>r.overridden).length,rates});
+      const pace = occ.agg ? computePace(occ.agg.poolAgg, targets, learned, today, monthList(today,days)) : null;
+      const paceLearn={weekend:learned.weekend.n||0,weekday:learned.weekday.n||0,blendWeight:Math.min(0.8,((learned.weekend.n||0)+(learned.weekday.n||0))/600).toFixed(2)};
+      return res.status(200).json({mode:"PREVIEW",wrote:false,count:rates.length,coldStart:!occ.hasData,min:Math.min(...amts),max:Math.max(...amts),avg:Math.round(amts.reduce((a,c)=>a+c,0)/amts.length),overrideCount:rates.filter(r=>r.overridden).length,pace,paceLearn,rates});
     }
     if(action==="run"){
       const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x")) || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__x"));
