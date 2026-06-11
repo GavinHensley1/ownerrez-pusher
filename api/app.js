@@ -18,7 +18,7 @@ const UNITS=[
   {orp:486917,name:"Cub House",offset:12},{orp:486918,name:"Flyin' Free",offset:0},
 ];
 const SEED_TARGETS={1:{wd:.40,we:.60},2:{wd:.40,we:.60},3:{wd:.55,we:.78},4:{wd:.58,we:.80},5:{wd:.60,we:.82},6:{wd:.70,we:.90},7:{wd:.75,we:.92},8:{wd:.65,we:.85},9:{wd:.60,we:.82},10:{wd:.72,we:.92},11:{wd:.55,we:.78},12:{wd:.62,we:.85}};
-const KNOBS={weekendDays:[5,6],raiseSpan:.20,cutSpan:.30,unitGain:50,unitBand:25};
+const KNOBS={weekendDays:[5,6],raiseSpan:.13,cutSpan:.20,unitGain:50,unitBand:25};
 // Seed booking-pace curve = fraction of FINAL bookings on the books by `lead` days out (leisure STR).
 const PACE_SEED={
   weekend:[[0,1],[7,.93],[14,.87],[30,.74],[60,.55],[90,.40],[120,.30],[180,.16],[270,.07],[365,.03]],
