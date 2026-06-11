@@ -18,7 +18,12 @@ const UNITS=[
   {orp:486917,name:"Cub House",offset:12},{orp:486918,name:"Flyin' Free",offset:0},
 ];
 const SEED_TARGETS={1:{wd:.40,we:.60},2:{wd:.40,we:.60},3:{wd:.55,we:.78},4:{wd:.58,we:.80},5:{wd:.60,we:.82},6:{wd:.70,we:.90},7:{wd:.75,we:.92},8:{wd:.65,we:.85},9:{wd:.60,we:.82},10:{wd:.72,we:.92},11:{wd:.55,we:.78},12:{wd:.62,we:.85}};
-const KNOBS={weekendDays:[5,6],raiseSpan:.13,cutSpan:.20,unitGain:50,unitBand:25};
+const WEEKEND_DAYS=[5,6];
+const UNIT_PREM={486891:1.14,486912:1.10,486917:1.08,486911:1.035}; // quality premium as a multiplier on the seasonal base
+const MODEL={UPSPAN:0.20,DOWNSPAN:0.30,MAXUP:0.45,MAXDOWN:0.32,SCAR_BASE:0.55,SCAR_GAIN:0.9,SCAR_CAP:0.25,UNIT_GAIN:0.40,UNIT_CAP:0.12,MULT_MIN:0.65,MULT_MAX:1.95,PEAK_MULT:1.30};
+const SENS=[[0,1.0],[14,0.95],[30,0.85],[60,0.65],[90,0.52],[120,0.45],[180,0.30],[270,0.20],[365,0.15]]; // how hard we react to pace, by lead days
+const KNOBS={weekendDays:WEEKEND_DAYS,...MODEL};
+function median(a){a=a.slice().sort((x,y)=>x-y);const n=a.length;return n?(n%2?a[(n-1)/2]:(a[n/2-1]+a[n/2])/2):0;}
 // Seed booking-pace curve = fraction of FINAL bookings on the books by `lead` days out (leisure STR).
 const PACE_SEED={
   weekend:[[0,1],[7,.93],[14,.87],[30,.74],[60,.55],[90,.40],[120,.30],[180,.16],[270,.07],[365,.03]],
@@ -76,24 +81,37 @@ function buildAgg(booked,start,days){
       unitAgg[u.orp][mk][dt].t++; poolAgg[mk][dt].t++; if(booked.byUnit[u.orp][ds]){ unitAgg[u.orp][mk][dt].b++; poolAgg[mk][dt].b++; } } }
   return {unitAgg,poolAgg};
 }
-function priceNight(base,poolOcc,unitOcc,expected){
-  const rGap=poolOcc-expected; let level;
-  if(rGap>=0){ const t=Math.min(1,rGap/KNOBS.raiseSpan); level=base+(CEIL-base)*t; }    // resort ahead of pace -> up
-  else { const t=Math.min(1,-rGap/KNOBS.cutSpan); level=base-(base-FLOOR)*t; }            // resort behind pace -> down
-  const nudge=Math.max(-KNOBS.unitBand,Math.min(KNOBS.unitBand,(unitOcc-poolOcc)*KNOBS.unitGain)); // gentle per-unit
-  return Math.max(FLOOR,Math.min(CEIL,Math.round(level+nudge)));
+// Bounded, lead-scaled adjustment ON TOP of the seasonal base (=PriceLabs signal x unit premium).
+// delta = how far ahead/behind the pace trajectory we are. sens(lead) shrinks the reaction far out
+// (a date that is naturally empty 6 months out is NOT "behind"). Ahead -> premium; behind -> discount.
+// scar = extra premium as the pool genuinely fills. Returns a multiplier centered on 1.0.
+function paceMult(poolOcc,exp,lead){
+  const sens=interp(SENS,lead); const delta=poolOcc-exp;
+  let adj = delta>=0 ? Math.min(1,delta/MODEL.UPSPAN)*MODEL.MAXUP : -Math.min(1,(-delta)/MODEL.DOWNSPAN)*MODEL.MAXDOWN;
+  adj*=sens;
+  const scar=Math.min(MODEL.SCAR_CAP,Math.max(0,poolOcc-MODEL.SCAR_BASE)*MODEL.SCAR_GAIN)*sens;
+  return 1+adj+scar;
 }
 function compute(signalMap,targets,today,startDate,days,occ,overrides,learned){
   const start=new Date(startDate+"T00:00:00Z"); const out=[]; overrides=overrides||{};
-  for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const we=isWe(d); const dt=we?1:0; const dtN=we?"weekend":"weekday"; const tg=targetFor(d,targets);
-    const exp=tg*paceFrac(monthLead(ds,today),dtN,learned);
-    let sig=signalMap[ds]; if(sig==null) sig=signalFallback(signalMap,ds);
+  const sv=Object.values(signalMap).filter(v=>v>0); const peakThr=(sv.length?median(sv):FLOOR)*MODEL.PEAK_MULT; // peak nights = top of the year
+  const ctxCache={};
+  for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const mo=d.getUTCMonth()+1; const we=isWe(d); const dt=we?1:0; const dtN=we?"weekend":"weekday";
+    let sig=signalMap[ds]; if(sig==null) sig=signalFallback(signalMap,ds); const peak=sig>=peakThr;
+    let ctx=null;
+    if(occ.hasData&&occ.mock==null){ const ck=mk+"|"+dt; ctx=ctxCache[ck];
+      if(ctx===undefined){ const lead=monthLead(mk+"-15",today); const tg=we?targets[mo].we:targets[mo].wd; const exp=tg*paceFrac(lead,dtN,learned); const pa=occ.agg.poolAgg[mk]&&occ.agg.poolAgg[mk][dt]; const poolOcc=pa&&pa.t?pa.b/pa.t:0; ctx={lead,exp,poolOcc}; ctxCache[ck]=ctx; } }
     for(const u of UNITS){ const key=u.orp+"|"+ds; let amount,overridden=false;
       if(overrides[key]!=null){ amount=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(overrides[key])))); overridden=true; }
-      else { const base=Math.max(FLOOR,Math.min(CEIL,sig+u.offset));
-        if(!occ.hasData){ amount=Math.round(base); }
-        else { let poolOcc,unitOcc; if(occ.mock!=null){poolOcc=unitOcc=occ.mock;} else { const ua=occ.agg.unitAgg[u.orp][mk][dt], pa=occ.agg.poolAgg[mk][dt]; unitOcc=ua&&ua.t?ua.b/ua.t:0; poolOcc=pa&&pa.t?pa.b/pa.t:0; }
-          amount=priceNight(base,poolOcc,unitOcc,exp); } }
+      else { const base=sig*(UNIT_PREM[u.orp]||1.0);
+        if(!occ.hasData){ amount=Math.max(FLOOR,Math.min(CEIL,Math.round(base))); }
+        else if(occ.mock!=null){ const lead=monthLead(mk+"-15",today); const tg=we?targets[mo].we:targets[mo].wd; const exp=tg*paceFrac(lead,dtN,learned); let m=paceMult(occ.mock,exp,lead); if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m)); amount=Math.max(FLOOR,Math.min(CEIL,Math.round(base*m))); }
+        else { let m=paceMult(ctx.poolOcc,ctx.exp,ctx.lead);
+          const ua=occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt]; const unitOcc=ua&&ua.t?ua.b/ua.t:0; const sens=interp(SENS,ctx.lead);
+          let un=(unitOcc-ctx.poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); // gentle per-unit scarcity
+          if(peak)m=Math.max(1,m); // never discount a peak night below its seasonal market base
+          m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
+          amount=Math.max(FLOOR,Math.min(CEIL,Math.round(base*m))); } }
       out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",overridden}); } }
   return out;
 }
@@ -181,14 +199,20 @@ module.exports=async(req,res)=>{
         byMonth[mk]={avgWd:avg(wd),avgWe:avg(we),minWd:wd.length?Math.min(...wd):null,maxWe:we.length?Math.max(...we):null}; }
       const allv=Object.values(sig);
       let breakdown=null;
-      if(req.query&&req.query.date){ const ds=req.query.date; const u=UNITS.find(x=>String(x.orp)===String(req.query.unit))||UNITS[0]; const d=new Date(ds+"T00:00:00Z"); const we=isWe(d),dt=we?1:0,dtN=we?"weekend":"weekday",mk=ds.slice(0,7);
-        let s=sig[ds]; const sigMissing=(s==null); if(s==null)s=signalFallback(sig,ds); const base=Math.max(FLOOR,Math.min(CEIL,s+u.offset));
-        const tg=targetFor(d,st.targets); const lead=monthLead(ds,today); const pf=paceFrac(lead,dtN,learned); const exp=tg*pf;
+      if(req.query&&req.query.date){ const ds=req.query.date; const u=UNITS.find(x=>String(x.orp)===String(req.query.unit))||UNITS[0]; const d=new Date(ds+"T00:00:00Z"); const we=isWe(d),dt=we?1:0,dtN=we?"weekend":"weekday",mk=ds.slice(0,7),mo=d.getUTCMonth()+1;
+        let s=sig[ds]; const sigMissing=(s==null); if(s==null)s=signalFallback(sig,ds);
+        const sv=Object.values(sig).filter(v=>v>0); const peakThr=(sv.length?median(sv):FLOOR)*MODEL.PEAK_MULT; const peak=s>=peakThr;
+        const prem=UNIT_PREM[u.orp]||1.0; const base=s*prem;
+        const tg=we?st.targets[mo].we:st.targets[mo].wd; const lead=monthLead(mk+"-15",today); const pf=paceFrac(lead,dtN,learned); const exp=tg*pf;
         const ua=agg.unitAgg[u.orp][mk]&&agg.unitAgg[u.orp][mk][dt], pa=agg.poolAgg[mk]&&agg.poolAgg[mk][dt];
-        const unitOcc=ua&&ua.t?ua.b/ua.t:0, poolOcc=pa&&pa.t?pa.b/pa.t:0; const final=priceNight(base,poolOcc,unitOcc,exp);
-        breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,offset:u.offset,base,target:tg,monthLead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),rGap:Number((poolOcc-exp).toFixed(3)),final}; }
+        const unitOcc=ua&&ua.t?ua.b/ua.t:0, poolOcc=pa&&pa.t?pa.b/pa.t:0;
+        let m=paceMult(poolOcc,exp,lead); const sens=interp(SENS,lead); let un=(unitOcc-poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
+        const final=Math.max(FLOOR,Math.min(CEIL,Math.round(base*m)));
+        breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,premium:prem,base:Math.round(base),peak,peakThr:Math.round(peakThr),target:tg,monthLead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),sens:Number(sens.toFixed(2)),mult:Number(m.toFixed(3)),final}; }
       return res.status(200).json({refId:process.env.PRICELABS_REF_ID||"486915",sigDays:Object.keys(sig).length,sigMin:allv.length?Math.min(...allv):null,sigMax:allv.length?Math.max(...allv):null,sigAvg:avg(allv),byMonth,breakdown});
     }
     res.status(400).json({error:"unknown action"});
   }catch(e){ res.status(500).json({error:String(e.message||e)}); }
 };
+
+module.exports.__model={compute,paceMult,interp,SENS,MODEL,UNIT_PREM,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
