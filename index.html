@@ -32,6 +32,13 @@
   #gate{position:fixed;inset:0;background:#0b1219;display:flex;align-items:center;justify-content:center;z-index:50;flex-direction:column;gap:14px}
   #gate input{font-size:18px;text-align:center;padding:10px 14px;width:160px;letter-spacing:.3em}
   .legend{font-size:12px;color:var(--mut);margin-top:8px}
+  .seg{background:transparent;border:1px solid var(--line);color:var(--mut);padding:6px 14px;border-radius:7px;font-weight:600;cursor:pointer}
+  .seg.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .kbitem{display:flex;gap:10px;align-items:flex-start;margin-bottom:10px}
+  .kbitem input.topic{flex:0 0 230px;font-weight:600}
+  .kbitem textarea{flex:1;min-height:46px;background:#0c141d;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:7px 9px;font:inherit;resize:vertical}
+  textarea.full{width:100%;min-height:90px;background:#0c141d;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:9px;font:inherit;resize:vertical}
+  .seg-x{background:transparent;border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:6px 9px;cursor:pointer}
   @media (max-width:640px){
     .wrap{padding:12px 10px} header{padding:10px 12px;gap:8px 10px} h1{font-size:15px}
     .card{padding:12px 11px;margin-bottom:14px} .card h2{font-size:12px}
@@ -54,15 +61,19 @@
 </div>
 
 <header style="display:none" id="app">
-  <h1>🏕️ Pricing Control</h1>
+  <h1>🏕️ Parkside</h1>
+  <div id="viewTabs" style="display:inline-flex;gap:6px;margin-left:4px">
+    <button id="tabPricing" class="seg on" onclick="switchView('pricing')">Pricing</button>
+    <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
+  </div>
   <span class="muted" id="horizon"></span>
   <span class="sp"></span>
-  <div class="toggle">
+  <div class="toggle" id="syncWrap">
     <span class="muted">Auto-sync to OwnerRez</span>
     <div class="switch" id="syncSwitch" onclick="toggleSync()"><div class="knob"></div></div>
     <span class="pill" id="syncState">OFF</span>
+    <button id="syncNow" class="ghost" onclick="syncNow()" style="display:none">Sync now</button>
   </div>
-  <button id="syncNow" class="ghost" onclick="syncNow()" style="display:none">Sync now</button>
 </header>
 
 <div class="wrap" id="main" style="display:none">
@@ -109,6 +120,32 @@
     <div class="cal" id="dows"></div>
     <div class="cal" id="grid"></div>
     <div class="legend">📌 purple = manual override (engine + cron never change it). Grey dashed = already booked on a channel (imported into OwnerRez).</div>
+  </div>
+</div>
+
+<div class="wrap" id="msgMain" style="display:none">
+  <div class="card" style="border-color:var(--accent)">
+    <h2>Messaging — guest auto-response knowledge base</h2>
+    <div class="legend">This is the information the assistant is allowed to use when answering guests. It answers <b>only</b> from what's saved here and never makes things up; if an answer isn't here it flags the question to escalate. Edit any answer and Save. <b>Nothing is auto-sent yet</b> — this is the editable data store plus a preview tester.</div>
+  </div>
+  <div class="card">
+    <h2>Message formatting / style</h2>
+    <textarea id="kbFormat" class="full" placeholder="Paste your formatting samples here — how you want guest messages to look (greeting, tone, sign-off, structure). The assistant will match this."></textarea>
+  </div>
+  <div class="card">
+    <h2>Pre-saved answers (topic &rarr; answer)</h2>
+    <div id="kbList"></div>
+    <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="ghost" onclick="addKbItem()">+ Add topic</button>
+      <button onclick="saveKB()">Save knowledge base</button>
+      <span id="kbStatus" class="muted" style="align-self:center"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>AI answer preview <span class="muted" style="font-weight:400;text-transform:none">(test only — nothing is sent to any guest)</span></h2>
+    <textarea id="aiQ" class="full" style="min-height:60px" placeholder="Type a sample guest question, e.g. 'What time is checkout and is there parking?'"></textarea>
+    <div style="margin-top:10px;display:flex;gap:10px"><button onclick="aiPreview()">Preview AI answer</button><span id="aiStatus" class="muted" style="align-self:center"></span></div>
+    <div id="aiOut" class="legend" style="white-space:pre-wrap;margin-top:10px"></div>
   </div>
 </div>
 
@@ -246,10 +283,40 @@ async function loadLearning(){
   document.getElementById('learnTable').innerHTML=h;
   document.getElementById('learnNote').textContent=`Each lever blends a seeded prior with what it learns from real booking outcomes; the learned weight grows with data, so today values sit ≈ seed. Logged so far: ${paceN} booking events + ${j.snapshotCells||0} nightly snapshot cells. Rules of thumb before a lever moves materially: pace curve ~150+ bookings; each unit premium ~60+ of its own bookings; each gap/premium lever dozens of exposure-days.`;
 }
+let MSG_BUILT=false; let KB={format:"",items:[]};
+function switchView(v){
+  const pricing=v!=='messaging';
+  document.getElementById('main').style.display=pricing?'block':'none';
+  document.getElementById('msgMain').style.display=pricing?'none':'block';
+  document.getElementById('tabPricing').className='seg'+(pricing?' on':'');
+  document.getElementById('tabMsg').className='seg'+(pricing?'':' on');
+  document.getElementById('horizon').style.display=pricing?'':'none';
+  if(pricing){ document.getElementById('syncWrap').style.display=''; setSyncUI(); }
+  else { document.getElementById('syncWrap').style.display='none'; }
+  if(!pricing && !MSG_BUILT){ renderMessaging(); MSG_BUILT=true; }
+}
+function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function renderMessaging(){ KB=JSON.parse(JSON.stringify(STATE.kb||{format:"",items:[]})); document.getElementById('kbFormat').value=KB.format||""; drawKb(); }
+function drawKb(){ const el=document.getElementById('kbList'); el.innerHTML=(KB.items||[]).map((it,i)=>`<div class='kbitem'><input class='topic' value="${esc(it.topic).replace(/\"/g,'&quot;')}" oninput="KB.items[${i}].topic=this.value"><textarea oninput="KB.items[${i}].a=this.value" placeholder="(answer — leave blank if unknown)">${esc(it.a)}</textarea><button class='seg-x' title='remove' onclick="removeKbItem(${i})">&#10005;</button></div>`).join(""); }
+function addKbItem(){ KB.items=KB.items||[]; KB.items.push({topic:"",a:""}); drawKb(); }
+function removeKbItem(i){ KB.items.splice(i,1); drawKb(); }
+async function saveKB(){ KB.format=document.getElementById('kbFormat').value; document.getElementById('kbStatus').textContent="Saving…";
+  const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({kb:KB})});
+  if(r.ok){ STATE.kb=JSON.parse(JSON.stringify(KB)); document.getElementById('kbStatus').textContent="Saved \u2713 ("+(KB.items||[]).filter(i=>i.a&&i.a.trim()).length+" answers filled)"; }
+  else document.getElementById('kbStatus').textContent="Save failed"; }
+async function aiPreview(){ const q=document.getElementById('aiQ').value.trim(); if(!q) return;
+  document.getElementById('aiStatus').textContent="Thinking…"; document.getElementById('aiOut').textContent="";
+  try{ const r=await fetch(api('ai_draft'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({question:q})}); const j=await r.json();
+    document.getElementById('aiStatus').textContent="";
+    if(j.needKey){ document.getElementById('aiOut').textContent="\u26a0\ufe0f Anthropic API key not set on the server yet. Paste ANTHROPIC_API_KEY in Vercel \u2192 Settings \u2192 Environment Variables, redeploy, then try again."; return; }
+    if(j.error){ document.getElementById('aiOut').textContent="Error: "+j.error+(j.detail?(" \u2014 "+j.detail):""); return; }
+    document.getElementById('aiOut').textContent=(j.escalate?"[Would escalate to Victor \u2014 not in saved answers]\n\n":"")+(j.draft||""); }
+  catch(e){ document.getElementById('aiStatus').textContent=""; document.getElementById('aiOut').textContent="Error: "+e.message; }
+}
 function boot(){
   const n=new Date(); const sY=n.getUTCFullYear(),sM=n.getUTCMonth(); const e=new Date(n); e.setUTCDate(e.getUTCDate()+365); const eY=e.getUTCFullYear(),eM=e.getUTCMonth();
   HMIN=sY*12+sM; HMAX=eY*12+eM;
-  document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611a`;
+  document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611b`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
   view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning();
 }
