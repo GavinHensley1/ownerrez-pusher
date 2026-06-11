@@ -172,6 +172,23 @@ module.exports=async(req,res)=>{
       if(!st.auto_sync) return res.status(200).json({mode:"COMPUTED_NO_SYNC",auto_sync:false,computed:rates.length,wrote:false,bookedNights:booked.total,logged,note:"auto-sync OFF — nothing written"});
       const r=await pushOwnerRez(rates); return res.status(r.ownerrezOk?200:502).json({mode:"LIVE_SYNC",auto_sync:true,bookedNights:booked.total,logged,overrides:rates.filter(x=>x.overridden).length,...r});
     }
+    if(action==="explain"){
+      const st=await getState(); const sig=await getSignal(); const learned=await getLearned();
+      const booked=await getBooked(st,today,days); const agg=buildAgg(booked,today,days);
+      const months=monthList(today,days); const avg=a=>a.length?Math.round(a.reduce((x,y)=>x+y,0)/a.length):null;
+      const byMonth={};
+      for(const mk of months){ const we=[],wd=[]; for(const d in sig){ if(d.slice(0,7)!==mk)continue; (isWe(new Date(d+"T00:00:00Z"))?we:wd).push(sig[d]); }
+        byMonth[mk]={avgWd:avg(wd),avgWe:avg(we),minWd:wd.length?Math.min(...wd):null,maxWe:we.length?Math.max(...we):null}; }
+      const allv=Object.values(sig);
+      let breakdown=null;
+      if(req.query&&req.query.date){ const ds=req.query.date; const u=UNITS.find(x=>String(x.orp)===String(req.query.unit))||UNITS[0]; const d=new Date(ds+"T00:00:00Z"); const we=isWe(d),dt=we?1:0,dtN=we?"weekend":"weekday",mk=ds.slice(0,7);
+        let s=sig[ds]; const sigMissing=(s==null); if(s==null)s=signalFallback(sig,ds); const base=Math.max(FLOOR,Math.min(CEIL,s+u.offset));
+        const tg=targetFor(d,st.targets); const lead=monthLead(ds,today); const pf=paceFrac(lead,dtN,learned); const exp=tg*pf;
+        const ua=agg.unitAgg[u.orp][mk]&&agg.unitAgg[u.orp][mk][dt], pa=agg.poolAgg[mk]&&agg.poolAgg[mk][dt];
+        const unitOcc=ua&&ua.t?ua.b/ua.t:0, poolOcc=pa&&pa.t?pa.b/pa.t:0; const final=priceNight(base,poolOcc,unitOcc,exp);
+        breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,offset:u.offset,base,target:tg,monthLead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),rGap:Number((poolOcc-exp).toFixed(3)),final}; }
+      return res.status(200).json({refId:process.env.PRICELABS_REF_ID||"486915",sigDays:Object.keys(sig).length,sigMin:allv.length?Math.min(...allv):null,sigMax:allv.length?Math.max(...allv):null,sigAvg:avg(allv),byMonth,breakdown});
+    }
     res.status(400).json({error:"unknown action"});
   }catch(e){ res.status(500).json({error:String(e.message||e)}); }
 };
