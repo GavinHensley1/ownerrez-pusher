@@ -117,7 +117,7 @@ async function getLearned(){ const ev=(redis&&await redis.get("parkside:events")
 
 module.exports=async(req,res)=>{
   try{
-    const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=570;
+    const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
     if(action==="state"){
       if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=(s.icals[u.orp]||[]).length;
         return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,overrides:s.overrides||{},icalCount}); }
