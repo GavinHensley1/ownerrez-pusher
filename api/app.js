@@ -42,11 +42,12 @@ const KB_SEED={format:"",items:[
   {topic:"Quiet hours",a:""},{topic:"Early check-in / late checkout",a:""},
   {topic:"Cancellation policy",a:""},{topic:"Emergency / who to contact",a:""}
 ]};
-const DEFAULTS={targets:SEED_TARGETS,auto_sync:false,overrides:{},icals:{},kb:KB_SEED};
+const DEFAULTS={targets:SEED_TARGETS,auto_sync:false,overrides:{},kb:KB_SEED};
+const OWNERREZ_ICAL={486910:"https://app.ownerrez.com/feeds/ical/8f39d35971614fe68f65c2d60ebee98a",486911:"https://app.ownerrez.com/feeds/ical/8b443e66b91d42f78312c1b96456e721",486912:"https://app.ownerrez.com/feeds/ical/c11b9bdcccd0407b94a471ec1d4bf184",486913:"https://app.ownerrez.com/feeds/ical/6b7aadd1089a4545acfd76d4896cd1f4",486891:"https://app.ownerrez.com/feeds/ical/a803006016a94e429b22c4af21655c6e",486914:"https://app.ownerrez.com/feeds/ical/a6a81900436e48538ca68c999084a00f",486915:"https://app.ownerrez.com/feeds/ical/a33c27437b734216b0f153e4d112673b",486916:"https://app.ownerrez.com/feeds/ical/2fc1ac9ea2a744708fe515fec9a45543",486917:"https://app.ownerrez.com/feeds/ical/b5e770592bfe401c93c472df3ca912e1",486918:"https://app.ownerrez.com/feeds/ical/5706333006cf4e34a1ed058c9f3a695a"}; // OwnerRez availability/blocks = single occupancy source
 const SKEY="parkside:state";
 
 async function getState(){ if(!redis) return JSON.parse(JSON.stringify(DEFAULTS)); const s=await redis.get(SKEY); return {...JSON.parse(JSON.stringify(DEFAULTS)),...(s||{})}; }
-async function setState(p){ const cur=await getState(); const next={...cur,...p}; if(redis) await redis.set(SKEY,next); return next; }
+async function setState(p){ const cur=await getState(); const next={...cur,...p}; delete next.icals; if(redis) await redis.set(SKEY,next); return next; }
 const isWe=d=>KNOBS.weekendDays.includes(d.getUTCDay());
 function targetFor(d,t){ const m=t[d.getUTCMonth()+1]; return isWe(d)?m.we:m.wd; }
 function monthLead(ds,today){ const first=new Date(ds.slice(0,7)+"-01T00:00:00Z"); const t=new Date(today+"T00:00:00Z"); return Math.max(0,Math.round((first-t)/86400000)); }
@@ -76,15 +77,15 @@ async function getSignal(){
 function parseIcs(text){ const out=[]; const blocks=String(text).split("BEGIN:VEVENT").slice(1);
   for(const b of blocks){ const a=(b.match(/DTSTART[^:\n]*:(\d{8})/)||[])[1]; const c=(b.match(/DTEND[^:\n]*:(\d{8})/)||[])[1]; if(a&&c) out.push([a,c]); } return out; }
 async function getBooked(state,start,days,useCache=true){
-  if(useCache&&redis){ const c=await redis.get("parkside:booked"); if(c&&(Date.now()-c.ts)<3600000) return {byUnit:c.byUnit,total:c.total,channels:c.channels}; }
-  const icals=(state&&state.icals)||{}; const out={}; for(const u of UNITS)out[u.orp]={};
+  if(useCache&&redis){ const c=await redis.get("parkside:booked2"); if(c&&(Date.now()-c.ts)<3600000) return {byUnit:c.byUnit,total:c.total,channels:c.channels}; }
+  const out={}; for(const u of UNITS)out[u.orp]={};
   const s=new Date(start+"T00:00:00Z"); const end=new Date(s); end.setUTCDate(end.getUTCDate()+days); let total=0; const channels={};
-  for(const u of UNITS){ const urls=icals[u.orp]||[]; channels[u.orp]=0;
+  for(const u of UNITS){ const urls=[OWNERREZ_ICAL[u.orp]].filter(Boolean); channels[u.orp]=0;
     for(const url of urls){ try{ const r=await fetch(url,{headers:{"User-Agent":"parkside-control/1.0"}}); if(!r.ok) continue; const t=await r.text(); channels[u.orp]++;
       for(const [a,c] of parseIcs(t)){ let d=new Date(a.slice(0,4)+"-"+a.slice(4,6)+"-"+a.slice(6,8)+"T00:00:00Z"); const e=new Date(c.slice(0,4)+"-"+c.slice(4,6)+"-"+c.slice(6,8)+"T00:00:00Z");
         for(;d<e;d.setUTCDate(d.getUTCDate()+1)){ if(d>=s&&d<end){ const k=d.toISOString().slice(0,10); if(!out[u.orp][k]){out[u.orp][k]=true; total++;} } } }
     }catch{} } }
-  if(redis) await redis.set("parkside:booked",{ts:Date.now(),byUnit:out,total,channels}); return {byUnit:out,total,channels};
+  if(redis) await redis.set("parkside:booked2",{ts:Date.now(),byUnit:out,total,channels}); return {byUnit:out,total,channels};
 }
 function buildAgg(booked,start,days){
   const s=new Date(start+"T00:00:00Z"); const unitAgg={},poolAgg={},nightPool={}; for(const u of UNITS)unitAgg[u.orp]={};
@@ -203,15 +204,15 @@ module.exports=async(req,res)=>{
   try{
     const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
     if(action==="state"){
-      if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=(s.icals[u.orp]||[]).length;
-        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,overrides:s.overrides||{},icalCount,kb:s.kb||KB_SEED}); }
+      if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=OWNERREZ_ICAL[u.orp]?1:0;
+        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,overrides:s.overrides||{},icalCount,occupancySource:'ownerrez',kb:s.kb||KB_SEED}); }
       if(req.method==="POST"){ if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
         let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{return res.status(400).json({error:"bad json"});}}
         const cur=await getState(); const p={};
-        if(b&&b.targets)p.targets=b.targets; if(b&&typeof b.auto_sync==="boolean")p.auto_sync=b.auto_sync; if(b&&b.icals)p.icals=b.icals; if(b&&b.kb)p.kb=b.kb;
+        if(b&&b.targets)p.targets=b.targets; if(b&&typeof b.auto_sync==="boolean")p.auto_sync=b.auto_sync; if(b&&b.kb)p.kb=b.kb;
         if(b&&b.overrideSet){ const o={...(cur.overrides||{})}; o[b.overrideSet.property_id+"|"+b.overrideSet.date]=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(b.overrideSet.amount)))); p.overrides=o; }
         if(b&&b.overrideClear){ const o={...(cur.overrides||{})}; delete o[b.overrideClear.property_id+"|"+b.overrideClear.date]; p.overrides=o; }
-        const n=await setState(p); if(redis&&b.icals) await redis.del("parkside:booked"); return res.status(200).json({ok:true,auto_sync:n.auto_sync}); }
+        const n=await setState(p); if(redis) await redis.del("parkside:booked2"); return res.status(200).json({ok:true,auto_sync:n.auto_sync}); }
       return res.status(405).json({error:"GET or POST"});
     }
     if(action==="occupancy"){
@@ -259,8 +260,9 @@ module.exports=async(req,res)=>{
       const key=process.env.ANTHROPIC_API_KEY; if(!key) return res.status(200).json({needKey:true,error:"ANTHROPIC_API_KEY not set on the server yet"});
       const st=await getState(); const kb=st.kb||KB_SEED;
       const facts=(kb.items||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
+      const unknown=(kb.items||[]).filter(i=>i&&i.topic&&!(i.a&&String(i.a).trim())).map(i=>i.topic).join(", ");
       const fmt=(kb.format&&kb.format.trim())?("\n\nFORMATTING / STYLE the host wants you to match:\n"+kb.format):"";
-      const sys="You draft a reply to a guest for Parkside Tepees (glamping tepees inside Parkside Resort, Pigeon Forge / Sevierville TN). STRICT RULE: use ONLY facts explicitly written in KNOWN INFO below. You have NO other knowledge about this property. If the guest question is not directly and fully answered by KNOWN INFO, reply with EXACTLY this and nothing else: ESCALATE: <one-line restatement of the question>. Never guess or fall back on what is typical for vacation rentals \u2014 this includes pet, smoking, parking, wifi, occupancy, early/late checkout and amenity questions: if it is not written below, you MUST ESCALATE. When you do answer, use only KNOWN INFO and match the host style."+fmt+"\n\nKNOWN INFO:\n"+(facts||"(none saved yet)");
+      const sys="You draft a reply to a guest for Parkside Tepees (glamping tepees inside Parkside Resort, Pigeon Forge / Sevierville TN). STRICT RULE: use ONLY facts explicitly written in KNOWN INFO below. You have NO other knowledge about this property. If the guest question is not directly and fully answered by KNOWN INFO, reply with EXACTLY this and nothing else: ESCALATE: <one-line restatement of the question>. Never guess or fall back on what is typical for vacation rentals \u2014 this includes pet, smoking, parking, wifi, occupancy, early/late checkout and amenity questions: if it is not written below, you MUST ESCALATE. When you do answer, use only KNOWN INFO and match the host style."+fmt+"\n\nKNOWN INFO:\n"+(facts||"(none saved yet)")+"\n\nTOPICS WITH NO SAVED ANSWER (you do NOT know these \u2014 if the guest asks about any of them, you MUST reply with the ESCALATE line; never guess): "+(unknown||"(none)");
       try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0,system:sys,messages:[{role:"user",content:String(question)}]})});
         const j=await r.json(); if(!r.ok) return res.status(200).json({error:"Anthropic API error",detail:JSON.stringify(j).slice(0,300)});
         const text=((j.content&&j.content[0]&&j.content[0].text)||"").trim(); return res.status(200).json({draft:text,escalate:/^ESCALATE:/i.test(text),sent:false}); }
