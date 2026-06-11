@@ -316,7 +316,7 @@ async function aiPreview(){ const q=document.getElementById('aiQ').value.trim();
 function boot(){
   const n=new Date(); const sY=n.getUTCFullYear(),sM=n.getUTCMonth(); const e=new Date(n); e.setUTCDate(e.getUTCDate()+365); const eY=e.getUTCFullYear(),eM=e.getUTCMonth();
   HMIN=sY*12+sM; HMAX=eY*12+eM;
-  document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611b`;
+  document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611c`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
   view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning();
 }
