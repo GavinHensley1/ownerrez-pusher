@@ -2,7 +2,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Parkside Tepees — Pricing Control</title>
 <style>
-  :root{--bg:#0f1720;--card:#16212e;--ink:#e7eef6;--mut:#9fb0c0;--line:#26354a;--accent:#ff6b4a;--ok:#2ecc71;--warn:#f4b942;--pin:#8b5cf6}
+  :root{--bg:#0f1720;--card:#16212e;--ink:#e7eef6;--mut:#9fb0c0;--line:#26354a;--accent:#ff6b4a;--ok:#2ecc71;--warn:#f4b942;--pin:#8b5cf6;--book:#5a6675}
   *{box-sizing:border-box} body{margin:0;font:14px/1.45 system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--ink)}
   header{display:flex;align-items:center;gap:16px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--card);flex-wrap:wrap}
   h1{font-size:16px;margin:0;font-weight:700} .sp{flex:1}
@@ -13,15 +13,18 @@
   button{background:var(--accent);color:#fff;border:0;border-radius:7px;padding:8px 14px;font-weight:600;cursor:pointer}
   button.ghost{background:transparent;border:1px solid var(--line);color:var(--ink)}
   select,input{background:#0c141d;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:6px 8px}
-  table{border-collapse:collapse;width:100%} td,th{border:1px solid var(--line);padding:5px 7px;text-align:center}
+  table{border-collapse:collapse} td,th{border:1px solid var(--line);padding:5px 7px;text-align:center;white-space:nowrap}
   th{color:var(--mut);font-weight:600;font-size:12px}
-  .tgrid input{width:58px;text-align:center}
+  .tgrid{width:100%} .tgrid input{width:58px;text-align:center}
+  .scroll{overflow-x:auto} .occ td:first-child,.occ th:first-child{position:sticky;left:0;background:var(--card);text-align:left}
+  .occ td.hot{color:#7CFC9E} .occ td.cold{color:#ff9a8a}
   .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
   .dow{color:var(--mut);font-size:11px;text-align:center;padding:4px 0}
   .day{background:#0c141d;border:1px solid var(--line);border-radius:7px;min-height:60px;padding:5px 6px;position:relative;cursor:pointer}
   .day:hover{border-color:var(--accent)} .day .d{font-size:11px;color:var(--mut)} .day .p{font-size:15px;font-weight:700;margin-top:4px}
   .day.we{outline:1px solid #2b3b52} .day.empty{background:transparent;border:0;cursor:default}
   .day.pin{border-color:var(--pin);background:#1b1430} .day .pinmark{position:absolute;top:4px;right:5px;font-size:11px}
+  .day.booked{background:#1a2230;border-style:dashed;border-color:var(--book);opacity:.8} .day.booked .p{color:var(--book)} .day .bk{position:absolute;top:4px;left:5px;font-size:9px;color:var(--book);text-transform:uppercase;letter-spacing:.05em}
   .toggle{display:inline-flex;align-items:center;gap:8px}
   .switch{width:46px;height:26px;border-radius:999px;background:#3a4759;position:relative;transition:.15s;cursor:pointer}
   .switch.on{background:var(--ok)} .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.15s}
@@ -57,6 +60,12 @@
   </div>
 
   <div class="card">
+    <h2>Current occupancy % (actual, from OwnerRez)</h2>
+    <div class="scroll"><table class="occ" id="occTable"></table></div>
+    <div class="legend" id="occNote"></div>
+  </div>
+
+  <div class="card">
     <h2>Monthly occupancy targets (revenue-max holds these)</h2>
     <table class="tgrid" id="targets"></table>
     <div style="margin-top:12px;display:flex;gap:10px">
@@ -64,11 +73,11 @@
       <button class="ghost" onclick="saveTargets()">Save targets</button>
       <span id="tStatus" class="muted" style="align-self:center"></span>
     </div>
-    <div class="legend">Prices clamp to $99–$300. <b>Actual occupancy ≥ target → price rises</b> (toward $300); <b>below target → discounts</b> (toward $99). When OwnerRez shows no bookings yet, the engine prices at market (neutral) instead of flooring.</div>
+    <div class="legend">Weekend = <b>Fri + Sat</b>; weekday = <b>Sun–Thu</b>. Prices clamp to $99–$300. Actual occupancy ≥ target → price rises; below target → discounts. With no OwnerRez bookings yet, prices sit at market (neutral).</div>
   </div>
 
   <div class="card">
-    <h2>Calendar — prices by unit &nbsp;<span class="muted" style="font-weight:400;text-transform:none">(click any day to pin/clear a fixed price 📌)</span></h2>
+    <h2>Calendar — prices by unit &nbsp;<span class="muted" style="font-weight:400;text-transform:none">(click a day to pin/clear a fixed price 📌)</span></h2>
     <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
       <select id="unit" onchange="render()"></select>
       <button class="ghost" onclick="moveMonth(-1)">‹</button>
@@ -79,14 +88,14 @@
     </div>
     <div class="cal" id="dows"></div>
     <div class="cal" id="grid"></div>
-    <div class="legend">📌 purple = manual override (engine + nightly sync will NOT change it). Click a 📌 cell to change or clear it.</div>
+    <div class="legend">📌 purple = manual override (engine + cron never change it). Grey dashed = already booked on a channel (imported into OwnerRez).</div>
   </div>
 </div>
 
 <script>
 const UNITS=[["486910","Bear Claw"],["486911","Flyin' Horse"],["486912","Mustang Manor"],["486913","Soaring Dreams"],["486891","Arrowhead"],["486914","Sunset Stampede"],["486915","Buffalo Run"],["486916","Scarlet Antler"],["486917","Cub House"],["486918","Flyin' Free"]];
 const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-let PW="", STATE=null, RATES=null, view={unit:"486910", y:0, m:0};
+let PW="", STATE=null, RATES=null, OCC=null, view={unit:"486910", y:0, m:0};
 const api=a=>'/api/app?action='+a;
 
 function unlock(){
@@ -119,6 +128,16 @@ function setSyncUI(){
   document.getElementById('syncNow').style.display=on?'inline-block':'none';
   document.getElementById('banner').style.display=on?'none':'block';
 }
+async function loadOccupancy(){
+  try{ const r=await fetch(api('occupancy')); OCC=await r.json(); }catch{ OCC={units:[],months:[],byUnit:{},totalBooked:0}; }
+  const el=document.getElementById('occTable');
+  if(!OCC.months||!OCC.months.length){ el.innerHTML=""; document.getElementById('occNote').textContent="No data."; return; }
+  let h="<tr><th>Unit</th>"+OCC.months.map(mk=>{const[y,m]=mk.split('-');return `<th>${MON[+m-1]} '${y.slice(2)}</th>`;}).join("")+"</tr>";
+  for(const u of OCC.units){ const mo=(OCC.byUnit[u.orp]||{}).monthly||{};
+    h+=`<tr><td>${u.name}</td>`+OCC.months.map(mk=>{const v=mo[mk]||0;const c=v>=60?'hot':(v<30?'cold':'');return `<td class='${c}'>${v}%</td>`;}).join("")+"</tr>"; }
+  el.innerHTML=h;
+  document.getElementById('occNote').textContent = OCC.totalBooked>0 ? `${OCC.totalBooked} booked unit-nights imported into OwnerRez.` : "0 bookings in OwnerRez yet — populates once a channel's calendar is connected (Part 1). Until then the engine has no occupancy signal and prices at market.";
+}
 async function applyPreview(){
   document.getElementById('tStatus').textContent="Computing preview…";
   const r=await fetch(api('preview'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targets:readTargets()})});
@@ -145,12 +164,13 @@ async function syncNow(){
   document.getElementById('syncNow').textContent="Sync now";
   alert(j.mode==='LIVE_SYNC'?`Pushed ${j.sent} rates to OwnerRez (status ${j.ownerrezStatus}). ${j.overrides} pinned.`:JSON.stringify(j));
 }
+function isBooked(unit,ds){ return !!(OCC&&OCC.byUnit&&OCC.byUnit[unit]&&OCC.byUnit[unit].booked&&OCC.byUnit[unit].booked.includes(ds)); }
 async function onCell(ds){
+  if(isBooked(view.unit,ds)){ alert("This night is already booked on a channel — not for sale."); return; }
   const unit=view.unit, cur=(RATES[unit]&&RATES[unit][ds])||{};
   const uname=UNITS.find(u=>u[0]===unit)[1];
-  const msg=`${uname} — ${ds}\nCurrent: $${cur.a}${cur.o?' (pinned)':''}\n\nEnter a fixed price to pin (engine won't change it).\nLeave blank and OK to CLEAR a pin and return to engine pricing.`;
-  const val=prompt(msg, cur.o?cur.a:"");
-  if(val===null) return; // cancelled
+  const val=prompt(`${uname} — ${ds}\nCurrent: $${cur.a}${cur.o?' (pinned)':''}\n\nEnter a fixed price to pin (engine won't change it).\nLeave blank + OK to CLEAR a pin and return to engine pricing.`, cur.o?cur.a:"");
+  if(val===null) return;
   let body;
   if(val.trim()==="") body={overrideClear:{property_id:Number(unit),date:ds}};
   else { const n=Math.round(Number(val)); if(!(n>=50&&n<=1000)){ alert("Enter a number between 50 and 1000."); return; } body={overrideSet:{property_id:Number(unit),date:ds,amount:n}}; }
@@ -164,20 +184,21 @@ function render(){
   document.getElementById('monthLbl').textContent=MON[view.m]+" "+view.y;
   document.getElementById('dows').innerHTML=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>`<div class='dow'>${d}</div>`).join("");
   const start=new Date(Date.UTC(view.y,view.m,1)).getUTCDay(), days=new Date(Date.UTC(view.y,view.m+1,0)).getUTCDate();
-  const map=(RATES&&RATES[view.unit])||{}; let cells="",sum=0,n=0,mn=1e9,mx=0,pins=0;
+  const map=(RATES&&RATES[view.unit])||{}; let cells="",sum=0,n=0,mn=1e9,mx=0,pins=0,bk=0;
   for(let i=0;i<start;i++) cells+="<div class='day empty'></div>";
   for(let d=1;d<=days;d++){
     const ds=`${view.y}-${String(view.m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const dow=new Date(Date.UTC(view.y,view.m,d)).getUTCDay(); const we=(dow===5||dow===6);
-    const c=map[ds]; const p=c&&c.a; const o=c&&c.o; if(p){sum+=p;n++;mn=Math.min(mn,p);mx=Math.max(mx,p); if(o)pins++;}
-    cells+=`<div class='day${we?' we':''}${o?' pin':''}' onclick="onCell('${ds}')">${o?"<span class='pinmark'>📌</span>":""}<div class='d'>${d}</div><div class='p'>${p?'$'+p:'—'}</div></div>`;
+    const c=map[ds]; const p=c&&c.a; const o=c&&c.o; const booked=isBooked(view.unit,ds);
+    if(p&&!booked){sum+=p;n++;mn=Math.min(mn,p);mx=Math.max(mx,p); if(o)pins++;} if(booked)bk++;
+    cells+=`<div class='day${we?' we':''}${o?' pin':''}${booked?' booked':''}' onclick="onCell('${ds}')">${booked?"<span class='bk'>booked</span>":""}${o&&!booked?"<span class='pinmark'>📌</span>":""}<div class='d'>${d}</div><div class='p'>${p?'$'+p:'—'}</div></div>`;
   }
   document.getElementById('grid').innerHTML=cells;
-  document.getElementById('calStats').textContent=n?`avg $${Math.round(sum/n)} · $${mn}–$${mx}`+(pins?` · ${pins} pinned`:""):"no preview yet";
+  document.getElementById('calStats').textContent=(n?`avg $${Math.round(sum/n)} · $${mn}–$${mx}`:"no preview")+(pins?` · ${pins} pinned`:"")+(bk?` · ${bk} booked`:"");
 }
 function boot(){
   document.getElementById('horizon').textContent="Jun 2026 → Dec 2027";
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
-  view.y=2026; view.m=5; buildTargets(); setSyncUI(); applyPreview();
+  view.y=2026; view.m=5; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview);
 }
 </script></body></html>
