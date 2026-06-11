@@ -63,6 +63,9 @@
     <h2>Current occupancy % (actual, from OwnerRez)</h2>
     <div class="scroll"><table class="occ" id="occTable"></table></div>
     <div class="legend" id="occNote"></div>
+    <h2 style="margin-top:18px">Resort pace vs target (ahead ▲ / behind ▼)</h2>
+    <div class="scroll"><table class="occ" id="paceTable"></table></div>
+    <div class="legend" id="paceNote"></div>
   </div>
 
   <div class="card">
@@ -136,6 +139,16 @@ async function loadOccupancy(){
   for(const u of OCC.units){ const mo=(OCC.byUnit[u.orp]||{}).monthly||{};
     h+=`<tr><td>${u.name}</td>`+OCC.months.map(mk=>{const v=mo[mk]||0;const c=v>=60?'hot':(v<30?'cold':'');return `<td class='${c}'>${v}%</td>`;}).join("")+"</tr>"; }
   el.innerHTML=h;
+  const pt=document.getElementById('paceTable');
+  if(OCC.pace&&OCC.months&&OCC.months.length){
+    let h="<tr><th>Day-type</th>"+OCC.months.map(mk=>{const a=mk.split('-');return `<th>${MON[+a[1]-1]} '${a[0].slice(2)}</th>`;}).join("")+"</tr>";
+    for(const pair of [["Weekend","wknd"],["Weekday","wkdy"]]){
+      h+=`<tr><td>${pair[0]}</td>`+OCC.months.map(mk=>{const c=OCC.pace[mk][pair[1]];const ah=c.status==='ahead';return `<td class='${ah?'hot':'cold'}'>${c.act}/${c.exp}% ${ah?'▲':'▼'}</td>`;}).join("")+"</tr>";
+    }
+    pt.innerHTML=h;
+    const pl=OCC.paceLearn||{weekend:0,weekday:0,blendWeight:'0.00'};
+    document.getElementById('paceNote').textContent=`Cells show actual / pace-target occupancy for each month at today's lead time. ▲ ahead of pace → prices lift; ▼ behind → prices soften. Pace curve = seeded default booking-pace, blended with learning from real bookings (learned weight ${pl.blendWeight}; ${(pl.weekend+pl.weekday)} booking events logged so far).`;
+  }
   document.getElementById('occNote').textContent = OCC.totalBooked>0 ? `${OCC.totalBooked} booked unit-nights imported into OwnerRez.` : "0 bookings in OwnerRez yet — populates once a channel's calendar is connected (Part 1). Until then the engine has no occupancy signal and prices at market.";
 }
 async function applyPreview(){
