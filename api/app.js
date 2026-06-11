@@ -80,7 +80,16 @@ function buildAgg(booked,start,days){
     for(const u of UNITS){ if(!unitAgg[u.orp][mk])unitAgg[u.orp][mk]=[{b:0,t:0},{b:0,t:0}];
       unitAgg[u.orp][mk][dt].t++; poolAgg[mk][dt].t++; if(booked.byUnit[u.orp][ds]){ unitAgg[u.orp][mk][dt].b++; poolAgg[mk][dt].b++; nb++; } }
     nightPool[ds]=nb/UNITS.length; }
-  return {unitAgg,poolAgg,nightPool};
+  // Per-unit orphan/short-gap detection: maximal runs of OPEN nights trapped (booked on BOTH sides) within the horizon.
+  const gaps={}; for(const u of UNITS)gaps[u.orp]={};
+  const dsAt=i=>{const d=new Date(s);d.setUTCDate(d.getUTCDate()+i);return d.toISOString().slice(0,10);};
+  for(const u of UNITS){ const B=x=>!!booked.byUnit[u.orp][x]; let i=0;
+    while(i<days){ if(B(dsAt(i))){i++;continue;} let j=i; const run=[]; while(j<days&&!B(dsAt(j))){run.push(dsAt(j));j++;}
+      const trapped = i>0 && B(dsAt(i-1)) && j<days && B(dsAt(j)); const runLen=run.length;
+      const hasWeekend=run.some(x=>WEEKEND_DAYS.includes(new Date(x+"T00:00:00Z").getUTCDay()));
+      if(trapped && runLen<=3){ const gm=gapMultiplier(runLen,hasWeekend); for(const x of run) gaps[u.orp][x]={runLen,hasWeekend,gm}; }
+      i=j; } }
+  return {unitAgg,poolAgg,nightPool,gaps};
 }
 // Bounded, lead-scaled adjustment ON TOP of the seasonal base (=PriceLabs signal x unit premium).
 // delta = how far ahead/behind the pace trajectory we are. sens(lead) shrinks the reaction far out
@@ -94,6 +103,9 @@ function paceMult(poolOcc,exp,lead){ // pace lever only (ahead/behind the trajec
 // Night-level scarcity: how full the WHOLE resort is for this specific night (our portfolio edge).
 // Revealed real-time demand lifts the last remaining units even when the market base reads low.
 function scarMult(nightOcc,lead){ const sens=interp(SENS,lead); const thr=MODEL.SCAR_FAR-(MODEL.SCAR_FAR-MODEL.SCAR_NEAR)*sens; return Math.min(MODEL.SCAR_CAP,Math.max(0,nightOcc-thr)*MODEL.SCAR_GAIN)*sens; }
+// Orphan / short-gap discount: short open runs TRAPPED between two stays are hard to fill (guests want
+// longer and/or weekend-inclusive stays), so discount by awkwardness. Weekend anchor in the gap -> easier -> smaller cut.
+function gapMultiplier(runLen,hasWeekend){ let d=runLen===1?0.25:runLen===2?0.15:0.10; if(hasWeekend)d*=0.4; return 1-d; }
 function compute(signalMap,targets,today,startDate,days,occ,overrides,learned){
   const start=new Date(startDate+"T00:00:00Z"); const out=[]; overrides=overrides||{};
   const sv=Object.values(signalMap).filter(v=>v>0); const peakThr=(sv.length?median(sv):FLOOR)*MODEL.PEAK_MULT; // peak nights = top of the year
@@ -103,18 +115,20 @@ function compute(signalMap,targets,today,startDate,days,occ,overrides,learned){
     let ctx=null;
     if(occ.hasData&&occ.mock==null){ const ck=mk+"|"+dt; ctx=ctxCache[ck];
       if(ctx===undefined){ const lead=monthLead(mk+"-15",today); const tg=we?targets[mo].we:targets[mo].wd; const exp=tg*paceFrac(lead,dtN,learned); const pa=occ.agg.poolAgg[mk]&&occ.agg.poolAgg[mk][dt]; const poolOcc=pa&&pa.t?pa.b/pa.t:0; ctx={lead,exp,poolOcc}; ctxCache[ck]=ctx; } }
-    for(const u of UNITS){ const key=u.orp+"|"+ds; let amount,overridden=false;
+    for(const u of UNITS){ const key=u.orp+"|"+ds; let amount,overridden=false,orphan=false;
       if(overrides[key]!=null){ amount=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(overrides[key])))); overridden=true; }
       else { const base=sig*(UNIT_PREM[u.orp]||1.0);
         if(!occ.hasData){ amount=Math.max(FLOOR,Math.min(ceil,Math.round(base))); }
         else if(occ.mock!=null){ const lead=monthLead(mk+"-15",today); const tg=we?targets[mo].we:targets[mo].wd; const exp=tg*paceFrac(lead,dtN,learned); let m=paceMult(occ.mock,exp,lead)+scarMult(occ.mock,lead); if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m)); amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*m))); }
-        else { let m=paceMult(ctx.poolOcc,ctx.exp,ctx.lead)+scarMult((occ.agg.nightPool&&occ.agg.nightPool[ds])||0,ctx.lead);
-          const ua=occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt]; const unitOcc=ua&&ua.t?ua.b/ua.t:0; const sens=interp(SENS,ctx.lead);
-          let un=(unitOcc-ctx.poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); // gentle per-unit scarcity
-          if(peak)m=Math.max(1,m); // never discount a peak night below its seasonal market base
+        else { const g=occ.agg.gaps&&occ.agg.gaps[u.orp]&&occ.agg.gaps[u.orp][ds]; let m;
+          if(g){ orphan=true; m=paceMult(ctx.poolOcc,ctx.exp,ctx.lead)*g.gm; } // orphan: discount to fill; OVERRIDE scarcity premium & per-unit bump
+          else { m=paceMult(ctx.poolOcc,ctx.exp,ctx.lead)+scarMult((occ.agg.nightPool&&occ.agg.nightPool[ds])||0,ctx.lead);
+            const ua=occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt]; const unitOcc=ua&&ua.t?ua.b/ua.t:0; const sens=interp(SENS,ctx.lead);
+            let un=(unitOcc-ctx.poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); } // gentle per-unit scarcity
+          if(peak)m=Math.max(1,m); // peak nights never discounted below seasonal market base (peak wins over orphan)
           m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
           amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*m))); } }
-      out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",overridden}); } }
+      out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",overridden,orphan}); } }
   return out;
 }
 function validate(es){ const ok=[]; for(const e of es){ const pid=Number(e.property_id), amt=Number(e.amount);
@@ -208,14 +222,16 @@ module.exports=async(req,res)=>{
         const tg=we?st.targets[mo].we:st.targets[mo].wd; const lead=monthLead(mk+"-15",today); const pf=paceFrac(lead,dtN,learned); const exp=tg*pf;
         const ua=agg.unitAgg[u.orp][mk]&&agg.unitAgg[u.orp][mk][dt], pa=agg.poolAgg[mk]&&agg.poolAgg[mk][dt];
         const unitOcc=ua&&ua.t?ua.b/ua.t:0, poolOcc=pa&&pa.t?pa.b/pa.t:0;
-        const nightOcc=(agg.nightPool&&agg.nightPool[ds])||0; const scar=scarMult(nightOcc,lead);
-        let m=paceMult(poolOcc,exp,lead)+scar; const sens=interp(SENS,lead); let un=(unitOcc-poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
+        const nightOcc=(agg.nightPool&&agg.nightPool[ds])||0; const g=agg.gaps&&agg.gaps[u.orp]&&agg.gaps[u.orp][ds];
+        const sens=interp(SENS,lead); let scar=0,un=0,m;
+        if(g){ m=paceMult(poolOcc,exp,lead)*g.gm; } else { scar=scarMult(nightOcc,lead); m=paceMult(poolOcc,exp,lead)+scar; un=(unitOcc-poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); }
+        if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
         const final=Math.max(FLOOR,Math.min(peak?MODEL.PEAK_CEIL:CEIL,Math.round(base*m)));
-        breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,premium:prem,base:Math.round(base),peak,peakThr:Math.round(peakThr),target:tg,monthLead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),nightOcc:Number(nightOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),scar:Number(scar.toFixed(3)),sens:Number(sens.toFixed(2)),mult:Number(m.toFixed(3)),final}; }
+        breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,premium:prem,base:Math.round(base),peak,peakThr:Math.round(peakThr),target:tg,monthLead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),nightOcc:Number(nightOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),scar:Number(scar.toFixed(3)),orphan:g?{runLen:g.runLen,hasWeekend:g.hasWeekend,gm:g.gm}:null,sens:Number(sens.toFixed(2)),mult:Number(m.toFixed(3)),final}; }
       return res.status(200).json({refId:process.env.PRICELABS_REF_ID||"486915",sigDays:Object.keys(sig).length,sigMin:allv.length?Math.min(...allv):null,sigMax:allv.length?Math.max(...allv):null,sigAvg:avg(allv),byMonth,breakdown});
     }
     res.status(400).json({error:"unknown action"});
   }catch(e){ res.status(500).json({error:String(e.message||e)}); }
 };
 
-module.exports.__model={compute,paceMult,interp,SENS,MODEL,UNIT_PREM,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
+module.exports.__model={compute,paceMult,scarMult,gapMultiplier,interp,SENS,MODEL,UNIT_PREM,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
