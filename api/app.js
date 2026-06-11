@@ -266,6 +266,23 @@ module.exports=async(req,res)=>{
         const text=((j.content&&j.content[0]&&j.content[0].text)||"").trim(); return res.status(200).json({draft:text,escalate:/^ESCALATE:/i.test(text),sent:false}); }
       catch(e){ return res.status(200).json({error:"request failed: "+String(e.message||e)}); }
     }
+    if(action==="kb_learn"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
+      const st=await getState(); const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
+      const norm=x=>String(x||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
+      function upsert(topic,answer,src){ topic=String(topic||"").trim(); answer=String(answer||"").trim(); if(!answer) return null;
+        const nt=norm(topic); let it=nt?kb.items.find(x=>norm(x.topic)===nt):null;
+        if(it){ const changed=(it.a||"")!==answer; it.a=answer; if(src)it.src=src; return changed?"updated":"unchanged"; }
+        kb.items.push({topic:topic||answer.slice(0,40),a:answer,src:src||"learned"}); return "added"; }
+      // Accept: {entries:[{topic|question, a|answer, src}]} OR a single {topic|question, a|answer} OR {question,answer} (Victor flow)
+      const list = Array.isArray(b&&b.entries)?b.entries : ((b&&(b.topic||b.question))?[b]:[]);
+      let added=0,updated=0,unchanged=0;
+      for(const e of list){ const r=upsert(e.topic||e.question, (e.a!=null?e.a:e.answer), e.src); if(r==="added")added++; else if(r==="updated")updated++; else if(r==="unchanged")unchanged++; }
+      if(b&&typeof b.format==="string"&&b.format.trim()) kb.format=b.format;
+      await setState({kb});
+      return res.status(200).json({ok:true,added,updated,unchanged,total:kb.items.length});
+    }
     if(action==="explain"){
       const st=await getState(); const sig=await getSignal(); const learned=await getLearned();
       const booked=await getBooked(st,today,days); const agg=buildAgg(booked,today,days);
