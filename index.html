@@ -24,7 +24,7 @@
   .day:hover{border-color:var(--accent)} .day .d{font-size:11px;color:var(--mut)} .day .p{font-size:15px;font-weight:700;margin-top:4px}
   .day.we{outline:1px solid #2b3b52} .day.empty{background:transparent;border:0;cursor:default}
   .day.pin{border-color:var(--pin);background:#1b1430} .day .pinmark{position:absolute;top:4px;right:5px;font-size:11px}
-  .day.booked{background:#1a2230;border-style:dashed;border-color:var(--book);opacity:.8} .day.booked .p{color:var(--book)} .day .bk{position:absolute;top:4px;left:5px;font-size:9px;color:var(--book);text-transform:uppercase;letter-spacing:.05em}
+  .day.out{opacity:.28;border:1px dashed var(--line);cursor:default;background:transparent} .day.out .p{color:var(--muted)} .day.booked{background:#1a2230;border-style:dashed;border-color:var(--book);opacity:.8} .day.booked .p{color:var(--book)} .day .bk{position:absolute;top:4px;left:5px;font-size:9px;color:var(--book);text-transform:uppercase;letter-spacing:.05em}
   .toggle{display:inline-flex;align-items:center;gap:8px}
   .switch{width:46px;height:26px;border-radius:999px;background:#3a4759;position:relative;transition:.15s;cursor:pointer}
   .switch.on{background:var(--ok)} .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.15s}
@@ -118,8 +118,8 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
 function buildTargets(){
   const t=STATE.targets, el=document.getElementById('targets');
   let h="<tr><th>Month</th>"+MON.map(m=>`<th>${m}</th>`).join("")+"</tr>";
-  h+="<tr><td class='muted'>Weekday %</td>"+MON.map((m,i)=>`<td><input id='wd${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].wd*100)}'></td>`).join("")+"</tr>";
-  h+="<tr><td class='muted'>Weekend %</td>"+MON.map((m,i)=>`<td><input id='we${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].we*100)}'></td>`).join("")+"</tr>";
+  h+="<tr><td class='muted'>Weekday %</td>"+MON.map((m,i)=>`<td><input id='wd${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].wd*100)}' oninput='schedulePreview()'></td>`).join("")+"</tr>";
+  h+="<tr><td class='muted'>Weekend %</td>"+MON.map((m,i)=>`<td><input id='we${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].we*100)}' oninput='schedulePreview()'></td>`).join("")+"</tr>";
   el.innerHTML=h;
 }
 function readTargets(){ const t={}; for(let i=1;i<=12;i++){ t[i]={wd:(+document.getElementById('wd'+i).value||0)/100, we:(+document.getElementById('we'+i).value||0)/100}; } return t; }
@@ -139,18 +139,21 @@ async function loadOccupancy(){
   for(const u of OCC.units){ const mo=(OCC.byUnit[u.orp]||{}).monthly||{};
     h+=`<tr><td>${u.name}</td>`+OCC.months.map(mk=>{const v=mo[mk]||0;const c=v>=60?'hot':(v<30?'cold':'');return `<td class='${c}'>${v}%</td>`;}).join("")+"</tr>"; }
   el.innerHTML=h;
-  const pt=document.getElementById('paceTable');
-  if(OCC.pace&&OCC.months&&OCC.months.length){
-    let h="<tr><th>Day-type</th>"+OCC.months.map(mk=>{const a=mk.split('-');return `<th>${MON[+a[1]-1]} '${a[0].slice(2)}</th>`;}).join("")+"</tr>";
-    for(const pair of [["Weekend","wknd"],["Weekday","wkdy"]]){
-      h+=`<tr><td>${pair[0]}</td>`+OCC.months.map(mk=>{const c=OCC.pace[mk][pair[1]];const ah=c.status==='ahead';return `<td class='${ah?'hot':'cold'}'>${c.act}/${c.exp}% ${ah?'▲':'▼'}</td>`;}).join("")+"</tr>";
-    }
-    pt.innerHTML=h;
-    const pl=OCC.paceLearn||{weekend:0,weekday:0,blendWeight:'0.00'};
-    document.getElementById('paceNote').textContent=`Cells show actual / pace-target occupancy for each month at today's lead time. ▲ ahead of pace → prices lift; ▼ behind → prices soften. Pace curve = seeded default booking-pace, blended with learning from real bookings (learned weight ${pl.blendWeight}; ${(pl.weekend+pl.weekday)} booking events logged so far).`;
-  }
+  renderPaceTable(OCC.months, OCC.pace, OCC.paceLearn);
   document.getElementById('occNote').textContent = OCC.totalBooked>0 ? `${OCC.totalBooked} booked unit-nights imported into OwnerRez.` : "0 bookings in OwnerRez yet — populates once a channel's calendar is connected (Part 1). Until then the engine has no occupancy signal and prices at market.";
 }
+function renderPaceTable(months,pace,paceLearn){
+  const pt=document.getElementById('paceTable'); if(!pt||!pace||!months||!months.length) return;
+  let h="<tr><th>Day-type</th>"+months.map(mk=>{const a=mk.split('-');return `<th>${MON[+a[1]-1]} '${a[0].slice(2)}</th>`;}).join("")+"</tr>";
+  for(const pair of [["Weekend","wknd"],["Weekday","wkdy"]]){
+    h+=`<tr><td>${pair[0]}</td>`+months.map(mk=>{const c=pace[mk]&&pace[mk][pair[1]];if(!c)return "<td>—</td>";const ah=c.status==='ahead';return `<td class='${ah?'hot':'cold'}'>${c.act}/${c.exp}% ${ah?'▲':'▼'}</td>`;}).join("")+"</tr>";
+  }
+  pt.innerHTML=h;
+  const pl=paceLearn||{weekend:0,weekday:0,blendWeight:'0.00'};
+  document.getElementById('paceNote').textContent=`Cells show actual / pace-target occupancy for each month at today's lead time. ▲ ahead of pace → prices lift; ▼ behind → prices soften. Pace curve = seeded default booking-pace, blended with learning from real bookings (learned weight ${pl.blendWeight}; ${((pl.weekend||0)+(pl.weekday||0))} booking events logged so far).`;
+}
+let _pvTimer=null;
+function schedulePreview(){ document.getElementById('tStatus').textContent="Editing… (auto-updating)"; clearTimeout(_pvTimer); _pvTimer=setTimeout(applyPreview,500); }
 async function applyPreview(){
   document.getElementById('tStatus').textContent="Computing preview…";
   const r=await fetch(api('preview'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targets:readTargets()})});
@@ -158,11 +161,13 @@ async function applyPreview(){
   if(j.error){ document.getElementById('tStatus').textContent="Error: "+j.error; return; }
   RATES={}; for(const e of j.rates){ (RATES[e.property_id]??={})[e.date]={a:e.amount,o:e.overridden}; }
   document.getElementById('tStatus').textContent=`Preview: ${j.count} nights, $${j.min}–$${j.max} (avg $${j.avg})`+(j.coldStart?" · no OwnerRez bookings yet → priced at market":"")+(j.overrideCount?` · ${j.overrideCount} pinned`:"");
+  if(j.pace) renderPaceTable(OCC.months, j.pace, j.paceLearn);
   render();
 }
 async function saveTargets(){
   const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({targets:readTargets()})});
-  document.getElementById('tStatus').textContent=r.ok?"Targets saved ✓":"Save failed";
+  if(r.ok){ document.getElementById('tStatus').textContent="Targets saved ✓ · recomputing…"; await applyPreview(); document.getElementById('tStatus').textContent="Targets saved ✓ · calendar updated"; }
+  else document.getElementById('tStatus').textContent="Save failed";
 }
 async function toggleSync(){
   const next=!STATE.auto_sync;
@@ -203,6 +208,7 @@ function render(){
     const ds=`${view.y}-${String(view.m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const dow=new Date(Date.UTC(view.y,view.m,d)).getUTCDay(); const we=(dow===5||dow===6);
     const c=map[ds]; const p=c&&c.a; const o=c&&c.o; const booked=isBooked(view.unit,ds);
+    if(!c){ cells+=`<div class='day out'><div class='d'>${d}</div><div class='p'>·</div></div>`; continue; }
     if(p&&!booked){sum+=p;n++;mn=Math.min(mn,p);mx=Math.max(mx,p); if(o)pins++;} if(booked)bk++;
     cells+=`<div class='day${we?' we':''}${o?' pin':''}${booked?' booked':''}' onclick="onCell('${ds}')">${booked?"<span class='bk'>booked</span>":""}${o&&!booked?"<span class='pinmark'>📌</span>":""}<div class='d'>${d}</div><div class='p'>${p?'$'+p:'—'}</div></div>`;
   }
