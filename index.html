@@ -1,0 +1,177 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Parkside Tepees — Pricing Control</title>
+<style>
+  :root{--bg:#0f1720;--card:#16212e;--ink:#e7eef6;--mut:#9fb0c0;--line:#26354a;--accent:#ff6b4a;--ok:#2ecc71;--warn:#f4b942}
+  *{box-sizing:border-box} body{margin:0;font:14px/1.45 system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--ink)}
+  header{display:flex;align-items:center;gap:16px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--card);flex-wrap:wrap}
+  h1{font-size:16px;margin:0;font-weight:700} .sp{flex:1}
+  .pill{padding:3px 9px;border-radius:999px;font-size:12px;font-weight:600}
+  .muted{color:var(--mut)} .wrap{padding:18px 20px;max-width:1200px;margin:0 auto}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:18px}
+  .card h2{font-size:13px;margin:0 0 12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
+  button{background:var(--accent);color:#fff;border:0;border-radius:7px;padding:8px 14px;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--ink)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  select,input{background:#0c141d;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:6px 8px}
+  table{border-collapse:collapse;width:100%} td,th{border:1px solid var(--line);padding:5px 7px;text-align:center}
+  th{color:var(--mut);font-weight:600;font-size:12px}
+  .tgrid input{width:58px;text-align:center}
+  .cal{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+  .dow{color:var(--mut);font-size:11px;text-align:center;padding:4px 0}
+  .day{background:#0c141d;border:1px solid var(--line);border-radius:7px;min-height:58px;padding:5px 6px;position:relative}
+  .day .d{font-size:11px;color:var(--mut)} .day .p{font-size:15px;font-weight:700;margin-top:4px}
+  .day.we{outline:1px solid #2b3b52} .day.empty{background:transparent;border:0}
+  .toggle{display:inline-flex;align-items:center;gap:8px}
+  .switch{width:46px;height:26px;border-radius:999px;background:#3a4759;position:relative;transition:.15s;cursor:pointer}
+  .switch.on{background:var(--ok)} .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.15s}
+  .switch.on .knob{left:23px}
+  #gate{position:fixed;inset:0;background:#0b1219;display:flex;align-items:center;justify-content:center;z-index:50;flex-direction:column;gap:14px}
+  #gate input{font-size:18px;text-align:center;padding:10px 14px;width:160px;letter-spacing:.3em}
+  .legend{font-size:12px;color:var(--mut);margin-top:8px}
+</style></head><body>
+
+<div id="gate">
+  <div style="font-weight:700;font-size:18px">🏕️ Parkside Tepees — Pricing Control</div>
+  <div class="muted">Enter password to continue</div>
+  <input id="pw" type="password" inputmode="numeric" autofocus placeholder="••••">
+  <button onclick="unlock()">Unlock</button>
+  <div id="gateErr" style="color:var(--accent);height:16px"></div>
+</div>
+
+<header style="display:none" id="app">
+  <h1>🏕️ Pricing Control</h1>
+  <span class="muted" id="horizon"></span>
+  <span class="sp"></span>
+  <div class="toggle">
+    <span class="muted">Auto-sync to OwnerRez</span>
+    <div class="switch" id="syncSwitch" onclick="toggleSync()"><div class="knob"></div></div>
+    <span class="pill" id="syncState">OFF</span>
+  </div>
+  <button id="syncNow" class="ghost" onclick="syncNow()" style="display:none">Sync now</button>
+</header>
+
+<div class="wrap" id="main" style="display:none">
+  <div class="card" id="banner" style="border-color:var(--warn)">
+    <strong>Preview mode.</strong> <span class="muted">Auto-sync is OFF — edit targets and review prices here; nothing is written to OwnerRez until you turn auto-sync ON.</span>
+  </div>
+
+  <div class="card">
+    <h2>Monthly occupancy targets (revenue-max holds these)</h2>
+    <table class="tgrid" id="targets"></table>
+    <div style="margin-top:12px;display:flex;gap:10px">
+      <button onclick="applyPreview()">Preview prices</button>
+      <button class="ghost" onclick="saveTargets()">Save targets</button>
+      <span id="tStatus" class="muted" style="align-self:center"></span>
+    </div>
+    <div class="legend">Weekend = Fri & Sat. Prices clamp to $99–$300. Behind pace → discount toward $99; at/ahead of pace → raise to capture revenue.</div>
+  </div>
+
+  <div class="card">
+    <h2>Calendar — prices by unit</h2>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <select id="unit" onchange="render()"></select>
+      <button class="ghost" onclick="moveMonth(-1)">‹</button>
+      <strong id="monthLbl" style="min-width:150px;text-align:center"></strong>
+      <button class="ghost" onclick="moveMonth(1)">›</button>
+      <span class="sp"></span>
+      <span class="muted" id="calStats"></span>
+    </div>
+    <div class="cal" id="dows"></div>
+    <div class="cal" id="grid"></div>
+  </div>
+</div>
+
+<script>
+const UNITS=[["486910","Bear Claw"],["486911","Flyin' Horse"],["486912","Mustang Manor"],["486913","Soaring Dreams"],["486891","Arrowhead"],["486914","Sunset Stampede"],["486915","Buffalo Run"],["486916","Scarlet Antler"],["486917","Cub House"],["486918","Flyin' Free"]];
+const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+let PW="", STATE=null, RATES=null, view={unit:"486910", y:0, m:0};
+
+function unlock(){
+  const v=document.getElementById('pw').value.trim();
+  fetch('/api/app?action=state').then(r=>r.json()).then(s=>{ // load state to verify app is up
+    PW=v; STATE=s;
+    // verify password by a no-op POST (auth check)
+    return fetch('/api/app?action=state',{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({})});
+  }).then(r=>{
+    if(r.status===401){ document.getElementById('gateErr').textContent="Wrong password"; return; }
+    document.getElementById('gate').style.display='none';
+    document.getElementById('app').style.display='flex';
+    document.getElementById('main').style.display='block';
+    boot();
+  }).catch(e=>document.getElementById('gateErr').textContent="Error: "+e.message);
+}
+document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')unlock();});
+
+function buildTargets(){
+  const t=STATE.targets, el=document.getElementById('targets');
+  let h="<tr><th>Month</th>"+MON.map((m,i)=>`<th>${m}</th>`).join("")+"</tr>";
+  h+="<tr><td class='muted'>Weekday %</td>"+MON.map((m,i)=>`<td><input id='wd${i+1}' type='number' min='0' max='100' value='${Math.round((t[i+1].wd)*100)}'></td>`).join("")+"</tr>";
+  h+="<tr><td class='muted'>Weekend %</td>"+MON.map((m,i)=>`<td><input id='we${i+1}' type='number' min='0' max='100' value='${Math.round((t[i+1].we)*100)}'></td>`).join("")+"</tr>";
+  el.innerHTML=h;
+}
+function readTargets(){
+  const t={}; for(let i=1;i<=12;i++){ t[i]={wd:(+document.getElementById('wd'+i).value||0)/100, we:(+document.getElementById('we'+i).value||0)/100}; } return t;
+}
+function setSyncUI(){
+  const on=STATE.auto_sync;
+  document.getElementById('syncSwitch').className='switch'+(on?' on':'');
+  document.getElementById('syncState').textContent=on?'ON':'OFF';
+  document.getElementById('syncState').style.background=on?'var(--ok)':'#3a4759';
+  document.getElementById('syncNow').style.display=on?'inline-block':'none';
+  document.getElementById('banner').style.display=on?'none':'block';
+}
+async function applyPreview(){
+  document.getElementById('tStatus').textContent="Computing preview…";
+  const targets=readTargets();
+  const r=await fetch('/api/app?action=preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targets})});
+  const j=await r.json();
+  if(j.error){ document.getElementById('tStatus').textContent="Error: "+j.error; return; }
+  RATES={}; for(const e of j.rates){ (RATES[e.property_id]??={})[e.date]=e.amount; }
+  document.getElementById('tStatus').textContent=`Preview ready — ${j.count} nights, $${j.min}–$${j.max}`;
+  render();
+}
+async function saveTargets(){
+  const targets=readTargets();
+  const r=await fetch('/api/app?action=state',{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({targets})});
+  document.getElementById('tStatus').textContent=r.ok?"Targets saved ✓":"Save failed";
+  if(r.ok) STATE.targets=targets;
+}
+async function toggleSync(){
+  const next=!STATE.auto_sync;
+  if(next && !confirm("Turn auto-sync ON? The engine will start writing prices to OwnerRez (daily + now).")) return;
+  const r=await fetch('/api/app?action=state',{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({auto_sync:next})});
+  if(r.ok){ STATE.auto_sync=next; setSyncUI(); }
+}
+async function syncNow(){
+  if(!confirm("Push current prices to OwnerRez now?")) return;
+  document.getElementById('syncNow').textContent="Syncing…";
+  const r=await fetch('/api/app?action=run',{method:'GET',headers:{'x-app-password':PW}});
+  const j=await r.json();
+  document.getElementById('syncNow').textContent="Sync now";
+  alert(j.mode==='LIVE_SYNC'?`Pushed ${j.sent} rates to OwnerRez (status ${j.ownerrezStatus}).`:JSON.stringify(j));
+}
+function moveMonth(d){ let idx=view.y*12+view.m+d; const min=2026*12+5, max=2027*12+11; idx=Math.max(min,Math.min(max,idx)); view.y=Math.floor(idx/12); view.m=idx%12; render(); }
+function render(){
+  view.unit=document.getElementById('unit').value;
+  document.getElementById('monthLbl').textContent=MON[view.m]+" "+view.y;
+  document.getElementById('dows').innerHTML=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>`<div class='dow'>${d}</div>`).join("");
+  const first=new Date(Date.UTC(view.y,view.m,1)), start=first.getUTCDay(), days=new Date(Date.UTC(view.y,view.m+1,0)).getUTCDate();
+  const map=(RATES&&RATES[view.unit])||{}; let cells="",sum=0,n=0,mn=1e9,mx=0;
+  for(let i=0;i<start;i++) cells+="<div class='day empty'></div>";
+  for(let d=1;d<=days;d++){
+    const ds=`${view.y}-${String(view.m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const dow=new Date(Date.UTC(view.y,view.m,d)).getUTCDay(); const we=(dow===5||dow===6);
+    const p=map[ds]; if(p){sum+=p;n++;mn=Math.min(mn,p);mx=Math.max(mx,p);}
+    cells+=`<div class='day${we?' we':''}'><div class='d'>${d}</div><div class='p'>${p?'$'+p:'—'}</div></div>`;
+  }
+  document.getElementById('grid').innerHTML=cells;
+  document.getElementById('calStats').textContent=n?`avg $${Math.round(sum/n)} · $${mn}–$${mx}`:"no preview yet — click Preview prices";
+}
+function boot(){
+  document.getElementById('horizon').textContent="Jun 2026 → Dec 2027";
+  document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
+  view.y=2026; view.m=5;
+  buildTargets(); setSyncUI(); applyPreview();
+}
+</script></body></html>
