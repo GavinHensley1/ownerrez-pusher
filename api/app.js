@@ -111,22 +111,23 @@ function compute(signalMap,targets,today,startDate,days,occ,overrides,learned){
   const start=new Date(startDate+"T00:00:00Z"); const out=[]; overrides=overrides||{}; learned=learned||{};
   const ps=learned.premScale||1; const uPrem=learned.unitPrem||{}; const gapD=learned.gapD||GAP_SEED;
   const sv=Object.values(signalMap).filter(v=>v>0); const peakThr=(sv.length?median(sv):FLOOR)*MODEL.PEAK_MULT; // peak nights = top of the year
-  const ctxCache={};
+  const poolCache={};
   for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const mo=d.getUTCMonth()+1; const we=isWe(d); const dt=we?1:0; const dtN=we?"weekend":"weekday";
     let sig=signalMap[ds]; if(sig==null) sig=signalFallback(signalMap,ds); const peak=sig>=peakThr; const ceil=peak?MODEL.PEAK_CEIL:CEIL;
-    let ctx=null;
-    if(occ.hasData&&occ.mock==null){ const ck=mk+"|"+dt; ctx=ctxCache[ck];
-      if(ctx===undefined){ const lead=monthLead(mk+"-15",today); const tg=we?targets[mo].we:targets[mo].wd; const exp=tg*paceFrac(lead,dtN,learned); const pa=occ.agg.poolAgg[mk]&&occ.agg.poolAgg[mk][dt]; const poolOcc=pa&&pa.t?pa.b/pa.t:0; ctx={lead,exp,poolOcc}; ctxCache[ck]=ctx; } }
+    const lead=Math.max(0,Math.round((d-start)/86400000)); // EXACT days from today to THIS stay night -> continuous, per-day pace
+    let poolOcc=0,exp=0;
+    if(occ.hasData&&occ.mock==null){ const ck=mk+"|"+dt; if(poolCache[ck]===undefined){ const pa=occ.agg.poolAgg[mk]&&occ.agg.poolAgg[mk][dt]; poolCache[ck]=pa&&pa.t?pa.b/pa.t:0; } poolOcc=poolCache[ck];
+      const tg=we?targets[mo].we:targets[mo].wd; exp=tg*paceFrac(lead,dtN,learned); }
     for(const u of UNITS){ const key=u.orp+"|"+ds; let amount,overridden=false,orphan=false,gapLen=0,baseOut=0;
       if(overrides[key]!=null){ amount=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(overrides[key])))); overridden=true; baseOut=amount; }
       else { const prem=uPrem[u.orp]||UNIT_PREM[u.orp]||1.0; const base=sig*prem; baseOut=Math.round(base);
         if(!occ.hasData){ amount=Math.max(FLOOR,Math.min(ceil,Math.round(base))); }
-        else if(occ.mock!=null){ const lead=monthLead(mk+"-15",today); const tg=we?targets[mo].we:targets[mo].wd; const exp=tg*paceFrac(lead,dtN,learned); let m=paceMult(occ.mock,exp,lead,ps)+scarMult(occ.mock,lead,ps); if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m)); amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*m))); }
+        else if(occ.mock!=null){ const tg=we?targets[mo].we:targets[mo].wd; const e2=tg*paceFrac(lead,dtN,learned); let m=paceMult(occ.mock,e2,lead,ps)+scarMult(occ.mock,lead,ps); if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m)); amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*m))); }
         else { const g=occ.agg.gaps&&occ.agg.gaps[u.orp]&&occ.agg.gaps[u.orp][ds]; let m;
-          if(g){ orphan=true; gapLen=g.runLen; m=paceMult(ctx.poolOcc,ctx.exp,ctx.lead,ps)*gapGm(g.runLen,g.hasWeekend,gapD); } // orphan: discount to fill; OVERRIDE scarcity premium & per-unit bump
-          else { m=paceMult(ctx.poolOcc,ctx.exp,ctx.lead,ps)+scarMult((occ.agg.nightPool&&occ.agg.nightPool[ds])||0,ctx.lead,ps);
-            const ua=occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt]; const unitOcc=ua&&ua.t?ua.b/ua.t:0; const sens=interp(SENS,ctx.lead);
-            let un=(unitOcc-ctx.poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); } // gentle per-unit scarcity
+          if(g){ orphan=true; gapLen=g.runLen; m=paceMult(poolOcc,exp,lead,ps)*gapGm(g.runLen,g.hasWeekend,gapD); } // orphan: discount to fill; OVERRIDE scarcity premium & per-unit bump
+          else { m=paceMult(poolOcc,exp,lead,ps)+scarMult((occ.agg.nightPool&&occ.agg.nightPool[ds])||0,lead,ps);
+            const ua=occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt]; const unitOcc=ua&&ua.t?ua.b/ua.t:0; const sens=interp(SENS,lead);
+            let un=(unitOcc-poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); } // gentle per-unit scarcity
           if(peak)m=Math.max(1,m); // peak nights never discounted below seasonal market base (peak wins over orphan)
           m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
           amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*m))); } }
@@ -254,7 +255,7 @@ module.exports=async(req,res)=>{
         let s=sig[ds]; const sigMissing=(s==null); if(s==null)s=signalFallback(sig,ds);
         const sv=Object.values(sig).filter(v=>v>0); const peakThr=(sv.length?median(sv):FLOOR)*MODEL.PEAK_MULT; const peak=s>=peakThr;
         const prem=(learned.unitPrem&&learned.unitPrem[u.orp])||UNIT_PREM[u.orp]||1.0; const ps=learned.premScale||1; const base=s*prem;
-        const tg=we?st.targets[mo].we:st.targets[mo].wd; const lead=monthLead(mk+"-15",today); const pf=paceFrac(lead,dtN,learned); const exp=tg*pf;
+        const tg=we?st.targets[mo].we:st.targets[mo].wd; const lead=Math.max(0,Math.round((d-new Date(today+"T00:00:00Z"))/86400000)); const pf=paceFrac(lead,dtN,learned); const exp=tg*pf;
         const ua=agg.unitAgg[u.orp][mk]&&agg.unitAgg[u.orp][mk][dt], pa=agg.poolAgg[mk]&&agg.poolAgg[mk][dt];
         const unitOcc=ua&&ua.t?ua.b/ua.t:0, poolOcc=pa&&pa.t?pa.b/pa.t:0;
         const nightOcc=(agg.nightPool&&agg.nightPool[ds])||0; const g=agg.gaps&&agg.gaps[u.orp]&&agg.gaps[u.orp][ds];
@@ -262,7 +263,7 @@ module.exports=async(req,res)=>{
         if(g){ m=paceMult(poolOcc,exp,lead,ps)*gapGm(g.runLen,g.hasWeekend,learned.gapD); } else { scar=scarMult(nightOcc,lead,ps); m=paceMult(poolOcc,exp,lead,ps)+scar; un=(unitOcc-poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); }
         if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
         const final=Math.max(FLOOR,Math.min(peak?MODEL.PEAK_CEIL:CEIL,Math.round(base*m)));
-        breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,premium:prem,base:Math.round(base),peak,peakThr:Math.round(peakThr),target:tg,monthLead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),nightOcc:Number(nightOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),scar:Number(scar.toFixed(3)),orphan:g?{runLen:g.runLen,hasWeekend:g.hasWeekend,gm:Number(gapGm(g.runLen,g.hasWeekend,learned.gapD).toFixed(3))}:null,premScale:Number(ps.toFixed(3)),learnedPrem:Number(prem.toFixed(3)),sens:Number(sens.toFixed(2)),mult:Number(m.toFixed(3)),final}; }
+        breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,premium:prem,base:Math.round(base),peak,peakThr:Math.round(peakThr),target:tg,lead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),nightOcc:Number(nightOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),scar:Number(scar.toFixed(3)),orphan:g?{runLen:g.runLen,hasWeekend:g.hasWeekend,gm:Number(gapGm(g.runLen,g.hasWeekend,learned.gapD).toFixed(3))}:null,premScale:Number(ps.toFixed(3)),learnedPrem:Number(prem.toFixed(3)),sens:Number(sens.toFixed(2)),mult:Number(m.toFixed(3)),final}; }
       return res.status(200).json({refId:process.env.PRICELABS_REF_ID||"486915",sigDays:Object.keys(sig).length,sigMin:allv.length?Math.min(...allv):null,sigMax:allv.length?Math.max(...allv):null,sigAvg:avg(allv),byMonth,breakdown});
     }
     res.status(400).json({error:"unknown action"});
