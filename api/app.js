@@ -63,6 +63,20 @@ async function getOccupancy(start,days){
     if(WE.includes(d.getUTCDay())!==we)continue; const k=d.toISOString().slice(0,10); for(const u of UNITS){t++; if(booked[u.orp+"|"+k])b++;} } return t?b/t:0; };
   return {fn,total};
 }
+async function getBookedByUnit(start,days){
+  const out={}; for(const u of UNITS) out[u.orp]={};
+  const user=process.env.OWNERREZ_API_USER,token=process.env.OWNERREZ_API_TOKEN; if(!user||!token) return out;
+  const auth="Basic "+Buffer.from(`${user}:${token}`).toString("base64");
+  const s=new Date(start+"T00:00:00Z"); const end=new Date(s); end.setUTCDate(end.getUTCDate()+days);
+  try{ for(const u of UNITS){
+    const url=`https://api.ownerrez.com/v2/bookings?property_ids=${u.orp}&since_utc=${s.toISOString().slice(0,10)}&include_cancelled=false&limit=500`;
+    const r=await fetch(url,{headers:{Authorization:auth,Accept:"application/json"}}); if(!r.ok) continue;
+    const j=await r.json(); const items=Array.isArray(j)?j:(j.items||j.bookings||j.data||[]);
+    for(const b of items){ const ci=new Date(((b.arrival||b.checkIn||b.arrival_date||"")+"").slice(0,10)+"T00:00:00Z"), co=new Date(((b.departure||b.checkOut||b.departure_date||"")+"").slice(0,10)+"T00:00:00Z");
+      if(isNaN(ci)||isNaN(co))continue; for(let d=new Date(Math.max(ci,s));d<co&&d<end;d.setUTCDate(d.getUTCDate()+1)) out[u.orp][d.toISOString().slice(0,10)]=true; }
+  } }catch{}
+  return out;
+}
 function compute(signalMap,targets,learned,today,startDate,days,occInfo,overrides){
   const start=new Date(startDate+"T00:00:00Z"); const out=[]; const hasData=(occInfo.total||0)>0; overrides=overrides||{};
   for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10);
@@ -116,6 +130,16 @@ module.exports=async(req,res)=>{
       const rates=compute(sig,st.targets,st.learned,today,today,days,occInfo,st.overrides);
       if(!st.auto_sync) return res.status(200).json({mode:"COMPUTED_NO_SYNC",auto_sync:false,computed:rates.length,wrote:false,note:"auto-sync OFF — nothing written"});
       const r=await pushOwnerRez(rates); return res.status(r.ownerrezOk?200:502).json({mode:"LIVE_SYNC",auto_sync:true,overrides:rates.filter(x=>x.overridden).length,...r});
+    }
+    if(action==="occupancy"){
+      const today=new Date().toISOString().slice(0,10), days=570;
+      const booked=await getBookedByUnit(today,days);
+      const start=new Date(today+"T00:00:00Z"); const monthTotal={};
+      for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const mk=d.toISOString().slice(0,7); monthTotal[mk]=(monthTotal[mk]||0)+1; }
+      const months=Object.keys(monthTotal).sort(); const byUnit={};
+      for(const u of UNITS){ const dates=Object.keys(booked[u.orp]); const mc={}; for(const ds of dates){ const mk=ds.slice(0,7); mc[mk]=(mc[mk]||0)+1; }
+        const monthly={}; for(const mk of months) monthly[mk]=Math.round(100*((mc[mk]||0)/monthTotal[mk])); byUnit[u.orp]={booked:dates,monthly}; }
+      return res.status(200).json({units:UNITS.map(u=>({orp:u.orp,name:u.name})), months, byUnit, totalBooked:Object.values(booked).reduce((a,c)=>a+Object.keys(c).length,0)});
     }
     res.status(400).json({error:"unknown action"});
   }catch(e){ res.status(500).json({error:String(e.message||e)}); }
