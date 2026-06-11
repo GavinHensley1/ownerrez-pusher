@@ -24,7 +24,7 @@
   .day:hover{border-color:var(--accent)} .day .d{font-size:11px;color:var(--mut)} .day .p{font-size:15px;font-weight:700;margin-top:4px}
   .day.we{outline:1px solid #2b3b52} .day.empty{background:transparent;border:0;cursor:default}
   .day.pin{border-color:var(--pin);background:#1b1430} .day .pinmark{position:absolute;top:4px;right:5px;font-size:11px}
-  .day.out{opacity:.28;border:1px dashed var(--line);cursor:default;background:transparent} .day.out .p{color:var(--muted)} .day.booked{background:#1a2230;border-style:dashed;border-color:var(--book);opacity:.8} .day.booked .p{color:var(--book)} .day .bk{position:absolute;top:4px;left:5px;font-size:9px;color:var(--book);text-transform:uppercase;letter-spacing:.05em}
+  .day.out{opacity:.28;border:1px dashed var(--line);cursor:default;background:transparent} .day.out .p{color:var(--muted)} .day.booked{background:#1a2230;border-style:dashed;border-color:var(--book);opacity:.8} .day.booked .p{color:var(--book)} .day .bk{position:absolute;top:4px;left:5px;font-size:9px;color:var(--book);text-transform:uppercase;letter-spacing:.05em} .day.gap{border-color:#d4a64a} .day.gap .p{color:#e6b85c} .day .gapmark{position:absolute;top:4px;left:5px;font-size:9px;color:#d4a64a;text-transform:uppercase;letter-spacing:.03em} @keyframes pf{0%{background:rgba(96,165,250,.30)}100%{background:transparent}} table.flash td{animation:pf .7s ease-out}
   .toggle{display:inline-flex;align-items:center;gap:8px}
   .switch{width:46px;height:26px;border-radius:999px;background:#3a4759;position:relative;transition:.15s;cursor:pointer}
   .switch.on{background:var(--ok)} .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.15s}
@@ -118,8 +118,8 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
 function buildTargets(){
   const t=STATE.targets, el=document.getElementById('targets');
   let h="<tr><th>Month</th>"+MON.map(m=>`<th>${m}</th>`).join("")+"</tr>";
-  h+="<tr><td class='muted'>Weekday %</td>"+MON.map((m,i)=>`<td><input id='wd${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].wd*100)}' oninput='schedulePreview()'></td>`).join("")+"</tr>";
-  h+="<tr><td class='muted'>Weekend %</td>"+MON.map((m,i)=>`<td><input id='we${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].we*100)}' oninput='schedulePreview()'></td>`).join("")+"</tr>";
+  h+="<tr><td class='muted'>Weekday %</td>"+MON.map((m,i)=>`<td><input id='wd${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].wd*100)}' oninput='schedulePreview()' onchange='applyPreview()'></td>`).join("")+"</tr>";
+  h+="<tr><td class='muted'>Weekend %</td>"+MON.map((m,i)=>`<td><input id='we${i+1}' type='number' min='0' max='100' value='${Math.round(t[i+1].we*100)}' oninput='schedulePreview()' onchange='applyPreview()'></td>`).join("")+"</tr>";
   el.innerHTML=h;
 }
 function readTargets(){ const t={}; for(let i=1;i<=12;i++){ t[i]={wd:(+document.getElementById('wd'+i).value||0)/100, we:(+document.getElementById('we'+i).value||0)/100}; } return t; }
@@ -148,18 +148,18 @@ function renderPaceTable(months,pace,paceLearn){
   for(const pair of [["Weekend","wknd"],["Weekday","wkdy"]]){
     h+=`<tr><td>${pair[0]}</td>`+months.map(mk=>{const c=pace[mk]&&pace[mk][pair[1]];if(!c)return "<td>—</td>";const ah=c.status==='ahead';return `<td class='${ah?'hot':'cold'}'>${c.act}/${c.exp}% ${ah?'▲':'▼'}</td>`;}).join("")+"</tr>";
   }
-  pt.innerHTML=h;
+  pt.innerHTML=h; pt.classList.remove('flash'); void pt.offsetWidth; pt.classList.add('flash');
   const pl=paceLearn||{weekend:0,weekday:0,blendWeight:'0.00'};
   document.getElementById('paceNote').textContent=`Cells show actual / pace-target occupancy for each month at today's lead time. ▲ ahead of pace → prices lift; ▼ behind → prices soften. Pace curve = seeded default booking-pace, blended with learning from real bookings (learned weight ${pl.blendWeight}; ${((pl.weekend||0)+(pl.weekday||0))} booking events logged so far).`;
 }
 let _pvTimer=null;
-function schedulePreview(){ document.getElementById('tStatus').textContent="Editing… (auto-updating)"; clearTimeout(_pvTimer); _pvTimer=setTimeout(applyPreview,500); }
+function schedulePreview(){ document.getElementById('tStatus').textContent="Editing… (auto-updating)"; clearTimeout(_pvTimer); _pvTimer=setTimeout(applyPreview,300); }
 async function applyPreview(){
   document.getElementById('tStatus').textContent="Computing preview…";
   const r=await fetch(api('preview'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targets:readTargets()})});
   const j=await r.json();
   if(j.error){ document.getElementById('tStatus').textContent="Error: "+j.error; return; }
-  RATES={}; for(const e of j.rates){ (RATES[e.property_id]??={})[e.date]={a:e.amount,o:e.overridden}; }
+  RATES={}; for(const e of j.rates){ (RATES[e.property_id]??={})[e.date]={a:e.amount,o:e.overridden,g:e.orphan}; }
   document.getElementById('tStatus').textContent=`Preview: ${j.count} nights, $${j.min}–$${j.max} (avg $${j.avg})`+(j.coldStart?" · no OwnerRez bookings yet → priced at market":"")+(j.overrideCount?` · ${j.overrideCount} pinned`:"");
   if(j.pace) renderPaceTable(OCC.months, j.pace, j.paceLearn);
   render();
@@ -209,8 +209,8 @@ function render(){
     const dow=new Date(Date.UTC(view.y,view.m,d)).getUTCDay(); const we=(dow===5||dow===6);
     const c=map[ds]; const p=c&&c.a; const o=c&&c.o; const booked=isBooked(view.unit,ds);
     if(!c){ cells+=`<div class='day out'><div class='d'>${d}</div><div class='p'>·</div></div>`; continue; }
-    if(p&&!booked){sum+=p;n++;mn=Math.min(mn,p);mx=Math.max(mx,p); if(o)pins++;} if(booked)bk++;
-    cells+=`<div class='day${we?' we':''}${o?' pin':''}${booked?' booked':''}' onclick="onCell('${ds}')">${booked?"<span class='bk'>booked</span>":""}${o&&!booked?"<span class='pinmark'>📌</span>":""}<div class='d'>${d}</div><div class='p'>${p?'$'+p:'—'}</div></div>`;
+    const gp=c&&c.g&&!booked; if(p&&!booked){sum+=p;n++;mn=Math.min(mn,p);mx=Math.max(mx,p); if(o)pins++;} if(booked)bk++;
+    cells+=`<div class='day${we?' we':''}${o?' pin':''}${booked?' booked':''}${gp?' gap':''}' onclick="onCell('${ds}')">${booked?"<span class='bk'>booked</span>":""}${gp&&!o?"<span class='gapmark' title='orphan/short gap — discounted to fill'>gap↓</span>":""}${o&&!booked?"<span class='pinmark'>📌</span>":""}<div class='d'>${d}</div><div class='p'>${p?'$'+p:'—'}</div></div>`;
   }
   document.getElementById('grid').innerHTML=cells;
   document.getElementById('calStats').textContent=(n?`avg $${Math.round(sum/n)} · $${mn}–$${mx}`:"no preview")+(pins?` · ${pins} pinned`:"")+(bk?` · ${bk} booked`:"");
@@ -218,7 +218,7 @@ function render(){
 function boot(){
   const n=new Date(); const sY=n.getUTCFullYear(),sM=n.getUTCMonth(); const e=new Date(n); e.setUTCDate(e.getUTCDate()+365); const eY=e.getUTCFullYear(),eM=e.getUTCMonth();
   HMIN=sY*12+sM; HMAX=eY*12+eM;
-  document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo`;
+  document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0610e`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
   view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview);
 }
