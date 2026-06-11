@@ -32,7 +32,17 @@ const PACE_SEED={ // expected fraction of FINAL bookings already on the books by
   weekend:[[0,1],[7,.85],[14,.72],[21,.62],[30,.50],[45,.35],[60,.22],[90,.12],[120,.08],[180,.05],[270,.03],[365,.02]],
   weekday:[[0,1],[7,.82],[14,.68],[21,.57],[30,.45],[45,.30],[60,.18],[90,.10],[120,.07],[180,.04],[270,.025],[365,.015]]
 };
-const DEFAULTS={targets:SEED_TARGETS,auto_sync:false,overrides:{},icals:{}};
+const KB_SEED={format:"",items:[
+  {topic:"Check-in time",a:"4:00 PM"},{topic:"Checkout time",a:"11:00 AM"},
+  {topic:"WiFi network & password",a:""},{topic:"Parking",a:""},
+  {topic:"Address & directions",a:""},{topic:"Resort amenities (Parkside Resort)",a:""},
+  {topic:"Tepee amenities (in-unit)",a:""},{topic:"Pet policy",a:""},
+  {topic:"Smoking policy",a:""},{topic:"Max occupancy",a:""},
+  {topic:"Heating / air conditioning",a:""},{topic:"Trash & recycling",a:""},
+  {topic:"Quiet hours",a:""},{topic:"Early check-in / late checkout",a:""},
+  {topic:"Cancellation policy",a:""},{topic:"Emergency / who to contact",a:""}
+]};
+const DEFAULTS={targets:SEED_TARGETS,auto_sync:false,overrides:{},icals:{},kb:KB_SEED};
 const SKEY="parkside:state";
 
 async function getState(){ if(!redis) return JSON.parse(JSON.stringify(DEFAULTS)); const s=await redis.get(SKEY); return {...JSON.parse(JSON.stringify(DEFAULTS)),...(s||{})}; }
@@ -194,11 +204,11 @@ module.exports=async(req,res)=>{
     const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
     if(action==="state"){
       if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=(s.icals[u.orp]||[]).length;
-        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,overrides:s.overrides||{},icalCount}); }
+        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,overrides:s.overrides||{},icalCount,kb:s.kb||KB_SEED}); }
       if(req.method==="POST"){ if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
         let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{return res.status(400).json({error:"bad json"});}}
         const cur=await getState(); const p={};
-        if(b&&b.targets)p.targets=b.targets; if(b&&typeof b.auto_sync==="boolean")p.auto_sync=b.auto_sync; if(b&&b.icals)p.icals=b.icals;
+        if(b&&b.targets)p.targets=b.targets; if(b&&typeof b.auto_sync==="boolean")p.auto_sync=b.auto_sync; if(b&&b.icals)p.icals=b.icals; if(b&&b.kb)p.kb=b.kb;
         if(b&&b.overrideSet){ const o={...(cur.overrides||{})}; o[b.overrideSet.property_id+"|"+b.overrideSet.date]=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(b.overrideSet.amount)))); p.overrides=o; }
         if(b&&b.overrideClear){ const o={...(cur.overrides||{})}; delete o[b.overrideClear.property_id+"|"+b.overrideClear.date]; p.overrides=o; }
         const n=await setState(p); if(redis&&b.icals) await redis.del("parkside:booked"); return res.status(200).json({ok:true,auto_sync:n.auto_sync}); }
@@ -241,6 +251,20 @@ module.exports=async(req,res)=>{
       const logged=await logPhase1(rates,booked,today);
       if(!st.auto_sync) return res.status(200).json({mode:"COMPUTED_NO_SYNC",auto_sync:false,computed:rates.length,wrote:false,bookedNights:booked.total,logged,note:"auto-sync OFF — nothing written"});
       const r=await pushOwnerRez(rates); return res.status(r.ownerrezOk?200:502).json({mode:"LIVE_SYNC",auto_sync:true,bookedNights:booked.total,logged,overrides:rates.filter(x=>x.overridden).length,...r});
+    }
+    if(action==="ai_draft"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
+      const question=(b&&b.question)||"";
+      const key=process.env.ANTHROPIC_API_KEY; if(!key) return res.status(200).json({needKey:true,error:"ANTHROPIC_API_KEY not set on the server yet"});
+      const st=await getState(); const kb=st.kb||KB_SEED;
+      const facts=(kb.items||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
+      const fmt=(kb.format&&kb.format.trim())?("\n\nFORMATTING / STYLE the host wants you to match:\n"+kb.format):"";
+      const sys="You draft a reply to a vacation-rental guest for Parkside Tepees (glamping tepees inside Parkside Resort, Pigeon Forge / Sevierville TN). Answer ONLY using the KNOWN INFO below. Never invent or guess any detail (times, prices, wifi, addresses, policies, amenities). If the answer is not clearly in the known info, reply with EXACTLY: ESCALATE: <one-line restatement of the guest question> and nothing else. Be warm and concise."+fmt+"\n\nKNOWN INFO:\n"+(facts||"(none saved yet)");
+      try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,system:sys,messages:[{role:"user",content:String(question)}]})});
+        const j=await r.json(); if(!r.ok) return res.status(200).json({error:"Anthropic API error",detail:JSON.stringify(j).slice(0,300)});
+        const text=((j.content&&j.content[0]&&j.content[0].text)||"").trim(); return res.status(200).json({draft:text,escalate:/^ESCALATE:/i.test(text),sent:false}); }
+      catch(e){ return res.status(200).json({error:"request failed: "+String(e.message||e)}); }
     }
     if(action==="explain"){
       const st=await getState(); const sig=await getSignal(); const learned=await getLearned();
