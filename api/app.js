@@ -20,7 +20,7 @@ const UNITS=[
 const SEED_TARGETS={1:{wd:.40,we:.60},2:{wd:.40,we:.60},3:{wd:.55,we:.78},4:{wd:.58,we:.80},5:{wd:.60,we:.82},6:{wd:.70,we:.90},7:{wd:.75,we:.92},8:{wd:.65,we:.85},9:{wd:.60,we:.82},10:{wd:.72,we:.92},11:{wd:.55,we:.78},12:{wd:.62,we:.85}};
 // wUnit/wPool = blend of per-unit vs resort-pool occupancy. raiseSpan = how far above target reaches the
 // ceiling (gap>=raiseSpan -> $300). cutSpan = how far below target reaches the floor (gap<=-cutSpan -> $99).
-const KNOBS={weekendDays:[5,6],wUnit:.75,wPool:.25,raiseSpan:.12,cutSpan:.35};
+const KNOBS={weekendDays:[5,6],minRaise:.30,raiseSpan:.15,cutSpan:.35,poolLift:.5,poolCut:.3};
 const DEFAULTS={targets:SEED_TARGETS,auto_sync:false,learned:{raiseFactor:1},overrides:{},icals:{}};
 const SKEY="parkside:state";
 
@@ -69,9 +69,15 @@ function buildAgg(booked,start,days){
   return {unitAgg,poolAgg};
 }
 function priceFromOcc(base,unitOcc,poolOcc,target){
-  const occ=KNOBS.wUnit*unitOcc+KNOBS.wPool*poolOcc; const gap=occ-target;
-  if(gap>=0){ const t=Math.min(1,gap/KNOBS.raiseSpan); return base+(CEIL-base)*t; }  // at/above target -> toward ceiling
-  const t=Math.min(1,(-gap)/KNOBS.cutSpan); return base-(base-FLOOR)*t;               // behind target -> toward floor
+  const ug=unitOcc-target;
+  if(ug>=0){ // at/above target -> premium, travels toward ceiling; scarcer (higher occ) -> closer to $300
+    let t=KNOBS.minRaise+(1-KNOBS.minRaise)*Math.min(1,ug/KNOBS.raiseSpan);
+    t+=Math.max(0,poolOcc-target)*KNOBS.poolLift;   // strong resort lifts further
+    t=Math.min(1,t); return base+(CEIL-base)*t;
+  }
+  let t=Math.min(1,(-ug)/KNOBS.cutSpan);            // behind target + ample inventory -> toward floor
+  t+=Math.max(0,target-poolOcc)*KNOBS.poolCut;      // weak resort deepens the discount
+  t=Math.min(1,t); return base-(base-FLOOR)*t;
 }
 function compute(signalMap,targets,today,startDate,days,occ,overrides){
   // occ = {hasData, mock?:number, agg?:{unitAgg,poolAgg}}
