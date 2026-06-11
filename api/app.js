@@ -20,7 +20,7 @@ const UNITS=[
 const SEED_TARGETS={1:{wd:.40,we:.60},2:{wd:.40,we:.60},3:{wd:.55,we:.78},4:{wd:.58,we:.80},5:{wd:.60,we:.82},6:{wd:.70,we:.90},7:{wd:.75,we:.92},8:{wd:.65,we:.85},9:{wd:.60,we:.82},10:{wd:.72,we:.92},11:{wd:.55,we:.78},12:{wd:.62,we:.85}};
 const WEEKEND_DAYS=[5,6];
 const UNIT_PREM={486891:1.14,486912:1.10,486917:1.08,486911:1.035}; // quality premium as a multiplier on the seasonal base
-const MODEL={UPSPAN:0.20,DOWNSPAN:0.30,MAXUP:0.45,MAXDOWN:0.32,SCAR_BASE:0.50,SCAR_GAIN:1.0,SCAR_CAP:0.40,UNIT_GAIN:0.40,UNIT_CAP:0.12,MULT_MIN:0.65,MULT_MAX:1.95,PEAK_MULT:1.30};
+const MODEL={UPSPAN:0.20,DOWNSPAN:0.30,MAXUP:0.45,MAXDOWN:0.22,SCAR_FAR:0.55,SCAR_NEAR:0.35,SCAR_GAIN:1.0,SCAR_CAP:0.40,UNIT_GAIN:0.40,UNIT_CAP:0.12,MULT_MIN:0.65,MULT_MAX:1.95,PEAK_MULT:1.30,PEAK_CEIL:450};
 const SENS=[[0,1.0],[14,0.95],[30,0.85],[60,0.65],[90,0.52],[120,0.45],[180,0.30],[270,0.20],[365,0.15]]; // how hard we react to pace, by lead days
 const KNOBS={weekendDays:WEEKEND_DAYS,...MODEL};
 function median(a){a=a.slice().sort((x,y)=>x-y);const n=a.length;return n?(n%2?a[(n-1)/2]:(a[n/2-1]+a[n/2])/2):0;}
@@ -93,27 +93,27 @@ function paceMult(poolOcc,exp,lead){ // pace lever only (ahead/behind the trajec
 }
 // Night-level scarcity: how full the WHOLE resort is for this specific night (our portfolio edge).
 // Revealed real-time demand lifts the last remaining units even when the market base reads low.
-function scarMult(nightOcc,lead){ return Math.min(MODEL.SCAR_CAP,Math.max(0,nightOcc-MODEL.SCAR_BASE)*MODEL.SCAR_GAIN)*interp(SENS,lead); }
+function scarMult(nightOcc,lead){ const sens=interp(SENS,lead); const thr=MODEL.SCAR_FAR-(MODEL.SCAR_FAR-MODEL.SCAR_NEAR)*sens; return Math.min(MODEL.SCAR_CAP,Math.max(0,nightOcc-thr)*MODEL.SCAR_GAIN)*sens; }
 function compute(signalMap,targets,today,startDate,days,occ,overrides,learned){
   const start=new Date(startDate+"T00:00:00Z"); const out=[]; overrides=overrides||{};
   const sv=Object.values(signalMap).filter(v=>v>0); const peakThr=(sv.length?median(sv):FLOOR)*MODEL.PEAK_MULT; // peak nights = top of the year
   const ctxCache={};
   for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const mo=d.getUTCMonth()+1; const we=isWe(d); const dt=we?1:0; const dtN=we?"weekend":"weekday";
-    let sig=signalMap[ds]; if(sig==null) sig=signalFallback(signalMap,ds); const peak=sig>=peakThr;
+    let sig=signalMap[ds]; if(sig==null) sig=signalFallback(signalMap,ds); const peak=sig>=peakThr; const ceil=peak?MODEL.PEAK_CEIL:CEIL;
     let ctx=null;
     if(occ.hasData&&occ.mock==null){ const ck=mk+"|"+dt; ctx=ctxCache[ck];
       if(ctx===undefined){ const lead=monthLead(mk+"-15",today); const tg=we?targets[mo].we:targets[mo].wd; const exp=tg*paceFrac(lead,dtN,learned); const pa=occ.agg.poolAgg[mk]&&occ.agg.poolAgg[mk][dt]; const poolOcc=pa&&pa.t?pa.b/pa.t:0; ctx={lead,exp,poolOcc}; ctxCache[ck]=ctx; } }
     for(const u of UNITS){ const key=u.orp+"|"+ds; let amount,overridden=false;
       if(overrides[key]!=null){ amount=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(overrides[key])))); overridden=true; }
       else { const base=sig*(UNIT_PREM[u.orp]||1.0);
-        if(!occ.hasData){ amount=Math.max(FLOOR,Math.min(CEIL,Math.round(base))); }
-        else if(occ.mock!=null){ const lead=monthLead(mk+"-15",today); const tg=we?targets[mo].we:targets[mo].wd; const exp=tg*paceFrac(lead,dtN,learned); let m=paceMult(occ.mock,exp,lead)+scarMult(occ.mock,lead); if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m)); amount=Math.max(FLOOR,Math.min(CEIL,Math.round(base*m))); }
+        if(!occ.hasData){ amount=Math.max(FLOOR,Math.min(ceil,Math.round(base))); }
+        else if(occ.mock!=null){ const lead=monthLead(mk+"-15",today); const tg=we?targets[mo].we:targets[mo].wd; const exp=tg*paceFrac(lead,dtN,learned); let m=paceMult(occ.mock,exp,lead)+scarMult(occ.mock,lead); if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m)); amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*m))); }
         else { let m=paceMult(ctx.poolOcc,ctx.exp,ctx.lead)+scarMult((occ.agg.nightPool&&occ.agg.nightPool[ds])||0,ctx.lead);
           const ua=occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt]; const unitOcc=ua&&ua.t?ua.b/ua.t:0; const sens=interp(SENS,ctx.lead);
           let un=(unitOcc-ctx.poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); // gentle per-unit scarcity
           if(peak)m=Math.max(1,m); // never discount a peak night below its seasonal market base
           m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
-          amount=Math.max(FLOOR,Math.min(CEIL,Math.round(base*m))); } }
+          amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*m))); } }
       out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",overridden}); } }
   return out;
 }
@@ -210,7 +210,7 @@ module.exports=async(req,res)=>{
         const unitOcc=ua&&ua.t?ua.b/ua.t:0, poolOcc=pa&&pa.t?pa.b/pa.t:0;
         const nightOcc=(agg.nightPool&&agg.nightPool[ds])||0; const scar=scarMult(nightOcc,lead);
         let m=paceMult(poolOcc,exp,lead)+scar; const sens=interp(SENS,lead); let un=(unitOcc-poolOcc)*MODEL.UNIT_GAIN*sens; un=Math.max(-MODEL.UNIT_CAP,Math.min(MODEL.UNIT_CAP,un)); m=m*(1+un); if(peak)m=Math.max(1,m); m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
-        const final=Math.max(FLOOR,Math.min(CEIL,Math.round(base*m)));
+        const final=Math.max(FLOOR,Math.min(peak?MODEL.PEAK_CEIL:CEIL,Math.round(base*m)));
         breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,premium:prem,base:Math.round(base),peak,peakThr:Math.round(peakThr),target:tg,monthLead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),nightOcc:Number(nightOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),scar:Number(scar.toFixed(3)),sens:Number(sens.toFixed(2)),mult:Number(m.toFixed(3)),final}; }
       return res.status(200).json({refId:process.env.PRICELABS_REF_ID||"486915",sigDays:Object.keys(sig).length,sigMin:allv.length?Math.min(...allv):null,sigMax:allv.length?Math.max(...allv):null,sigAvg:avg(allv),byMonth,breakdown});
     }
