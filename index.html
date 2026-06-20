@@ -124,6 +124,15 @@
 </div>
 
 <div class="wrap" id="msgMain" style="display:none">
+  <div class="card">
+    <h2>Auto-reply to guests <span class="muted" style="font-weight:400;text-transform:none">(default OFF — preview/test only)</span></h2>
+    <div class="toggle">
+      <span class="muted">Send replies to guests via OwnerRez</span>
+      <div class="switch" id="msgSwitch" onclick="toggleMessaging()"><div class="knob"></div></div>
+      <span class="pill" id="msgState">OFF</span>
+    </div>
+    <div class="legend" id="msgNote">When <b>ON</b>, in-KB answers and the escalation apology are sent to the guest through the channel connected to OwnerRez, and Victor is texted on escalations. When <b>OFF</b>, nothing is sent — the tester below just shows what would happen. No channel is connected yet (Vrbo pending, Airbnb future), so even ON sends nothing until a channel is live.</div>
+  </div>
   <div class="card" style="border-color:var(--accent)">
     <h2>Messaging — guest auto-response knowledge base</h2>
     <div class="legend">This is the information the assistant is allowed to use when answering guests. It answers <b>only</b> from what's saved here and never makes things up; if an answer isn't here it flags the question to escalate. Edit any answer and Save. <b>Nothing is auto-sent yet</b> — this is the editable data store plus a preview tester.</div>
@@ -146,6 +155,24 @@
     <textarea id="aiQ" class="full" style="min-height:60px" placeholder="Type a sample guest question, e.g. 'What time is checkout and is there parking?'"></textarea>
     <div style="margin-top:10px;display:flex;gap:10px"><button onclick="aiPreview()">Preview AI answer</button><span id="aiStatus" class="muted" style="align-self:center"></span></div>
     <div id="aiOut" class="legend" style="white-space:pre-wrap;margin-top:10px"></div>
+  </div>
+  <div class="card" style="border-color:var(--pin)">
+    <h2>Test confirmation message <span class="muted" style="font-weight:400;text-transform:none">(dry-run — nothing is sent to anyone)</span></h2>
+    <div class="legend" style="margin-top:0">Simulate a CONFIRMED booking and preview the one personalized thank-you the engine would send, including the StayDeck clean-up link. iCal "Blocked-Off Time" (Brightside) bookings are excluded by design — try the "iCal block" channel to see that.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
+      <label class="muted" style="font-size:12px">Guest first name<br><input id="ctName" style="width:100%" placeholder="e.g. Jane"></label>
+      <label class="muted" style="font-size:12px">Unit<br><select id="ctUnit" style="width:100%"></select></label>
+      <label class="muted" style="font-size:12px">Channel<br><select id="ctChannel" style="width:100%"><option value="airbnb">Airbnb (API)</option><option value="vrbo">Vrbo (API)</option><option value="booking">Booking.com (API)</option><option value="ical">iCal block (Brightside) — excluded</option></select></label>
+      <label class="muted" style="font-size:12px">Booking ref<br><input id="ctRef" style="width:100%" placeholder="e.g. HMABCD123 (ORB… = block)"></label>
+      <label class="muted" style="font-size:12px">Check-in<br><input id="ctIn" style="width:100%" placeholder="e.g. Aug 14, 2026"></label>
+      <label class="muted" style="font-size:12px">Check-out<br><input id="ctOut" style="width:100%" placeholder="e.g. Aug 17, 2026"></label>
+    </div>
+    <textarea id="ctMsg" class="full" style="min-height:60px;margin-top:10px" placeholder="What the guest said (their booking/inquiry message), e.g. 'So excited — it's our anniversary trip!'"></textarea>
+    <div style="margin-top:10px;display:flex;gap:10px"><button onclick="confirmTest()">Generate test confirmation</button><span id="ctStatus" class="muted" style="align-self:center"></span></div>
+    <div id="ctOutWrap" style="display:none;margin-top:12px">
+      <div id="ctOut" class="legend" style="white-space:pre-wrap;background:#0c141d;border:1px solid var(--line);border-radius:6px;padding:10px"></div>
+      <div id="ctLink" class="legend" style="margin-top:6px"></div>
+    </div>
   </div>
 </div>
 
@@ -184,6 +211,19 @@ function setSyncUI(){
   document.getElementById('syncState').style.background=on?'var(--ok)':'#3a4759';
   document.getElementById('syncNow').style.display=on?'inline-block':'none';
   document.getElementById('banner').style.display=on?'none':'block';
+}
+function setMsgUI(){
+  const on=!!STATE.messaging_enabled;
+  const sw=document.getElementById('msgSwitch'); if(!sw) return;
+  sw.className='switch'+(on?' on':'');
+  document.getElementById('msgState').textContent=on?'ON':'OFF';
+  document.getElementById('msgState').style.background=on?'var(--ok)':'#3a4759';
+}
+async function toggleMessaging(){
+  const next=!STATE.messaging_enabled;
+  if(next && !confirm("Turn auto-reply ON? When a channel is connected, the engine will send replies to real guests and text Victor on escalations.")) return;
+  const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({messaging_enabled:next})});
+  if(r.ok){ STATE.messaging_enabled=next; setMsgUI(); }
 }
 async function loadOccupancy(){
   try{ const r=await fetch(api('occupancy')); OCC=await r.json(); }catch{ OCC={units:[],months:[],byUnit:{},totalBooked:0}; }
@@ -296,7 +336,8 @@ function switchView(v){
   if(!pricing && !MSG_BUILT){ renderMessaging(); MSG_BUILT=true; }
 }
 function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function renderMessaging(){ KB=JSON.parse(JSON.stringify(STATE.kb||{format:"",items:[]})); document.getElementById('kbFormat').value=KB.format||""; drawKb(); }
+function renderMessaging(){ KB=JSON.parse(JSON.stringify(STATE.kb||{format:"",items:[]})); document.getElementById('kbFormat').value=KB.format||""; drawKb(); setMsgUI();
+  const cu=document.getElementById('ctUnit'); if(cu&&!cu.options.length) cu.innerHTML=UNITS.map(function(u){return '<option value="'+u[1]+'">'+u[1]+'</option>';}).join(""); }
 function drawKb(){ const el=document.getElementById('kbList'); el.innerHTML=(KB.items||[]).map((it,i)=>`<div class='kbitem'><input class='topic' value="${esc(it.topic).replace(/\"/g,'&quot;')}" oninput="KB.items[${i}].topic=this.value"><textarea oninput="KB.items[${i}].a=this.value" placeholder="(answer — leave blank if unknown)">${esc(it.a)}</textarea><button class='seg-x' title='remove' onclick="removeKbItem(${i})">&#10005;</button></div>`).join(""); }
 function addKbItem(){ KB.items=KB.items||[]; KB.items.push({topic:"",a:""}); drawKb(); }
 function removeKbItem(i){ KB.items.splice(i,1); drawKb(); }
@@ -310,8 +351,31 @@ async function aiPreview(){ const q=document.getElementById('aiQ').value.trim();
     document.getElementById('aiStatus').textContent="";
     if(j.needKey){ document.getElementById('aiOut').textContent="\u26a0\ufe0f Anthropic API key not set on the server yet. Paste ANTHROPIC_API_KEY in Vercel \u2192 Settings \u2192 Environment Variables, redeploy, then try again."; return; }
     if(j.error){ document.getElementById('aiOut').textContent="Error: "+j.error+(j.detail?(" \u2014 "+j.detail):""); return; }
-    document.getElementById('aiOut').textContent=(j.escalate?"[Would escalate to Victor \u2014 not in saved answers]\n\n":"")+(j.draft||""); }
+    if(j.escalate){
+      const v=j.victorSms||{}; const vline=v.sent?"Victor notified by SMS ✅":(v.staged?("Victor SMS staged — "+(v.missing?("missing "+v.missing.join(", ")):v.reason)):"Victor SMS: "+(v.error||"?"));
+      document.getElementById('aiOut').textContent="⚠️ ESCALATED — not in the knowledge base (no guess).\n\nGuest receives:\n“"+(j.draft||"")+"”\n\n"+vline;
+    } else {
+      const g=j.guestSend||{}; const gline=g.sent?"\n\n(sent to guest ✅)":(g.staged?("\n\n(not sent — "+g.reason+")"):"");
+      document.getElementById('aiOut').textContent=(j.draft||"")+gline;
+    } }
   catch(e){ document.getElementById('aiStatus').textContent=""; document.getElementById('aiOut').textContent="Error: "+e.message; }
+}
+async function confirmTest(){
+  const ctx={ guest_name:document.getElementById('ctName').value.trim(), unit:document.getElementById('ctUnit').value,
+    channel:document.getElementById('ctChannel').value, booking_ref:document.getElementById('ctRef').value.trim(),
+    checkin:document.getElementById('ctIn').value.trim(), checkout:document.getElementById('ctOut').value.trim(),
+    guest_message:document.getElementById('ctMsg').value.trim() };
+  document.getElementById('ctStatus').textContent="Generating…"; document.getElementById('ctOutWrap').style.display='none';
+  try{
+    const r=await fetch(api('confirm_test'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({context:ctx})});
+    const j=await r.json(); document.getElementById('ctStatus').textContent="";
+    document.getElementById('ctOutWrap').style.display='block';
+    if(j.needKey){ document.getElementById('ctOut').textContent="⚠️ ANTHROPIC_API_KEY not set on the server yet."; document.getElementById('ctLink').textContent=""; return; }
+    if(j.error){ document.getElementById('ctOut').textContent="Error: "+j.error+(j.detail?(" — "+j.detail):""); document.getElementById('ctLink').textContent=""; return; }
+    if(j.excluded){ document.getElementById('ctOut').textContent="🚫 "+j.reason; document.getElementById('ctLink').textContent=""; return; }
+    document.getElementById('ctOut').textContent=j.message||"";
+    document.getElementById('ctLink').innerHTML="Clean-up link embedded: <a href=\""+j.cleanupLink+"\" target=\"_blank\" rel=\"noopener\">"+j.cleanupLink+"</a> · <span class='muted'>dry-run — not sent</span>";
+  }catch(e){ document.getElementById('ctStatus').textContent=""; document.getElementById('ctOutWrap').style.display='block'; document.getElementById('ctOut').textContent="Error: "+e.message; }
 }
 function boot(){
   const n=new Date(); const sY=n.getUTCFullYear(),sM=n.getUTCMonth(); const e=new Date(n); e.setUTCDate(e.getUTCDate()+365); const eY=e.getUTCFullYear(),eM=e.getUTCMonth();
