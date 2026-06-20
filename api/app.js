@@ -51,6 +51,18 @@ async function setState(p){ const cur=await getState(); const next={...cur,...p}
 const isWe=d=>KNOBS.weekendDays.includes(d.getUTCDay());
 function targetFor(d,t){ const m=t[d.getUTCMonth()+1]; return isWe(d)?m.we:m.wd; }
 function monthLead(ds,today){ const first=new Date(ds.slice(0,7)+"-01T00:00:00Z"); const t=new Date(today+"T00:00:00Z"); return Math.max(0,Math.round((first-t)/86400000)); }
+function curMonthStart(today){ return today.slice(0,8)+"01"; }
+function daysBetween(a,b){ return Math.round((new Date(b+"T00:00:00Z")-new Date(a+"T00:00:00Z"))/86400000); }
+// Whole-month occupancy MEASUREMENT: aggregate booked nights over the FULL current calendar month (1st..end),
+// not just today..end-of-month. poolAgg/unitAgg are whole-month; nightPool/gaps stay forward-only (rates only on future nights).
+async function getOccData(st, today, days, useCache){
+  const ms=curMonthStart(today); const daysMS=days+daysBetween(ms,today);
+  const booked=await getBooked(st, ms, daysMS, useCache);
+  const occAgg=buildAgg(booked, ms, daysMS);
+  const fwdAgg=buildAgg(booked, today, days);
+  const agg={ poolAgg:occAgg.poolAgg, unitAgg:occAgg.unitAgg, nightPool:fwdAgg.nightPool, gaps:fwdAgg.gaps };
+  return { booked, agg, monthStart:ms, daysMS };
+}
 function interp(pts,x){ if(x<=pts[0][0])return pts[0][1]; for(let i=1;i<pts.length;i++){ if(x<=pts[i][0]){ const a=pts[i-1],b=pts[i]; return a[1]+(b[1]-a[1])*(x-a[0])/(b[0]-a[0]); } } return pts[pts.length-1][1]; }
 function paceFrac(lead,dt,learned){ const seed=interp(PACE_SEED[dt],lead);
   if(!learned||!learned[dt]||!learned[dt].n) return seed;
@@ -241,14 +253,15 @@ module.exports=async(req,res)=>{
       return res.status(405).json({error:"GET or POST"});
     }
     if(action==="occupancy"){
-      const st=await getState(); const booked=await getBooked(st,today,days, !(req.query&&req.query.fresh==="1"));
-      const agg=buildAgg(booked,today,days); const learned=await getLearned();
-      const start=new Date(today+"T00:00:00Z"); const monthTotal={};
-      for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const mk=d.toISOString().slice(0,7); monthTotal[mk]=(monthTotal[mk]||0)+1; }
+      const st=await getState(); const learned=await getLearned();
+      const od=await getOccData(st,today,days, !(req.query&&req.query.fresh==="1"));
+      const booked=od.booked; const wmStart=od.monthStart; const daysMS=od.daysMS;
+      const start=new Date(wmStart+"T00:00:00Z"); const monthTotal={};
+      for(let i=0;i<daysMS;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const mk=d.toISOString().slice(0,7); monthTotal[mk]=(monthTotal[mk]||0)+1; }
       const months=Object.keys(monthTotal).sort(); const byUnit={};
       for(const u of UNITS){ const dates=Object.keys(booked.byUnit[u.orp]); const mc={}; for(const ds of dates){const mk=ds.slice(0,7); mc[mk]=(mc[mk]||0)+1;}
         const monthly={}; for(const mk of months) monthly[mk]=Math.round(100*((mc[mk]||0)/monthTotal[mk])); byUnit[u.orp]={booked:dates,monthly}; }
-      const pace=computePace(agg.poolAgg, st.targets, learned, today, months);
+      const pace=computePace(od.agg.poolAgg, st.targets, learned, today, months);
       return res.status(200).json({units:UNITS.map(u=>({orp:u.orp,name:u.name})),months,byUnit,pace,paceLearn:{weekend:learned.weekend.n||0,weekday:learned.weekday.n||0,blendWeight:Math.min(0.8,((learned.weekend.n||0)+(learned.weekday.n||0))/600).toFixed(2)},totalBooked:booked.total,channels:booked.channels});
     }
     if(action==="logs"){
@@ -262,7 +275,7 @@ module.exports=async(req,res)=>{
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
       const st=await getState(); const targets=(b&&b.targets)||st.targets; const sig=await getSignal(); const learned=await getLearned();
       let occ; if(b&&typeof b.mockOcc==="number") occ={hasData:true,mock:b.mockOcc};
-      else { const bk=await getBooked(st,today,days); occ={hasData:bk.total>0, agg:buildAgg(bk,today,days)}; }
+      else { const od=await getOccData(st,today,days,true); occ={hasData:od.booked.total>0, agg:od.agg}; }
       const rates=compute(sig,targets,today,today,days,occ,st.overrides,learned); const amts=rates.map(r=>r.amount);
       const pace = occ.agg ? computePace(occ.agg.poolAgg, targets, learned, today, monthList(today,days)) : null;
       const paceLearn={weekend:learned.weekend.n||0,weekday:learned.weekday.n||0,blendWeight:Math.min(0.8,((learned.weekend.n||0)+(learned.weekday.n||0))/600).toFixed(2)};
@@ -271,8 +284,9 @@ module.exports=async(req,res)=>{
     if(action==="run"){
       const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x")) || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__x"));
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
-      const st=await getState(); const sig=await getSignal(); const booked=await getBooked(st,today,days,false); const learned=await getLearned();
-      const occ={hasData:booked.total>0, agg:buildAgg(booked,today,days)};
+      const st=await getState(); const sig=await getSignal(); const learned=await getLearned();
+      const od=await getOccData(st,today,days,false); const booked=od.booked;
+      const occ={hasData:booked.total>0, agg:od.agg};
       const rates=compute(sig,st.targets,today,today,days,occ,st.overrides,learned);
       const logged=await logPhase1(rates,booked,today);
       if(!st.auto_sync) return res.status(200).json({mode:"COMPUTED_NO_SYNC",auto_sync:false,computed:rates.length,wrote:false,bookedNights:booked.total,logged,note:"auto-sync OFF — nothing written"});
