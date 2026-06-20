@@ -309,7 +309,7 @@ module.exports=async(req,res)=>{
       }
       catch(e){ return res.status(200).json({error:"request failed: "+String(e.message||e)}); }
     }
-        if(action==="confirm_test"){
+            if(action==="confirm_test"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
       const ctx=(b&&b.context)||b||{};
@@ -328,22 +328,30 @@ module.exports=async(req,res)=>{
       const slug = SLUG[unit.toLowerCase()] || unit.toLowerCase().replace(/['’]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
       const ref = bookingRef || ("TEST-"+Date.now().toString(36));
       const key=process.env.ANTHROPIC_API_KEY; if(!key) return res.status(200).json({needKey:true,error:"ANTHROPIC_API_KEY not set on the server yet"});
-      let link, linkType, linkPending=false, sys;
+      const isAirbnb = channel==="airbnb";
+      let link=null, linkType, linkPending=false, autoConfirm=false, sys;
       if(stage===1){
-        const tmpl=process.env.OWNERREZ_CLEANUP_URL||"";
-        if(tmpl){ link = tmpl.indexOf("{REF}")>=0 ? tmpl.split("{REF}").join(encodeURIComponent(ref)) : tmpl; }
-        else { link="‹OwnerRez Booking Clean-Up link — pending API resolution›"; linkPending=true; }
-        linkType="ownerrez_cleanup";
-        sys="You write ONE warm booking-confirmation message for Parkside Tepees (glamping tepees inside Parkside Resort, Pigeon Forge TN), sent right when a booking is CONFIRMED. "
-          +"Voice: warm, friendly, gracious — like Gavin's Airbnb messages. Open with 'Hi "+(name||"[Guest]")+",'. Say 'we/us'. An occasional emoji is fine. ~3-5 short sentences. "
-          +"Personalize using the guest's own words when provided. Thank them for booking "+(unit||"their tepee")+(checkin?(" for "+checkin+(checkout?(" to "+checkout):"")):"")+". "
-          +"Ask them to use the secure link to provide their email address and complete/sign the rental agreement FOR THIS STAY, which finalizes the booking. Put the link on its own line as the EXACT token ###LINK###. "
-          +"Do NOT mention the guidebook or check-in details yet — that comes later. STRICT: stay-related only. Never mention marketing, mailing lists, off-platform booking, direct-booking discounts, reviews-for-reward, or any off-platform payment; never ask to move communication off-platform beyond this stay-related step. Output ONLY the message text.";
+        if(isAirbnb){
+          const tmpl=process.env.OWNERREZ_EMAIL_URL||process.env.OWNERREZ_CLEANUP_URL||"";
+          if(tmpl){ link = tmpl.indexOf("{REF}")>=0 ? tmpl.split("{REF}").join(encodeURIComponent(ref)) : tmpl; }
+          else { link="‹OwnerRez email-provision link — pending API resolution›"; linkPending=true; }
+          linkType="ownerrez_email";
+          sys="You write ONE warm booking-confirmation message for Parkside Tepees (glamping tepees inside Parkside Resort, Pigeon Forge TN), sent right when an AIRBNB booking is CONFIRMED. Airbnb does not share the guest's email, so we must collect it. "
+            +"Voice: warm, friendly, gracious — like Gavin's Airbnb messages. Open with 'Hi "+(name||"[Guest]")+",'. Say 'we/us'. An occasional emoji is fine. ~3-5 short sentences. "
+            +"Personalize using the guest's own words when provided. Thank them for booking "+(unit||"their tepee")+(checkin?(" for "+checkin+(checkout?(" to "+checkout):"")):"")+". "
+            +"Ask them to use the secure link to provide their email address so we can finalize the booking (OwnerRez will then send their confirmation). Put the link on its own line as the EXACT token ###LINK###. "
+            +"Do NOT mention a rental agreement, the guidebook, or check-in details — this message is ONLY to collect their email. STRICT: stay-related only. Never mention marketing, mailing lists, off-platform booking, direct-booking discounts, reviews-for-reward, or any off-platform payment; never ask to move communication off-platform beyond this stay-related step. Output ONLY the message text.";
+        } else {
+          autoConfirm=true; linkType="auto_confirm";
+          sys="You write ONE warm booking-confirmation message for Parkside Tepees (glamping tepees inside Parkside Resort, Pigeon Forge TN), sent when a "+(channel||"direct")+" booking is CONFIRMED. We ALREADY have the guest's email from this channel, so NO link and NO guest action are needed. "
+            +"Voice: warm, friendly, gracious — like Gavin's Airbnb messages. Open with 'Hi "+(name||"[Guest]")+",'. Say 'we/us'. An occasional emoji is fine. ~2-4 short sentences. "
+            +"Personalize using the guest's own words when provided. Thank them for booking "+(unit||"their tepee")+(checkin?(" for "+checkin+(checkout?(" to "+checkout):"")):"")+" and confirm they're all set. "
+            +"Do NOT include any link, and do NOT ask them to click or provide anything. Do NOT mention the guidebook or check-in details yet. STRICT: stay-related only. Never mention marketing, mailing lists, off-platform booking, direct-booking discounts, reviews-for-reward, or any off-platform payment. Output ONLY the message text.";
+        }
       } else {
         const gbase=process.env.STAYDECK_GUIDE_BASE||"https://guide.parksidetepees.com";
-        link = gbase+"/g/"+(slug||"");
-        linkType="staydeck_guidebook";
-        sys="You write ONE warm follow-up message for Parkside Tepees, sent AFTER the guest has provided their email and completed the rental agreement (booking fully confirmed by OwnerRez). "
+        link = gbase+"/g/"+(slug||""); linkType="staydeck_guidebook";
+        sys="You write ONE warm follow-up message for Parkside Tepees, sent ONLY AFTER OwnerRez has sent its confirmation and the guest has COMPLETED it (email on file, booking fully finalized by OwnerRez). "
           +"Voice: warm, friendly — like Gavin's Airbnb messages. Open with 'Hi "+(name||"[Guest]")+",'. Say 'we/us'. An occasional emoji is fine. ~3-5 short sentences. "
           +"Let them know they're all set, and share their digital guidebook for "+(unit||"their tepee")+" with check-in details, Wi-Fi, directions, and resort info. Put the guidebook link on its own line as the EXACT token ###LINK###. "
           +"STRICT: stay-related only. No marketing, mailing lists, off-platform booking, discounts, reviews-for-reward, or off-platform payment. Output ONLY the message text.";
@@ -353,9 +361,10 @@ module.exports=async(req,res)=>{
         const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0.4,system:sys,messages:[{role:"user",content:userParts.join("\n")}]})});
         const j=await r.json(); if(!r.ok) return res.status(200).json({error:"Anthropic API error",detail:JSON.stringify(j).slice(0,300)});
         let msg=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
-        if(msg.indexOf("###LINK###")===-1){ msg=msg+"\n\n"+link; } else { msg=msg.split("###LINK###").join(link); }
-        msg=msg.replace(/\{BUFIXUP\}/gi, link);
-        return res.status(200).json({dryRun:true, sent:false, excluded:false, stage, channel, linkType, link, linkPending, message:msg});
+        if(link){ if(msg.indexOf("###LINK###")===-1){ msg=msg+"\n\n"+link; } else { msg=msg.split("###LINK###").join(link); } }
+        else { msg=msg.split("###LINK###").join("").trim(); }
+        msg=msg.replace(/\{BUFIXUP\}/gi, link||"");
+        return res.status(200).json({dryRun:true, sent:false, excluded:false, stage, channel, linkType, link, linkPending, autoConfirm, message:msg});
       }catch(e){ return res.status(200).json({error:"request failed: "+String(e.message||e)}); }
     }
     if(action==="kb_learn"){
