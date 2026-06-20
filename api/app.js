@@ -42,7 +42,7 @@ const KB_SEED={format:"",items:[
   {topic:"Quiet hours",a:""},{topic:"Early check-in / late checkout",a:""},
   {topic:"Cancellation policy",a:""},{topic:"Emergency / who to contact",a:""}
 ]};
-const DEFAULTS={targets:SEED_TARGETS,auto_sync:false,overrides:{},kb:KB_SEED};
+const DEFAULTS={targets:SEED_TARGETS,auto_sync:false,overrides:{},kb:KB_SEED,messaging_enabled:false};
 const OWNERREZ_ICAL={486910:"https://app.ownerrez.com/feeds/ical/8f39d35971614fe68f65c2d60ebee98a",486911:"https://app.ownerrez.com/feeds/ical/8b443e66b91d42f78312c1b96456e721",486912:"https://app.ownerrez.com/feeds/ical/c11b9bdcccd0407b94a471ec1d4bf184",486913:"https://app.ownerrez.com/feeds/ical/6b7aadd1089a4545acfd76d4896cd1f4",486891:"https://app.ownerrez.com/feeds/ical/a803006016a94e429b22c4af21655c6e",486914:"https://app.ownerrez.com/feeds/ical/a6a81900436e48538ca68c999084a00f",486915:"https://app.ownerrez.com/feeds/ical/a33c27437b734216b0f153e4d112673b",486916:"https://app.ownerrez.com/feeds/ical/2fc1ac9ea2a744708fe515fec9a45543",486917:"https://app.ownerrez.com/feeds/ical/b5e770592bfe401c93c472df3ca912e1",486918:"https://app.ownerrez.com/feeds/ical/5706333006cf4e34a1ed058c9f3a695a"}; // OwnerRez availability/blocks = single occupancy source
 const SKEY="parkside:state";
 
@@ -200,19 +200,44 @@ function computePace(poolAgg,targets,learned,today,months){ const pace={};
     const f=(dt,dn,tv)=>{const act=pa[dt].t?Math.round(100*pa[dt].b/pa[dt].t):0; const exp=Math.round(100*tv*paceFrac(lead,dn,learned)); return {act,exp,status:act>=exp?"ahead":"behind"};};
     pace[mk]={wknd:f(1,"weekend",tgt.we),wkdy:f(0,"weekday",tgt.wd)}; }
   return pace; }
+// ===== Guest-messaging send path (added) =====
+const APOLOGY="I'm sorry, I don't know the answer to that. Let me check with a manager and I'll get back to you soon.";
+async function sendGuestReply(enabled, bookingId, body){
+  if(!enabled) return {sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"};
+  const tok=process.env.OWNERREZ_OAUTH_TOKEN;
+  if(!tok) return {sent:false, staged:true, reason:"no OWNERREZ_OAUTH_TOKEN (create OwnerRez OAuth app + Grant Access To Me)"};
+  if(!bookingId) return {sent:false, staged:true, reason:"no booking_id (no inbound guest thread / no connected channel yet)"};
+  try{ const r=await fetch("https://api.ownerrez.com/v2/messages",{method:"POST",
+      headers:{Authorization:"Bearer "+tok,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},
+      body:JSON.stringify({booking_id:bookingId, body})});
+    const t=await r.text(); return {sent:r.ok, status:r.status, body:t.slice(0,200)}; }
+  catch(e){ return {sent:false, error:String(e.message||e)}; }
+}
+async function smsVictor(enabled, text){
+  if(!enabled) return {sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"};
+  const sid=process.env.TWILIO_ACCOUNT_SID, auth=process.env.TWILIO_AUTH_TOKEN, from=process.env.TWILIO_FROM, to=process.env.VICTOR_PHONE;
+  const missing=[]; if(!sid||!auth)missing.push("TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN"); if(!from)missing.push("TWILIO_FROM"); if(!to)missing.push("VICTOR_PHONE");
+  if(missing.length) return {sent:false, staged:true, missing};
+  try{ const r=await fetch("https://api.twilio.com/2010-04-01/Accounts/"+sid+"/Messages.json",{method:"POST",
+      headers:{Authorization:"Basic "+Buffer.from(sid+":"+auth).toString("base64"),"Content-Type":"application/x-www-form-urlencoded"},
+      body:new URLSearchParams({From:from,To:to,Body:text})});
+    return {sent:r.ok, status:r.status}; }
+  catch(e){ return {sent:false, error:String(e.message||e)}; }
+}
+
 module.exports=async(req,res)=>{
   try{
     const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
     if(action==="state"){
       if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=OWNERREZ_ICAL[u.orp]?1:0;
-        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,overrides:s.overrides||{},icalCount,occupancySource:'ownerrez',kb:s.kb||KB_SEED}); }
+        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,overrides:s.overrides||{},icalCount,occupancySource:'ownerrez',kb:s.kb||KB_SEED,messaging_enabled:!!s.messaging_enabled}); }
       if(req.method==="POST"){ if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
         let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{return res.status(400).json({error:"bad json"});}}
         const cur=await getState(); const p={};
-        if(b&&b.targets)p.targets=b.targets; if(b&&typeof b.auto_sync==="boolean")p.auto_sync=b.auto_sync; if(b&&b.kb)p.kb=b.kb;
+        if(b&&b.targets)p.targets=b.targets; if(b&&typeof b.auto_sync==="boolean")p.auto_sync=b.auto_sync; if(b&&b.kb)p.kb=b.kb; if(b&&typeof b.messaging_enabled==="boolean")p.messaging_enabled=b.messaging_enabled;
         if(b&&b.overrideSet){ const o={...(cur.overrides||{})}; o[b.overrideSet.property_id+"|"+b.overrideSet.date]=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(b.overrideSet.amount)))); p.overrides=o; }
         if(b&&b.overrideClear){ const o={...(cur.overrides||{})}; delete o[b.overrideClear.property_id+"|"+b.overrideClear.date]; p.overrides=o; }
-        const n=await setState(p); if(redis) await redis.del("parkside:booked2"); return res.status(200).json({ok:true,auto_sync:n.auto_sync}); }
+        const n=await setState(p); if(redis) await redis.del("parkside:booked2"); return res.status(200).json({ok:true,auto_sync:n.auto_sync,messaging_enabled:!!n.messaging_enabled}); }
       return res.status(405).json({error:"GET or POST"});
     }
     if(action==="occupancy"){
@@ -253,20 +278,71 @@ module.exports=async(req,res)=>{
       if(!st.auto_sync) return res.status(200).json({mode:"COMPUTED_NO_SYNC",auto_sync:false,computed:rates.length,wrote:false,bookedNights:booked.total,logged,note:"auto-sync OFF — nothing written"});
       const r=await pushOwnerRez(rates); return res.status(r.ownerrezOk?200:502).json({mode:"LIVE_SYNC",auto_sync:true,bookedNights:booked.total,logged,overrides:rates.filter(x=>x.overridden).length,...r});
     }
-    if(action==="ai_draft"){
+        if(action==="ai_draft"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
-      const question=(b&&b.question)||"";
+      const question=(b&&b.question)||""; const bookingId=(b&&b.booking_id)||null;
       const key=process.env.ANTHROPIC_API_KEY; if(!key) return res.status(200).json({needKey:true,error:"ANTHROPIC_API_KEY not set on the server yet"});
-      const st=await getState(); const kb=st.kb||KB_SEED;
+      const st=await getState(); const kb=st.kb||KB_SEED; const enabled=!!st.messaging_enabled;
       const facts=(kb.items||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
-      const unknown=(kb.items||[]).filter(i=>i&&i.topic&&!(i.a&&String(i.a).trim())).map(i=>i.topic).join(", ");
-      const fmt=(kb.format&&kb.format.trim())?("\n\nFORMATTING / STYLE the host wants you to match:\n"+kb.format):"";
-      const sys="You draft a reply to a guest for Parkside Tepees (glamping tepees inside Parkside Resort, Pigeon Forge / Sevierville TN). STRICT RULE: use ONLY facts explicitly written in KNOWN INFO below. You have NO other knowledge about this property. If the guest question is not directly and fully answered by KNOWN INFO, reply with EXACTLY this and nothing else: ESCALATE: <one-line restatement of the question>. Never guess or fall back on what is typical for vacation rentals \u2014 this includes pet, smoking, parking, wifi, occupancy, early/late checkout and amenity questions: if it is not written below, you MUST ESCALATE. When you do answer, use only KNOWN INFO and match the host style."+fmt+"\n\nKNOWN INFO:\n"+(facts||"(none saved yet)")+"\n\nTOPICS WITH NO SAVED ANSWER (you do NOT know these \u2014 if the guest asks about any of them, you MUST reply with the ESCALATE line; never guess): "+(unknown||"(none)");
-      try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0,system:sys,messages:[{role:"user",content:String(question)}]})});
+      const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). "
+        +"You have NO knowledge except the KNOWN INFO list below. "
+        +"Decide if KNOWN INFO DIRECTLY and FULLY answers the guest's question. "
+        +"NEVER guess, infer, combine facts to deduce a new fact, or fall back on what is typical for rentals "
+        +"(pets, smoking, parking, wifi, occupancy, early/late checkout, hot tub, amenities, anything). If it is not explicitly stated, it is NOT known. "
+        +"Reply with ONLY a JSON object, no other text: {\"in_kb\": true|false, \"answer\": \"...\"}. "
+        +"If in_kb is false, answer MUST be \"\". If true, write answer in 1-2 short sentences — warm, friendly, like Gavin's Airbnb messages, 'we/us', an occasional emoji ok, NO long sign-off — using ONLY KNOWN INFO. "
+        +"\n\nKNOWN INFO:\n"+(facts||"(none saved yet)");
+      try{
+        const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0,system:sys,messages:[{role:"user",content:String(question)}]})});
         const j=await r.json(); if(!r.ok) return res.status(200).json({error:"Anthropic API error",detail:JSON.stringify(j).slice(0,300)});
-        const text=((j.content&&j.content[0]&&j.content[0].text)||"").trim(); return res.status(200).json({draft:text,escalate:/^ESCALATE:/i.test(text),sent:false}); }
+        let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
+        let inKb=false, answer="";
+        try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); inKb=o.in_kb===true; answer=String(o.answer||"").trim(); }catch{ inKb=false; answer=""; }
+        if(!inKb || !answer){
+          const victorSms=await smsVictor(enabled, "Parkside escalation — guest asked: "+String(question).slice(0,300)+(bookingId?(" (booking "+bookingId+")"):""));
+          const guestSend=await sendGuestReply(enabled, bookingId, APOLOGY);
+          return res.status(200).json({escalate:true, escalatedTo:"Victor", draft:APOLOGY, victorSms, guestSend, sent:guestSend.sent===true});
+        }
+        const guestSend=await sendGuestReply(enabled, bookingId, answer);
+        return res.status(200).json({escalate:false, draft:answer, guestSend, sent:guestSend.sent===true});
+      }
       catch(e){ return res.status(200).json({error:"request failed: "+String(e.message||e)}); }
+    }
+    if(action==="confirm_test"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
+      const ctx=(b&&b.context)||b||{};
+      const name=String(ctx.guest_name||"").trim();
+      const guestMsg=String(ctx.guest_message||"").trim();
+      const unit=String(ctx.unit||"").trim();
+      const checkin=String(ctx.checkin||"").trim();
+      const checkout=String(ctx.checkout||"").trim();
+      const channel=String(ctx.channel||"").trim().toLowerCase();
+      const bookingRef=String(ctx.booking_ref||ctx.booking_id||"").trim();
+      const API_CHANNELS=["airbnb","vrbo","booking","booking.com","direct"];
+      const looksBlock = /^orb/i.test(bookingRef) || ["ical","block","blocked","brightside"].includes(channel) || (channel!=="" && !API_CHANNELS.includes(channel));
+      if(looksBlock){ return res.status(200).json({excluded:true, sent:false, dryRun:true, reason:"Excluded: iCal 'Blocked-Off Time' / non-API channel. Confirmation messages fire only on real API-channel guest bookings (Airbnb / Vrbo / Booking.com) — never on Brightside iCal blocks."}); }
+      const SLUG={"bear claw":"bear-claw","flyin' horse":"flyin-horse","flyin horse":"flyin-horse","mustang manor":"mustang-manor","soaring dreams":"soaring-dreams","arrowhead":"arrowhead","sunset stampede":"sunset-stampede","buffalo run":"buffalo-run","scarlet antler":"scarlet-antlers","scarlet antlers":"scarlet-antlers","cub house":"cub-house","flyin' free":"flyin-free","flyin free":"flyin-free"};
+      const slug = SLUG[unit.toLowerCase()] || unit.toLowerCase().replace(/['’]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
+      const base = process.env.STAYDECK_CLEANUP_BASE || "https://guide.parksidetepees.com";
+      const ref = bookingRef || ("TEST-"+Date.now().toString(36));
+      const cleanupLink = base+"/checkin/"+encodeURIComponent(ref)+(slug?("?unit="+slug):"");
+      const key=process.env.ANTHROPIC_API_KEY; if(!key) return res.status(200).json({needKey:true,error:"ANTHROPIC_API_KEY not set on the server yet"});
+      const sys="You write ONE warm, personal booking-confirmation message for Parkside Tepees (glamping tepees inside Parkside Resort, Pigeon Forge TN), sent only AFTER a booking is CONFIRMED. "
+        +"Voice: warm, friendly, gracious — like Gavin's Airbnb messages. Open with 'Hi "+(name||"[Guest]")+",'. Say 'we/us'. An occasional emoji is fine. Keep it to ~3-5 short sentences. "
+        +"Personalize using the guest's own words when provided. Thank them for booking "+(unit||"their tepee")+(checkin?(" for "+checkin+(checkout?(" to "+checkout):"")):"")+". "
+        +"Then ask them to use their secure link to (1) confirm their email, (2) sign the rental agreement, and (3) set up the security deposit FOR THIS STAY. Put the link on its own line as the EXACT token ###LINK### (it will be substituted with the real URL). "
+        +"STRICT: stay-related only. Never mention marketing, mailing lists, off-platform booking, direct-booking discounts, reviews-for-reward, or any off-platform payment, and never ask to move communication off-platform beyond this stay-related step. Output ONLY the message text.";
+      const userParts=["Guest name: "+(name||"(unknown)"),"Unit: "+(unit||"(unknown)"),"Dates: "+(checkin||"?")+" to "+(checkout||"?"),"Channel: "+(channel||"(unknown)"),"What the guest said: "+(guestMsg||"(nothing provided)")];
+      try{
+        const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0.4,system:sys,messages:[{role:"user",content:userParts.join("\n")}]})});
+        const j=await r.json(); if(!r.ok) return res.status(200).json({error:"Anthropic API error",detail:JSON.stringify(j).slice(0,300)});
+        let msg=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
+        if(msg.indexOf("###LINK###")===-1){ msg=msg+"\n\n"+cleanupLink; } else { msg=msg.split("###LINK###").join(cleanupLink); }
+        msg=msg.replace(/\{BUFIXUP\}/gi, cleanupLink);
+        return res.status(200).json({dryRun:true, sent:false, excluded:false, channel, cleanupLink, message:msg});
+      }catch(e){ return res.status(200).json({error:"request failed: "+String(e.message||e)}); }
     }
     if(action==="kb_learn"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
