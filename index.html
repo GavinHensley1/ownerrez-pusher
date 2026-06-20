@@ -158,8 +158,9 @@
   </div>
   <div class="card" style="border-color:var(--pin)">
     <h2>Test confirmation message <span class="muted" style="font-weight:400;text-transform:none">(dry-run — nothing is sent to anyone)</span></h2>
-    <div class="legend" style="margin-top:0">Simulate a CONFIRMED booking and preview the one personalized thank-you the engine would send, including the StayDeck clean-up link. iCal "Blocked-Off Time" (Brightside) bookings are excluded by design — try the "iCal block" channel to see that.</div>
+    <div class="legend" style="margin-top:0">Two-stage, channel-branched (dry-run — nothing is sent). <b>Airbnb</b>: Stage 1 sends an OwnerRez <b>email-provision link</b> (Airbnb hides the guest email); after the guest provides it, OwnerRez sends its own confirmation; once that's completed, Stage 2 sends the <b>StayDeck guidebook</b> link. <b>Vrbo / Booking.com</b>: email is already on file, so Stage 1 is an <b>auto-confirmation with NO link / no guest action</b>; Stage 2 then sends the guidebook. <b>iCal "Blocked-Off Time"</b> (Brightside) is excluded — try that channel to see it.</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
+      <label class="muted" style="font-size:12px">Stage<br><select id="ctStage" style="width:100%"><option value="1">Stage 1 — confirmation (Airbnb: email link · Vrbo/Booking: auto, no link)</option><option value="2">Stage 2 — guidebook (after OwnerRez confirmation completed)</option></select></label>
       <label class="muted" style="font-size:12px">Guest first name<br><input id="ctName" style="width:100%" placeholder="e.g. Jane"></label>
       <label class="muted" style="font-size:12px">Unit<br><select id="ctUnit" style="width:100%"></select></label>
       <label class="muted" style="font-size:12px">Channel<br><select id="ctChannel" style="width:100%"><option value="airbnb">Airbnb (API)</option><option value="vrbo">Vrbo (API)</option><option value="booking">Booking.com (API)</option><option value="ical">iCal block (Brightside) — excluded</option></select></label>
@@ -361,7 +362,7 @@ async function aiPreview(){ const q=document.getElementById('aiQ').value.trim();
   catch(e){ document.getElementById('aiStatus').textContent=""; document.getElementById('aiOut').textContent="Error: "+e.message; }
 }
 async function confirmTest(){
-  const ctx={ guest_name:document.getElementById('ctName').value.trim(), unit:document.getElementById('ctUnit').value,
+  const ctx={ stage:document.getElementById('ctStage').value, guest_name:document.getElementById('ctName').value.trim(), unit:document.getElementById('ctUnit').value,
     channel:document.getElementById('ctChannel').value, booking_ref:document.getElementById('ctRef').value.trim(),
     checkin:document.getElementById('ctIn').value.trim(), checkout:document.getElementById('ctOut').value.trim(),
     guest_message:document.getElementById('ctMsg').value.trim() };
@@ -374,7 +375,10 @@ async function confirmTest(){
     if(j.error){ document.getElementById('ctOut').textContent="Error: "+j.error+(j.detail?(" — "+j.detail):""); document.getElementById('ctLink').textContent=""; return; }
     if(j.excluded){ document.getElementById('ctOut').textContent="🚫 "+j.reason; document.getElementById('ctLink').textContent=""; return; }
     document.getElementById('ctOut').textContent=j.message||"";
-    document.getElementById('ctLink').innerHTML="Clean-up link embedded: <a href=\""+j.cleanupLink+"\" target=\"_blank\" rel=\"noopener\">"+j.cleanupLink+"</a> · <span class='muted'>dry-run — not sent</span>";
+    let linkHtml;
+    if(j.autoConfirm||j.linkType==='auto_confirm'){ linkHtml="✅ Auto-confirmation — email already on file from "+(j.channel||'this channel')+"; no link, no guest action. <span class='muted'>dry-run — not sent</span>"; }
+    else { const label=(j.linkType==='ownerrez_email')?'Stage 1 — OwnerRez email-provision link (Airbnb)':'Stage 2 — StayDeck guidebook'; const pend=j.linkPending?" · ⚠️ pending: resolved OwnerRez email link not available yet":""; linkHtml=label+": <a href='"+j.link+"' target='_blank' rel='noopener'>"+j.link+"</a> · <span class='muted'>dry-run — not sent</span>"+pend; }
+    document.getElementById('ctLink').innerHTML=linkHtml;
   }catch(e){ document.getElementById('ctStatus').textContent=""; document.getElementById('ctOutWrap').style.display='block'; document.getElementById('ctOut').textContent="Error: "+e.message; }
 }
 function boot(){
