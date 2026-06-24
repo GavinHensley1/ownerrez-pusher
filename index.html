@@ -1,6 +1,6 @@
 <!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Parkside Tepees — Pricing Control</title>
+<title>Parkside Tepees</title>
 <style>
   :root{--bg:#0f1720;--card:#16212e;--ink:#e7eef6;--mut:#9fb0c0;--line:#26354a;--accent:#ff6b4a;--ok:#2ecc71;--warn:#f4b942;--pin:#8b5cf6;--book:#5a6675}
   *{box-sizing:border-box} body{margin:0;font:14px/1.45 system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--ink)}
@@ -52,16 +52,44 @@
   }
 </style></head><body>
 
-<div id="gate">
-  <div style="font-weight:700;font-size:18px">🏕️ Parkside Tepees — Pricing Control</div>
+<!-- PUBLIC default: booking-inquiry capture (no password) -->
+<div id="inquiry" style="max-width:460px;margin:7vh auto 0;padding:0 16px">
+  <div class="card">
+    <div style="font-weight:700;font-size:21px;margin-bottom:2px">🏕️ Parkside Tepees</div>
+    <div class="muted" style="margin-bottom:14px">Glamping tepees at Parkside Resort · Pigeon Forge, TN. Tell us your dates and we’ll get right back to you with availability &amp; pricing.</div>
+    <div id="inqForm">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <label class="muted" style="font-size:12px">Check-in<br><input id="iqIn" type="date" style="width:100%"></label>
+        <label class="muted" style="font-size:12px">Check-out<br><input id="iqOut" type="date" style="width:100%"></label>
+      </div>
+      <label class="muted" style="font-size:12px;display:block;margin-top:10px">Name<br><input id="iqName" style="width:100%" placeholder="Your name"></label>
+      <label class="muted" style="font-size:12px;display:block;margin-top:10px">Email<br><input id="iqEmail" type="email" style="width:100%" placeholder="you@email.com"></label>
+      <label class="muted" style="font-size:12px;display:block;margin-top:10px">Phone<br><input id="iqPhone" type="tel" style="width:100%" placeholder="(555) 555-5555"></label>
+      <label class="muted" style="font-size:12px;display:block;margin-top:10px">Anything we should know? (optional)<br><textarea id="iqMsg" style="width:100%;min-height:58px" placeholder="Occasion, # of guests, questions…"></textarea></label>
+      <button onclick="submitInquiry()" style="margin-top:14px;width:100%">Request availability</button>
+      <div id="iqErr" style="color:var(--accent);height:16px;margin-top:6px"></div>
+    </div>
+    <div id="inqDone" style="display:none;text-align:center;padding:20px 0">
+      <div style="font-size:34px">✅</div>
+      <div style="font-weight:600;margin-top:6px">Thanks — your inquiry is in!</div>
+      <div class="muted" style="margin-top:4px">We’ll reach out shortly with availability and pricing.</div>
+    </div>
+  </div>
+  <div style="text-align:center;margin-top:14px"><a href="#" onclick="showVictorGate();return false" class="muted" style="font-size:12px;text-decoration:none">Victor&rsquo;s</a></div>
+</div>
+
+<!-- Password-protected staff entry to Victor's area -->
+<div id="gate" style="display:none">
+  <div style="font-weight:700;font-size:18px">🔒 Victor&rsquo;s — staff access</div>
   <div class="muted">Enter password to continue</div>
-  <input id="pw" type="password" inputmode="numeric" autofocus placeholder="••••">
+  <input id="pw" type="password" inputmode="numeric" placeholder="••••">
   <button onclick="unlock()">Unlock</button>
   <div id="gateErr" style="color:var(--accent);height:16px"></div>
+  <div style="margin-top:10px"><a href="#" onclick="hideVictorGate();return false" class="muted" style="font-size:12px;text-decoration:none">← Back</a></div>
 </div>
 
 <header style="display:none" id="app">
-  <h1>🏕️ Parkside</h1>
+  <h1>🏕️ Victor&rsquo;s</h1>
   <div id="viewTabs" style="display:inline-flex;gap:6px;margin-left:4px">
     <button id="tabPricing" class="seg on" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
@@ -175,6 +203,31 @@
       <div id="ctLink" class="legend" style="margin-top:6px"></div>
     </div>
   </div>
+
+  <div class="card">
+    <h2>Approval queue — guest questions awaiting Victor</h2>
+    <div class="legend">When a question isn’t confidently answered by the knowledge base, it’s queued here and (once the SMS number is live) texted to Victor for a YES/NO. Approving sends the answer to the guest <b>and</b> saves it to the knowledge base so it auto-answers next time. You can also decide right here.</div>
+    <div style="margin:8px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button onclick="loadApprovals()">Refresh queue</button>
+      <span id="apCounts" class="muted"></span>
+      <span id="apSms" class="muted" style="margin-left:auto"></span>
+    </div>
+    <div id="apList" class="legend"></div>
+  </div>
+
+  <div class="card">
+    <h2>Test the approval pipeline</h2>
+    <div class="legend">Simulate an incoming guest question. Known answers auto-send (and never bother Victor); unknown ones get queued above. Works without a live SMS number.</div>
+    <textarea id="askQ" class="full" style="min-height:54px" placeholder="e.g. 'Do you allow dogs?' or 'Is there a fire pit?'"></textarea>
+    <div style="margin-top:10px;display:flex;gap:10px"><button onclick="askTest()">Send to pipeline</button><span id="askStatus" class="muted" style="align-self:center"></span></div>
+    <div id="askOut" class="legend" style="white-space:pre-wrap;margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Booking inquiries (from the public site)</h2>
+    <div style="margin:8px 0;display:flex;gap:10px;align-items:center"><button onclick="loadInquiries()">Refresh inquiries</button><span id="inqCount" class="muted"></span></div>
+    <div class="scroll"><table class="occ" id="inqTable"></table></div>
+  </div>
 </div>
 
 <script>
@@ -190,6 +243,7 @@ function unlock(){
   }).then(r=>{
     if(r.status===401){ document.getElementById('gateErr').textContent="Wrong password"; return; }
     document.getElementById('gate').style.display='none';
+    document.getElementById('inquiry').style.display='none';
     document.getElementById('app').style.display='flex';
     document.getElementById('main').style.display='block';
     boot();
@@ -334,7 +388,7 @@ function switchView(v){
   document.getElementById('horizon').style.display=pricing?'':'none';
   if(pricing){ document.getElementById('syncWrap').style.display=''; setSyncUI(); }
   else { document.getElementById('syncWrap').style.display='none'; }
-  if(!pricing && !MSG_BUILT){ renderMessaging(); MSG_BUILT=true; }
+  if(!pricing){ if(!MSG_BUILT){ renderMessaging(); MSG_BUILT=true; } loadApprovals(); loadInquiries(); }
 }
 function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function renderMessaging(){ KB=JSON.parse(JSON.stringify(STATE.kb||{format:"",items:[]})); document.getElementById('kbFormat').value=KB.format||""; drawKb(); setMsgUI();
@@ -387,5 +441,55 @@ function boot(){
   document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611c`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
   view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning();
+}
+
+// ===== Public inquiry + Victor's gate toggles =====
+function val(id){ const el=document.getElementById(id); return el?el.value.trim():""; }
+function showVictorGate(){ document.getElementById('inquiry').style.display='none'; const g=document.getElementById('gate'); g.style.display=''; const pw=document.getElementById('pw'); if(pw) pw.focus(); }
+function hideVictorGate(){ document.getElementById('gate').style.display='none'; document.getElementById('inquiry').style.display=''; }
+async function submitInquiry(){
+  const rec={ checkin:val('iqIn'), checkout:val('iqOut'), name:val('iqName'), email:val('iqEmail'), phone:val('iqPhone'), message:val('iqMsg') };
+  if(!rec.name && !rec.email && !rec.phone){ document.getElementById('iqErr').textContent="Please add a name, email, or phone."; return; }
+  document.getElementById('iqErr').textContent="";
+  try{ const r=await fetch(api('inquiry'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rec)});
+    const j=await r.json().catch(()=>({})); if(!r.ok){ document.getElementById('iqErr').textContent=j.error||"Something went wrong."; return; }
+    document.getElementById('inqForm').style.display='none'; document.getElementById('inqDone').style.display='block';
+  }catch(e){ document.getElementById('iqErr').textContent="Network error."; }
+}
+// ===== Victor's: approval queue + pipeline tester + inquiries =====
+async function loadApprovals(){
+  const el=document.getElementById('apList'); if(!el) return;
+  try{ const r=await fetch(api('approvals')+'&status=pending',{headers:{'x-app-password':PW}}); const j=await r.json();
+    if(j.counts) document.getElementById('apCounts').textContent='Pending '+j.counts.pending+' · Approved '+j.counts.approved+' · Rejected '+j.counts.rejected;
+    const list=j.approvals||[];
+    if(!list.length){ el.innerHTML="<span class='muted'>No pending questions. \uD83C\uDF89</span>"; }
+    else el.innerHTML=list.map(it=>"<div style='border:1px solid var(--line);border-radius:6px;padding:10px;margin:8px 0'>"
+      +"<div><b>Q:</b> "+esc(it.question)+"</div>"
+      +"<div style='margin-top:6px'><b>Proposed answer:</b><textarea id='ans_"+it.id+"' style='width:100%;min-height:48px'>"+esc(it.proposed||"")+"</textarea></div>"
+      +"<div style='margin-top:8px;display:flex;gap:8px'><button onclick=\"decide('"+it.id+"','yes')\">Approve &amp; send</button><button class='ghost' onclick=\"decide('"+it.id+"','no')\">Reject</button><span id='dec_"+it.id+"' class='muted' style='align-self:center'></span></div></div>").join("");
+  }catch(e){ el.textContent="Error: "+e.message; }
+  try{ const s=await fetch(api('sms_status'),{headers:{'x-app-password':PW}}); const sj=await s.json(); const a=document.getElementById('apSms'); if(a) a.textContent='SMS: '+(sj.configured?('live ('+sj.provider+')'):'staged — number not configured yet'); }catch(e){}
+}
+async function decide(id,decision){
+  const ans=document.getElementById('ans_'+id); const body={id:id,decision:decision}; if(ans&&decision==='yes') body.answer=ans.value;
+  const st=document.getElementById('dec_'+id); if(st) st.textContent='…';
+  const r=await fetch(api('approve'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({})); if(st) st.textContent=j.ok?(j.decision+(j.sent?' · sent':' · staged')+(j.learned?' · learned':'')):(j.error||'failed');
+  setTimeout(loadApprovals,600);
+}
+async function askTest(){
+  const q=val('askQ'); if(!q) return; document.getElementById('askStatus').textContent='…'; document.getElementById('askOut').textContent='';
+  const r=await fetch(api('ask'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({question:q})});
+  const j=await r.json().catch(()=>({})); document.getElementById('askStatus').textContent='';
+  if(j.auto_approved) document.getElementById('askOut').textContent="\u2705 AUTO-APPROVED (KB match: "+j.matchedTopic+", confidence "+j.confidence+")\nAnswer: "+j.answer+"\n"+(j.sent?"Sent to guest.":"Staged (messaging off / no channel connected).");
+  else if(j.queued){ document.getElementById('askOut').textContent="\uD83D\uDCE8 QUEUED for Victor (id "+j.id+")\nProposed: "+(j.proposed||"(none — Victor must write one)"); loadApprovals(); }
+  else document.getElementById('askOut').textContent=JSON.stringify(j);
+}
+async function loadInquiries(){
+  const el=document.getElementById('inqTable'); if(!el) return;
+  try{ const r=await fetch(api('inquiries'),{headers:{'x-app-password':PW}}); const j=await r.json(); const list=j.inquiries||[];
+    document.getElementById('inqCount').textContent=list.length+' total';
+    el.innerHTML="<tr><th>When</th><th>Name</th><th>Dates</th><th>Email</th><th>Phone</th><th>Message</th></tr>"+list.map(x=>"<tr><td>"+esc((x.ts||'').slice(0,10))+"</td><td>"+esc(x.name)+"</td><td>"+esc(x.checkin)+" \u2192 "+esc(x.checkout)+"</td><td>"+esc(x.email)+"</td><td>"+esc(x.phone)+"</td><td style='white-space:normal;max-width:240px;text-align:left'>"+esc(x.message)+"</td></tr>").join("");
+  }catch(e){ document.getElementById('inqCount').textContent="Error: "+e.message; }
 }
 </script></body></html>

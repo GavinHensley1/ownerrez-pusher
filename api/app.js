@@ -225,16 +225,115 @@ async function sendGuestReply(enabled, bookingId, body){
     const t=await r.text(); return {sent:r.ok, status:r.status, body:t.slice(0,200)}; }
   catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
+// ===== Configurable SMS provider (replaces the old hardcoded Twilio / "Willow" path) =====
+// Fully env-driven so the owner can drop in the NEW number + ANY provider with no code change:
+//   SMS_PROVIDER      "twilio" | "none"   (default "none" => staged; nothing is actually sent)
+//   SMS_FROM_NUMBER   new outbound number, E.164   (falls back to legacy TWILIO_FROM)
+//   SMS_VICTOR_NUMBER Victor's approval number, E.164  (falls back to legacy VICTOR_PHONE)
+//   twilio creds:     SMS_TWILIO_SID + SMS_TWILIO_TOKEN  (fall back to TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN)
+// Add another provider by extending the switch below — the rest of the app calls sendSms().
+function smsProvider(){ return String(process.env.SMS_PROVIDER||"none").toLowerCase().trim(); }
+function smsFrom(){ return process.env.SMS_FROM_NUMBER||process.env.TWILIO_FROM||""; }
+function victorNumber(){ return process.env.SMS_VICTOR_NUMBER||process.env.VICTOR_PHONE||""; }
+function smsConfigured(){ const p=smsProvider(); if(p==="none"||!p) return false; if(!smsFrom()) return false;
+  if(p==="twilio") return !!((process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID)&&(process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN));
+  return false; }
+async function sendSms(to, body){
+  const provider=smsProvider(), from=smsFrom();
+  if(provider==="none"||!provider) return {sent:false, staged:true, reason:"SMS_PROVIDER not set (configure SMS_PROVIDER + SMS_FROM_NUMBER + creds to go live)"};
+  if(!to) return {sent:false, staged:true, reason:"no destination number"};
+  if(!from) return {sent:false, staged:true, reason:"SMS_FROM_NUMBER not set"};
+  if(provider==="twilio"){
+    const sid=process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID, auth=process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN;
+    if(!sid||!auth) return {sent:false, staged:true, reason:"twilio creds missing (SMS_TWILIO_SID/SMS_TWILIO_TOKEN)"};
+    try{ const r=await fetch("https://api.twilio.com/2010-04-01/Accounts/"+sid+"/Messages.json",{method:"POST",
+        headers:{Authorization:"Basic "+Buffer.from(sid+":"+auth).toString("base64"),"Content-Type":"application/x-www-form-urlencoded"},
+        body:new URLSearchParams({From:from,To:to,Body:body})});
+      return {sent:r.ok, status:r.status, provider:"twilio"}; }
+    catch(e){ return {sent:false, error:String(e.message||e)}; }
+  }
+  return {sent:false, staged:true, reason:"unknown SMS_PROVIDER '"+provider+"'"};
+}
+// Text Victor for approvals/escalations (staged until the provider is configured).
 async function smsVictor(enabled, text){
   if(!enabled) return {sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"};
-  const sid=process.env.TWILIO_ACCOUNT_SID, auth=process.env.TWILIO_AUTH_TOKEN, from=process.env.TWILIO_FROM, to=process.env.VICTOR_PHONE;
-  const missing=[]; if(!sid||!auth)missing.push("TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN"); if(!from)missing.push("TWILIO_FROM"); if(!to)missing.push("VICTOR_PHONE");
-  if(missing.length) return {sent:false, staged:true, missing};
-  try{ const r=await fetch("https://api.twilio.com/2010-04-01/Accounts/"+sid+"/Messages.json",{method:"POST",
-      headers:{Authorization:"Basic "+Buffer.from(sid+":"+auth).toString("base64"),"Content-Type":"application/x-www-form-urlencoded"},
-      body:new URLSearchParams({From:from,To:to,Body:text})});
-    return {sent:r.ok, status:r.status}; }
-  catch(e){ return {sent:false, error:String(e.message||e)}; }
+  return sendSms(victorNumber(), text);
+}
+
+// ===== Approval queue + knowledge-base matching (human-in-the-loop messaging) =====
+const AQKEY="parkside:approvals", INQKEY="parkside:inquiries";
+async function getApprovals(){ return (redis&&await redis.get(AQKEY))||[]; }
+async function setApprovals(list){ if(redis) await redis.set(AQKEY, list.slice(-500)); return list; }
+function normQ(x){ return String(x||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim(); }
+
+// Deterministic auto-approve matcher: map a guest question to a KB topic; if that
+// topic has a saved (non-empty) answer, it's a known/high-confidence answer.
+const TOPIC_SYNONYMS=[
+  {topic:"Checkout time", kw:["checkout","check out","check-out","leave by","what time .*out"]},
+  {topic:"Check-in time", kw:["check in","check-in","checkin","arrive","arrival time","what time .*in"]},
+  {topic:"WiFi network & password", kw:["wifi","wi-fi","internet","wireless","network password"]},
+  {topic:"Parking", kw:["parking","park the car","where .*park"]},
+  {topic:"Address & directions", kw:["address","directions","how .*get there","where .*located","gps"]},
+  {topic:"Pet policy", kw:["pet","pets","dog","dogs","cat","animal"]},
+  {topic:"Smoking policy", kw:["smoke","smoking","vape","cigarette"]},
+  {topic:"Max occupancy", kw:["occupancy","how many .*people","how many .*guests","sleep","capacity","max guests"]},
+  {topic:"Heating / air conditioning", kw:["heat","heating","air conditioning","a c","ac unit","cold at night","temperature"]},
+  {topic:"Quiet hours", kw:["quiet hours","noise","too loud","quiet time"]},
+  {topic:"Early check-in / late checkout", kw:["early check","late checkout","late check-out","early arrival","check in early"]},
+  {topic:"Cancellation policy", kw:["cancel","cancellation","refund","get my money back"]},
+  {topic:"Resort amenities (Parkside Resort)", kw:["amenities","pool","hot tub","resort","activities","lazy river","water park"]},
+  {topic:"Trash & recycling", kw:["trash","garbage","recycle","recycling","dumpster"]},
+  {topic:"Emergency / who to contact", kw:["emergency","who do i contact","help line","phone number to call"]},
+];
+function kbAutoMatch(kb, question){
+  const q=" "+normQ(question)+" "; const items=(kb&&kb.items)||[];
+  const findItem=t=>items.find(i=>normQ(i.topic)===normQ(t));
+  for(const m of TOPIC_SYNONYMS){
+    for(const k of m.kw){ const re=new RegExp("\\b"+k.replace(/\s+/g,"\\s+")+"\\b","i");
+      if(re.test(q)){ const it=findItem(m.topic); if(it&&String(it.a||"").trim()) return {topic:m.topic, answer:String(it.a).trim(), confidence:0.9}; } }
+  }
+  // Fallback: every significant token of a KB topic appears in the question.
+  for(const it of items){ if(!String(it.a||"").trim()) continue;
+    const tks=normQ(it.topic).split(" ").filter(w=>w.length>3);
+    if(tks.length&&tks.every(w=>q.indexOf(" "+w)>=0)) return {topic:it.topic, answer:String(it.a).trim(), confidence:0.75}; }
+  return null;
+}
+// KB-grounded AI draft (same policy as the ai_draft action). Returns {inKb, answer}.
+async function aiDraftAnswer(kb, question){
+  const key=process.env.ANTHROPIC_API_KEY; if(!key) return {inKb:false, answer:"", noKey:true};
+  const facts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
+  const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). "
+    +"You have NO knowledge except the KNOWN INFO list below. Decide if KNOWN INFO DIRECTLY and FULLY answers the question. "
+    +"NEVER guess or infer. Reply with ONLY a JSON object: {\"in_kb\": true|false, \"answer\": \"...\"}. "
+    +"If in_kb is false, answer MUST be \"\". If true, 1-2 short warm sentences, 'we/us'. \n\nKNOWN INFO:\n"+(facts||"(none saved yet)");
+  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0,system:sys,messages:[{role:"user",content:String(question)}]})});
+    const j=await r.json(); if(!r.ok) return {inKb:false, answer:"", error:JSON.stringify(j).slice(0,200)};
+    let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
+    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); return {inKb:o.in_kb===true, answer:String(o.answer||"").trim()}; }
+    catch{ return {inKb:false, answer:""}; }
+  }catch(e){ return {inKb:false, answer:"", error:String(e.message||e)}; }
+}
+// Decide a queued approval item: YES -> send to guest + learn into KB; NO -> reject.
+async function decideApproval(id, decision, overrideAnswer){
+  if(!id) return {ok:false, error:"no id"};
+  const list=await getApprovals(); const it=list.find(x=>x.id===id);
+  if(!it) return {ok:false, error:"item not found: "+id};
+  if(it.status!=="pending") return {ok:false, error:"already "+it.status, item:it};
+  const st=await getState(); const enabled=!!st.messaging_enabled;
+  if(decision==="yes"||decision==="approve"){
+    const answer=(overrideAnswer&&overrideAnswer.trim())||it.proposed||"";
+    if(!answer) return {ok:false, error:"no answer to send (proposed was empty — supply an answer)"};
+    const guestSend=await sendGuestReply(enabled, it.booking_id, answer);
+    const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
+    const nt=normQ(it.question); const existing=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
+    if(existing) existing.a=answer; else kb.items.push({topic:it.question.slice(0,60), a:answer, src:"approved"});
+    await setState({kb});
+    it.status="approved"; it.answer=answer; it.decidedAt=new Date().toISOString();
+    await setApprovals(list);
+    return {ok:true, decision:"approved", id, guestSend, sent:guestSend.sent===true, learned:true};
+  }
+  it.status="rejected"; it.decidedAt=new Date().toISOString(); await setApprovals(list);
+  return {ok:true, decision:"rejected", id};
 }
 
 module.exports=async(req,res)=>{
@@ -422,8 +521,95 @@ module.exports=async(req,res)=>{
         breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,premium:prem,base:Math.round(base),peak,peakThr:Math.round(peakThr),target:tg,lead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),nightOcc:Number(nightOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),scar:Number(scar.toFixed(3)),orphan:g?{runLen:g.runLen,hasWeekend:g.hasWeekend,gm:Number(gapGm(g.runLen,g.hasWeekend,learned.gapD).toFixed(3))}:null,premScale:Number(ps.toFixed(3)),learnedPrem:Number(prem.toFixed(3)),sens:Number(sens.toFixed(2)),mult:Number(m.toFixed(3)),final}; }
       return res.status(200).json({refId:process.env.PRICELABS_REF_ID||"486915",sigDays:Object.keys(sig).length,sigMin:allv.length?Math.min(...allv):null,sigMax:allv.length?Math.max(...allv):null,sigAvg:avg(allv),byMonth,breakdown});
     }
+    // ===== (B) PUBLIC booking-inquiry capture — no auth =====
+    if(action==="inquiry"){
+      if(req.method!=="POST") return res.status(405).json({error:"POST"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+      const rec={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+        checkin:String(b.checkin||"").slice(0,40), checkout:String(b.checkout||"").slice(0,40),
+        name:String(b.name||"").slice(0,120), email:String(b.email||"").slice(0,160),
+        phone:String(b.phone||"").slice(0,40), message:String(b.message||"").slice(0,1000),
+        ts:new Date().toISOString() };
+      if(!rec.name && !rec.email && !rec.phone) return res.status(400).json({error:"please include a name, email, or phone"});
+      const list=(redis&&await redis.get(INQKEY))||[]; list.push(rec); if(redis) await redis.set(INQKEY, list.slice(-2000));
+      const st=await getState();
+      const note=await smsVictor(!!st.messaging_enabled, "New booking inquiry — "+(rec.name||"?")+" "+(rec.checkin||"?")+" to "+(rec.checkout||"?")+" "+(rec.phone||rec.email||""));
+      return res.status(200).json({ok:true, id:rec.id, victorNotify:note});
+    }
+    // VICTOR'S: list captured inquiries (password)
+    if(action==="inquiries"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      const list=(redis&&await redis.get(INQKEY))||[]; return res.status(200).json({inquiries:list.slice(-500).reverse()});
+    }
+    // ===== (D) Messaging approval pipeline =====
+    // A guest question enters the pipeline: auto-approve if KB-known, else queue for Victor.
+    if(action==="ask"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+      const question=String(b.question||"").trim(); const bookingId=b.booking_id||null;
+      if(!question) return res.status(400).json({error:"no question"});
+      const st=await getState(); const kb=st.kb||KB_SEED; const enabled=!!st.messaging_enabled;
+      // AUTO-APPROVE: high-confidence KB match -> send now, never bother Victor.
+      const match=kbAutoMatch(kb, question);
+      if(match){ const guestSend=await sendGuestReply(enabled, bookingId, match.answer);
+        return res.status(200).json({auto_approved:true, matchedTopic:match.topic, confidence:match.confidence, answer:match.answer, guestSend, sent:guestSend.sent===true}); }
+      // UNKNOWN/low-confidence -> propose a KB-grounded AI draft and QUEUE for Victor.
+      const draft=await aiDraftAnswer(kb, question);
+      const proposed=(draft.inKb && draft.answer) ? draft.answer : "";
+      const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed,
+        booking_id:bookingId, status:"pending", ts:new Date().toISOString() };
+      const list=await getApprovals(); list.push(item); await setApprovals(list);
+      const sms=await smsVictor(enabled,
+        "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(no KB answer — reply with one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
+      return res.status(200).json({queued:true, id:item.id, proposed, victorSms:sms});
+    }
+    // VICTOR'S: view the approval queue (password). ?status=pending|approved|rejected|all
+    if(action==="approvals"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      const list=await getApprovals(); const status=(req.query&&req.query.status)||"pending";
+      const out=status==="all"?list:list.filter(x=>x.status===status);
+      return res.status(200).json({approvals:out.slice(-200).reverse(), counts:{pending:list.filter(x=>x.status==="pending").length, approved:list.filter(x=>x.status==="approved").length, rejected:list.filter(x=>x.status==="rejected").length}});
+    }
+    // VICTOR'S / manual decision (password): {id, decision:'yes'|'no', answer?}
+    if(action==="approve"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+      const out=await decideApproval(String(b.id||""), String(b.decision||"").toLowerCase(), b.answer!=null?String(b.answer):null);
+      return res.status(out.ok?200:400).json(out);
+    }
+    // PUBLIC provider webhook: Victor replies YES/NO via text. Provider-agnostic body parse.
+    if(action==="sms_inbound"){
+      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch{ b={}; } } } b=b||{};
+      const from=String(b.From||b.from||b.source||"").trim();
+      const body=String(b.Body||b.body||b.text||b.message||"").trim();
+      const vn=victorNumber();
+      if(vn && from && from.replace(/[^0-9]/g,"").slice(-10)!==vn.replace(/[^0-9]/g,"").slice(-10))
+        return res.status(200).json({ignored:true, reason:"sender is not Victor's number"});
+      const mYes=body.match(/^\s*(yes|y|approve)\b\s*([a-z0-9]+)?/i);
+      const mNo=body.match(/^\s*(no|n|reject)\b\s*([a-z0-9]+)?/i);
+      let decision=null, id=null;
+      if(mYes){ decision="yes"; id=mYes[2]||null; } else if(mNo){ decision="no"; id=mNo[2]||null; }
+      if(!decision) return res.status(200).json({ignored:true, reason:"reply was not YES/NO"});
+      if(!id){ const list=await getApprovals(); const pend=list.filter(x=>x.status==="pending"); id=pend.length?pend[pend.length-1].id:null; }
+      if(!id) return res.status(200).json({ignored:true, reason:"no pending item to decide"});
+      const out=await decideApproval(id, decision, null);
+      return res.status(200).json(out);
+    }
+    // Queryable KB so future response generation can pull approved answers.
+    if(action==="kb_query"){
+      const st=await getState(); const kb=st.kb||KB_SEED; const q=(req.query&&req.query.q)||"";
+      const m=kbAutoMatch(kb, q);
+      return res.status(200).json({query:q, match:m, knownTopics:(kb.items||[]).filter(i=>String(i.a||"").trim()).map(i=>i.topic)});
+    }
+    // Config visibility for the SMS provider (password) — never reveals secrets.
+    if(action==="sms_status"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      return res.status(200).json({provider:smsProvider(), configured:smsConfigured(), fromSet:!!smsFrom(), victorSet:!!victorNumber()});
+    }
+
     res.status(400).json({error:"unknown action"});
   }catch(e){ res.status(500).json({error:String(e.message||e)}); }
 };
 
 module.exports.__model={compute,paceMult,scarMult,gapGm,deriveLearned,interp,SENS,MODEL,UNIT_PREM,GAP_SEED,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
+module.exports.__msg={kbAutoMatch,normQ,smsProvider,smsConfigured,sendSms,decideApproval};
