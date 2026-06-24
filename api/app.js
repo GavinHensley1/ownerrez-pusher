@@ -521,6 +521,44 @@ module.exports=async(req,res)=>{
         breakdown={unit:u.name,date:ds,daytype:dtN,signal:s,sigMissing,premium:prem,base:Math.round(base),peak,peakThr:Math.round(peakThr),target:tg,lead:lead,paceFrac:Number(pf.toFixed(3)),expected:Number(exp.toFixed(3)),poolOcc:Number(poolOcc.toFixed(3)),nightOcc:Number(nightOcc.toFixed(3)),unitOcc:Number(unitOcc.toFixed(3)),scar:Number(scar.toFixed(3)),orphan:g?{runLen:g.runLen,hasWeekend:g.hasWeekend,gm:Number(gapGm(g.runLen,g.hasWeekend,learned.gapD).toFixed(3))}:null,premScale:Number(ps.toFixed(3)),learnedPrem:Number(prem.toFixed(3)),sens:Number(sens.toFixed(2)),mult:Number(m.toFixed(3)),final}; }
       return res.status(200).json({refId:process.env.PRICELABS_REF_ID||"486915",sigDays:Object.keys(sig).length,sigMin:allv.length?Math.min(...allv):null,sigMax:allv.length?Math.max(...allv):null,sigAvg:avg(allv),byMonth,breakdown});
     }
+    // ===== PUBLIC read-only booking roster — pulled live from OwnerRez (no auth) =====
+    if(action==="bookings"){
+      const orAuth=(()=>{ const tok=process.env.OWNERREZ_OAUTH_TOKEN; if(tok) return "Bearer "+tok;
+        const u=process.env.OWNERREZ_API_USER, t=process.env.OWNERREZ_API_TOKEN; if(u&&t) return "Basic "+Buffer.from(u+":"+t).toString("base64"); return null; })();
+      if(!orAuth) return res.status(200).json({configured:false, bookings:[], error:"OwnerRez credentials not set (OWNERREZ_OAUTH_TOKEN, or OWNERREZ_API_USER + OWNERREZ_API_TOKEN)"});
+      const fresh=req.query&&req.query.fresh==="1";
+      if(redis&&!fresh){ const c=await redis.get("parkside:bookings"); if(c&&(Date.now()-c.ts)<300000) return res.status(200).json({configured:true, cached:true, count:(c.list||[]).length, bookings:c.list}); }
+      const ymd=d=>d.toISOString().slice(0,10);
+      const now=new Date(); const from=new Date(now); from.setUTCDate(from.getUTCDate()-14); const to=new Date(now); to.setUTCDate(to.getUTCDate()+365);
+      const pids=UNITS.map(u=>u.orp).join(",");
+      const H={Authorization:orAuth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
+      let url="https://api.ownerrez.com/v2/bookings?property_ids="+encodeURIComponent(pids)+"&from="+ymd(from)+"&to="+ymd(to);
+      let items=[], pages=0;
+      try{ while(url&&pages<6){ const r=await fetch(url,{headers:H}); if(!r.ok){ const t=await r.text();
+            return res.status(200).json({configured:true, bookings:[], error:"OwnerRez bookings "+r.status, detail:t.slice(0,200)}); }
+          const j=await r.json(); const arr=j.items||j.bookings||(Array.isArray(j)?j:[]); items=items.concat(arr||[]); url=j.next_page_url||null; pages++; }
+      }catch(e){ return res.status(200).json({configured:true, bookings:[], error:String(e.message||e)}); }
+      // Resolve guest contact for each unique guest_id (OwnerRez bookings carry guest_id, not inline contact).
+      const unitName={}; for(const u of UNITS) unitName[u.orp]=u.name;
+      const guestIds=[...new Set(items.map(b=>b.guest_id).filter(Boolean))].slice(0,250);
+      const guests={};
+      await Promise.all(guestIds.map(async gid=>{ try{ const r=await fetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:H}); if(r.ok) guests[gid]=await r.json(); }catch(e){} }));
+      const gName=g=>{ if(!g) return ""; const n=((g.first_name||"")+" "+(g.last_name||"")).trim(); return n||g.name||""; };
+      const gEmail=g=>{ if(!g) return ""; if(Array.isArray(g.email_addresses)&&g.email_addresses.length){ const e=g.email_addresses.find(x=>x.is_default)||g.email_addresses[0]; return e.address||e.email||""; } if(Array.isArray(g.emails)&&g.emails.length){ const e=g.emails[0]; return (typeof e==="string")?e:(e.address||""); } return g.email||""; };
+      const gPhone=g=>{ if(!g) return ""; if(Array.isArray(g.phones)&&g.phones.length){ const p=g.phones.find(x=>x.is_default)||g.phones[0]; return p.number||p.phone||""; } return g.phone||""; };
+      const list=(items||[]).map(b=>{ const g=guests[b.guest_id];
+          return { arrival:b.arrival||b.check_in||b.arrival_date||"", departure:b.departure||b.check_out||b.departure_date||"",
+            name:gName(g), email:gEmail(g), phone:gPhone(g),
+            unit:unitName[b.property_id]||String(b.property_id||""), status:b.status||b.type||"" }; })
+        .filter(x=>x.arrival);
+      const tod=ymd(now);
+      const upcoming=list.filter(x=>(x.departure||x.arrival)>=tod).sort((a,b)=>a.arrival<b.arrival?-1:(a.arrival>b.arrival?1:0));
+      const past=list.filter(x=>(x.departure||x.arrival)<tod).sort((a,b)=>a.arrival>b.arrival?-1:(a.arrival<b.arrival?1:0));
+      const out=upcoming.concat(past);
+      if(redis) await redis.set("parkside:bookings",{ts:Date.now(),list:out});
+      return res.status(200).json({configured:true, count:out.length, bookings:out});
+    }
+
     // ===== (B) PUBLIC booking-inquiry capture — no auth =====
     if(action==="inquiry"){
       if(req.method!=="POST") return res.status(405).json({error:"POST"});
