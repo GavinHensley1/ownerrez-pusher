@@ -226,6 +226,7 @@
       <label class="muted" style="font-size:12px">Victor&rsquo;s email (To)<br><input id="nTo" type="email" style="width:100%" placeholder="victor@example.com"></label>
       <label class="muted" style="font-size:12px">From address<br><input id="nFrom" style="width:100%" placeholder="Parkside Tepees &lt;notifications@send.parksidetepees.com&gt;"></label>
       <label class="muted" style="font-size:12px">Resend API key <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nKey" type="password" autocomplete="new-password" style="width:100%" placeholder="re_********************"></label>
+      <label class="muted" style="font-size:12px">OwnerRez OAuth token (messaging) <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nOrToken" type="password" autocomplete="new-password" style="width:100%" placeholder="paste OwnerRez OAuth access token"></label>
       <label class="muted" style="font-size:12px">Approve-link secret <span style="color:#9fb0c0">(makes approve/reject links unguessable)</span>
         <div style="display:flex;gap:8px;margin-top:4px"><input id="nSecret" style="flex:1" placeholder="long random string"><button type="button" onclick="genSecret()">Generate</button></div></label>
     </div>
@@ -519,7 +520,7 @@ async function loadNotifyStatus(){
     const yn=b=>b?"\u2705":"\u2014";
     let dom="";
     if(Array.isArray(j.verifiedDomains)) dom=" · domains: "+(j.verifiedDomains.map(d=>d.name+"("+d.status+")").join(", ")||"none");
-    el.innerHTML="Key "+yn(j.resendKey)+" · From "+yn(j.resendFromSet)+" · To "+yn(j.victorEmailSet)+" · Approve-secret "+yn(j.approveSecretSet)
+    el.innerHTML="Key "+yn(j.resendKey)+" · From "+yn(j.resendFromSet)+" · To "+yn(j.victorEmailSet)+" · Approve-secret "+yn(j.approveSecretSet)+" · OwnerRez token "+yn(j.ownerrez_oauth_set)
       +(j.resendConfigured?" — <b style='color:#2ecc71'>ready</b>":" — <b style='color:#f4b942'>incomplete</b>")+dom;
   }catch(e){ el.textContent="Status error: "+e.message; }
 }
@@ -533,9 +534,10 @@ async function saveNotify(){
   const msg=document.getElementById('nMsg'); msg.textContent="Saving…";
   const body={ victorEmail:document.getElementById('nTo').value.trim(), from:document.getElementById('nFrom').value.trim(), approveSecret:document.getElementById('nSecret').value.trim() };
   const key=document.getElementById('nKey').value.trim(); if(key) body.resendApiKey=key; // only send when provided (never wipes stored key)
+  const ortk=document.getElementById('nOrToken').value.trim(); if(ortk) body.ownerrez_oauth_token=ortk;
   try{ const r=await fetch(api('set_notify_config'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
-    if(r.ok&&j.ok){ msg.textContent="Saved \u2713"; document.getElementById('nKey').value=""; loadNotifyStatus(); }
+    if(r.ok&&j.ok){ msg.textContent="Saved \u2713"; document.getElementById('nKey').value=""; document.getElementById('nOrToken').value=""; loadNotifyStatus(); }
     else msg.textContent="Save failed: "+(j.error||r.status);
   }catch(e){ msg.textContent="Save failed: "+e.message; }
 }

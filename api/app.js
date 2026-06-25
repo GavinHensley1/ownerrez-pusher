@@ -217,11 +217,11 @@ function computePace(poolAgg,targets,learned,today,months){ const pace={};
 const APOLOGY="I'm sorry, I don't know the answer to that. Let me check with a manager and I'll get back to you soon.";
 async function sendGuestReply(enabled, bookingId, body){
   if(!enabled) return {sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"};
-  const tok=process.env.OWNERREZ_OAUTH_TOKEN;
-  if(!tok) return {sent:false, staged:true, reason:"no OWNERREZ_OAUTH_TOKEN (create OwnerRez OAuth app + Grant Access To Me)"};
+  const auth=await orAuthHeader();
+  if(!auth) return {sent:false, staged:true, reason:"no OwnerRez token (paste the OwnerRez OAuth token in "+CARD+")"};
   if(!bookingId) return {sent:false, staged:true, reason:"no booking_id (no inbound guest thread / no connected channel yet)"};
   try{ const r=await fetch("https://api.ownerrez.com/v2/messages",{method:"POST",
-      headers:{Authorization:"Bearer "+tok,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},
+      headers:{Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},
       body:JSON.stringify({booking_id:bookingId, body})});
     const t=await r.text(); return {sent:r.ok, status:r.status, body:t.slice(0,200)}; }
   catch(e){ return {sent:false, error:String(e.message||e)}; }
@@ -272,6 +272,7 @@ async function getNotifyConfig(){ const c=await getNotifyRaw(); return {
   from:   (c.from||process.env.RESEND_FROM||"").trim(),
   to:     (c.victorEmail||process.env.VICTOR_EMAIL||"").trim(),
   secret: (c.approveSecret||process.env.APPROVE_LINK_SECRET||"").trim(),
+  ownerrezOauth: (c.ownerrez_oauth_token||process.env.OWNERREZ_OAUTH_TOKEN||"").trim(),
 }; }
 function appOrigin(req){ const h=(req&&req.headers)||{}; const host=h["x-forwarded-host"]||h.host; const proto=h["x-forwarded-proto"]||"https"; return host?(proto+"://"+host):""; }
 function escHtml(x){ return String(x==null?"":x).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
@@ -384,7 +385,7 @@ async function upsertApprovedBank(question, answer){
   if(ex){ ex.a=answer; ex.ts=new Date().toISOString(); } else bank.push({q:question, a:answer, ts:new Date().toISOString()});
   await setApprovedBank(bank); return bank.length;
 }
-function orAuthHeader(){ const tok=process.env.OWNERREZ_OAUTH_TOKEN; if(tok) return "Bearer "+tok;
+async function orAuthHeader(){ const cfg=await getNotifyConfig(); if(cfg.ownerrezOauth) return "Bearer "+cfg.ownerrezOauth;
   const u=process.env.OWNERREZ_API_USER,t=process.env.OWNERREZ_API_TOKEN; if(u&&t) return "Basic "+Buffer.from(u+":"+t).toString("base64"); return null; }
 
 let _memPollStatus=null, _memPollLast=0;
@@ -392,8 +393,8 @@ async function writePollStatus(o){ const s={...o, ranAt:new Date().toISOString()
 async function getPollStatus(){ return (redis?await redis.get("parkside:poll_status"):_memPollStatus)||null; }
 // Pull recent OwnerRez messages and feed NEW inbound guest ones into the pipeline.
 async function runPollMessages(req){
-  const auth=orAuthHeader();
-  if(!auth) return await writePollStatus({ok:false, polled:0, error:"OwnerRez creds not set (OWNERREZ_OAUTH_TOKEN or OWNERREZ_API_USER+TOKEN)"});
+  const auth=await orAuthHeader();
+  if(!auth) return await writePollStatus({ok:false, polled:0, error:"OwnerRez token not set (paste the OwnerRez OAuth token in "+CARD+", or set OWNERREZ_OAUTH_TOKEN / OWNERREZ_API_USER+TOKEN)"});
   const H={Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
   const sinceIso=new Date(Date.now()-1000*60*60*24).toISOString(); // last 24h window
   let items=[];
@@ -696,9 +697,8 @@ module.exports=async(req,res)=>{
     // ===== PUBLIC read-only booking roster — pulled live from OwnerRez (no auth) =====
     if(action==="bookings"){
       try{ await maybePollMessages(req); }catch(e){}
-      const orAuth=(()=>{ const tok=process.env.OWNERREZ_OAUTH_TOKEN; if(tok) return "Bearer "+tok;
-        const u=process.env.OWNERREZ_API_USER, t=process.env.OWNERREZ_API_TOKEN; if(u&&t) return "Basic "+Buffer.from(u+":"+t).toString("base64"); return null; })();
-      if(!orAuth) return res.status(200).json({configured:false, bookings:[], error:"OwnerRez credentials not set (OWNERREZ_OAUTH_TOKEN, or OWNERREZ_API_USER + OWNERREZ_API_TOKEN)"});
+      const orAuth=await orAuthHeader();
+      if(!orAuth) return res.status(200).json({configured:false, bookings:[], error:"OwnerRez credentials not set (OwnerRez OAuth token in Victor\u2019s card, or OWNERREZ_OAUTH_TOKEN / OWNERREZ_API_USER + OWNERREZ_API_TOKEN)"});
       const fresh=req.query&&req.query.fresh==="1";
       if(redis&&!fresh){ const c=await redis.get("parkside:bookings"); if(c&&(Date.now()-c.ts)<300000) return res.status(200).json({configured:true, cached:true, count:(c.list||[]).length, bookings:c.list}); }
       const ymd=d=>d.toISOString().slice(0,10);
@@ -895,9 +895,11 @@ module.exports=async(req,res)=>{
       // fields never wipes a previously stored key). Pass apiKey:"" to clear it.
       if(typeof b.resendApiKey==="string" && b.resendApiKey.trim()!=="") next.resendApiKey=b.resendApiKey.trim();
       else if(b.resendApiKey==="") delete next.resendApiKey;
+      if(typeof b.ownerrez_oauth_token==="string" && b.ownerrez_oauth_token.trim()!=="") next.ownerrez_oauth_token=b.ownerrez_oauth_token.trim();
+      else if(b.ownerrez_oauth_token==="") delete next.ownerrez_oauth_token;
       await setNotifyRaw(next);
       const cfg=await getNotifyConfig();
-      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret }});
+      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth }});
     }
     // Send ONE sample approval email to the configured Victor address (password).
     if(action==="send_test_email"){
@@ -918,7 +920,7 @@ module.exports=async(req,res)=>{
       const polledNow=await maybePollMessages(req);
       const stN=await getState(); const apprN=await getApprovals();
       const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, approveSecretSet:!!cfg.secret,
-        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll,
+        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth,
         messaging_enabled:!!stN.messaging_enabled,
         counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
