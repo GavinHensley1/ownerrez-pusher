@@ -55,12 +55,16 @@
 <!-- PUBLIC default: read-only booking roster pulled live from OwnerRez (no password) -->
 <div id="inquiry" style="max-width:920px;margin:5vh auto 0;padding:0 16px">
   <div class="card">
-    <div style="font-weight:700;font-size:21px;margin-bottom:2px">🏕️ Parkside Tepees — Bookings</div>
-    <div class="muted" style="margin-bottom:12px">Current &amp; upcoming reservations, pulled live from OwnerRez.</div>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div>
+        <div style="font-weight:700;font-size:21px;margin-bottom:2px">🏕️ Parkside Tepees — Bookings</div>
+        <div class="muted">Current &amp; upcoming reservations, pulled live from OwnerRez.</div>
+      </div>
+      <button onclick="showVictorGate()" style="flex-shrink:0;background:var(--accent,#d4a64a);color:#10151c;font-weight:700;font-size:15px;border:none;border-radius:10px;padding:11px 20px;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.3)">🔒 Victor&rsquo;s Login</button>
+    </div>
     <div id="rosterStatus" class="muted" style="padding:18px 0">Loading bookings…</div>
     <div class="scroll" id="rosterWrap"></div>
   </div>
-  <div style="text-align:center;margin-top:14px"><a href="#" onclick="showVictorGate();return false" class="muted" style="font-size:12px;text-decoration:none">Victor&rsquo;s</a></div>
 </div>
 
 <!-- Password-protected staff entry to Victor's area -->
