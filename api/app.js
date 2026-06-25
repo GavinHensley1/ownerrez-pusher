@@ -549,6 +549,13 @@ module.exports=async(req,res)=>{
       const gName=g=>{ if(!g) return ""; const n=((g.first_name||"")+" "+(g.last_name||"")).trim(); return n||g.name||""; };
       const gEmail=g=>{ if(!g) return ""; if(Array.isArray(g.email_addresses)&&g.email_addresses.length){ const e=g.email_addresses.find(x=>x.is_default)||g.email_addresses[0]; return e.address||e.email||""; } if(Array.isArray(g.emails)&&g.emails.length){ const e=g.emails[0]; return (typeof e==="string")?e:(e.address||""); } return g.email||""; };
       const gPhone=g=>{ if(!g) return ""; if(Array.isArray(g.phones)&&g.phones.length){ const p=g.phones.find(x=>x.is_default)||g.phones[0]; return p.number||p.phone||""; } return g.phone||""; };
+      if(req.query&&req.query.debug==="1"){
+        const sample=items[0]||null;
+        const gid=sample&&(sample.guest_id||sample.guestId||(sample.guest&&sample.guest.id));
+        let guestProbe=null;
+        if(gid){ try{ const gr=await fetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:H}); guestProbe={status:gr.status, keys:null, body:null}; const gj=await gr.json().catch(()=>null); guestProbe.keys=gj?Object.keys(gj):null; guestProbe.body=gj; }catch(e){ guestProbe={err:String(e.message||e)}; } }
+        return res.status(200).json({count:items.length, sampleKeys:sample?Object.keys(sample):null, sampleBooking:sample, guestIdFound:gid||null, guestProbe});
+      }
       const list=(items||[]).map(b=>{ const g=guests[b.guest_id];
           return { arrival:b.arrival||b.check_in||b.arrival_date||"", departure:b.departure||b.check_out||b.departure_date||"",
             name:gName(g), email:gEmail(g), phone:gPhone(g),
