@@ -442,8 +442,9 @@ async function loadBookings(){
     if(j.error && !list.length){ st.textContent='Could not load bookings: '+j.error; return; }
     if(!list.length){ st.textContent='No current or upcoming bookings found.'; return; }
     st.style.display='none';
-    wrap.innerHTML="<table class='occ' style='width:100%'><tr><th>Check-in</th><th>Check-out</th><th>Guest</th><th>Email</th><th>Phone</th><th>Unit</th></tr>"
-      +list.map(b=>"<tr><td>"+fmt(b.arrival)+"</td><td>"+fmt(b.departure)+"</td><td style='text-align:left'>"+esc(b.name||'\u2014')+"</td><td style='text-align:left'>"+esc(b.email||'\u2014')+"</td><td>"+esc(b.phone||'\u2014')+"</td><td>"+esc(b.unit||'\u2014')+"</td></tr>").join("")
+    const guestCell=b=>{ if(b.name) return esc(b.name); if(b.reference) return "<span class='muted'>"+esc(b.reference)+"</span>"; return '\u2014'; };
+    wrap.innerHTML="<table class='occ' style='width:100%'><tr><th>Check-in</th><th>Check-out</th><th>Unit</th><th>Guest</th><th>Email</th><th>Phone</th><th>Status</th></tr>"
+      +list.map(b=>"<tr><td>"+fmt(b.arrival)+"</td><td>"+fmt(b.departure)+"</td><td style='text-align:left'>"+esc(b.unit||'\u2014')+"</td><td style='text-align:left'>"+guestCell(b)+"</td><td style='text-align:left'>"+esc(b.email||'\u2014')+"</td><td>"+esc(b.phone||'\u2014')+"</td><td>"+esc(b.status||'\u2014')+"</td></tr>").join("")
       +"</table>";
   }catch(e){ st.textContent='Error loading bookings: '+e.message; }
 }
