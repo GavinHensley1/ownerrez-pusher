@@ -838,7 +838,8 @@ module.exports=async(req,res)=>{
         await writeWhStatus({ranAt:new Date().toISOString(), event:"webhook_test", ok:true});
         return res.status(200).json({ok:true, test:true});
       }
-      if(etype!=="thread_message"){ await writeWhStatus({ranAt:new Date().toISOString(), event:"ignored", entity_type:etype}); return res.status(200).json({ok:true, ignored:"entity_type "+etype}); }
+      // We handle guest messages (thread_message) AND pre-booking inquiries (inquiry).
+      if(etype!=="thread_message" && etype!=="inquiry"){ await writeWhStatus({ranAt:new Date().toISOString(), event:"ignored", entity_type:etype}); return res.status(200).json({ok:true, ignored:"entity_type "+etype}); }
 
       // De-dupe by payload id (mark seen BEFORE processing so retries skip).
       const pid=String(b.id||b.entity_id||"");
@@ -847,7 +848,25 @@ module.exports=async(req,res)=>{
       if(pid){ seen.add(pid); if(redis) await redis.set("parkside:wh_seen", Array.from(seen).slice(-5000)); }
 
       const e=(b.entity&&typeof b.entity==="object")?b.entity:{};
-      // Record the real shape (no message content) so direction parsing can be tuned.
+      const g=(e.guest&&typeof e.guest==="object")?e.guest:{};
+      const nameFrom=()=>String(e.guest_name||e.guestName||e.from_name||((g.first_name||"")+" "+(g.last_name||"")).trim()||g.name||"").trim();
+      const threadId=e.thread_id||e.threadId||e.thread||(g&&g.thread_id)||null;
+      const bookingId=e.booking_id||e.bookingId||null;
+
+      if(etype==="inquiry"){
+        // Pre-booking guest question. Always inbound (guest -> host); no loop risk.
+        await writeWhStatus({ranAt:new Date().toISOString(), event:"inquiry", action:act, entity_id:b.entity_id, entityKeys:Object.keys(e),
+          guestKeys: Object.keys(g), hasThread: !!threadId, propertyId: e.property_id||e.listing_id||null});
+        const question=String(e.message||e.notes||e.comments||e.body||e.content||e.text||e.question||"").trim();
+        if(!question) return res.status(200).json({ok:true, ignored:"no inquiry text"});
+        const guestName=nameFrom();
+        const guestEmail=String(e.email||e.email_address||g.email||(Array.isArray(g.email_addresses)&&g.email_addresses[0]&&(g.email_addresses[0].address||g.email_addresses[0]))||"").trim();
+        try{ const out=await processGuestQuestion(req,{question, threadId, bookingId, guestName, unit:String(e.property_id||e.listing_id||""), source:"ownerrez_inquiry"});
+          return res.status(200).json({ok:true, processed:true, type:"inquiry", auto_approved:!!out.auto_approved, queued:!!out.queued, replyThread:!!threadId, guestEmail:guestEmail||null}); }
+        catch(err){ return res.status(200).json({ok:true, processed:false, type:"inquiry", error:String(err&&err.message||err)}); }
+      }
+
+      // thread_message: record the real shape (no message content) so direction parsing can be tuned.
       await writeWhStatus({ranAt:new Date().toISOString(), event:"thread_message", action:act, entity_id:b.entity_id, entityKeys:Object.keys(e),
         dir:{direction:e.direction,type:e.type,incoming:e.incoming,is_incoming:e.is_incoming,outgoing:e.outgoing,is_outgoing:e.is_outgoing,sender:e.sender,from_type:e.from_type}});
 
@@ -860,11 +879,9 @@ module.exports=async(req,res)=>{
 
       const question=String(e.body||e.message||e.content||e.text||"").trim();
       if(!question) return res.status(200).json({ok:true, ignored:"no text"});
-      const threadId=e.thread_id||e.threadId||e.thread||null;
-      const bookingId=e.booking_id||e.bookingId||null;
-      const guestName=String(e.guest_name||e.guestName||e.from_name||"").trim();
+      const guestName=nameFrom();
       try{ const out=await processGuestQuestion(req,{question, threadId, bookingId, guestName, unit:"", source:"ownerrez_webhook"});
-        return res.status(200).json({ok:true, processed:true, auto_approved:!!out.auto_approved, queued:!!out.queued}); }
+        return res.status(200).json({ok:true, processed:true, type:"thread_message", auto_approved:!!out.auto_approved, queued:!!out.queued}); }
       catch(err){ return res.status(200).json({ok:true, processed:false, error:String(err&&err.message||err)}); }
     }
     // View the approved bank (password) — the high-weight, physically-approved Q&A.
@@ -975,7 +992,7 @@ module.exports=async(req,res)=>{
       res.setHeader("Cache-Control","no-store, max-age=0");
       const _wcreds=await ensureWebhookCreds();
       const _origin=appOrigin(req)||("https://"+(req.headers&&(req.headers["x-forwarded-host"]||req.headers.host)||"project-jvyw3.vercel.app"));
-      const webhook={ url:_origin+"/api/app?action=or_message_inbound", user:_wcreds.user, password:_wcreds.pass, entityTypeToEnable:"thread_message", lastEvent:await getWhStatus() };
+      const webhook={ url:_origin+"/api/app?action=or_message_inbound", user:_wcreds.user, password:_wcreds.pass, entityTypesToEnable:["thread_message","inquiry"], lastEvent:await getWhStatus() };
       let _diag={redisPresent:!!redis};
       try{ if(redis){ const ping="pong-"+Date.now(); await redis.set("parkside:diag_ping",ping); _diag.redisRoundTrip=((await redis.get("parkside:diag_ping"))===ping); } }catch(e){ _diag.redisErr=String(e.message||e); }
       try{ const raw=await getNotifyRaw(); _diag.notifyConfigKeys=Object.keys(raw); _diag.ownerrezLen=String(raw.ownerrez_oauth_token||"").length; _diag.resendKeyLen=String(raw.resendApiKey||"").length; }catch(e){ _diag.rawErr=String(e.message||e); }

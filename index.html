@@ -229,7 +229,7 @@
       <label class="muted" style="font-size:12px">OwnerRez OAuth token (messaging) <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nOrToken" type="password" autocomplete="new-password" style="width:100%" placeholder="paste OwnerRez OAuth access token"> <span id="nOrState" style="font-size:12px;font-weight:600"></span></label>
       <div style="border-top:1px solid var(--line);margin-top:6px;padding-top:12px">
         <div style="font-weight:600;margin-bottom:4px">OwnerRez inbound webhook</div>
-        <div class="legend" style="margin-top:0">In OwnerRez → your OAuth app → <b>Webhooks</b>, add a webhook with Entity Type <b>thread_message</b> and these exact values (Basic auth):</div>
+        <div class="legend" style="margin-top:0">In OwnerRez → your OAuth app → <b>Webhooks</b>, add a webhook with these exact values (Basic auth), and enable Types <b>thread_message</b> and <b>inquiry</b>:</div>
         <label class="muted" style="font-size:12px;display:block;margin-top:8px">Webhook URL<br><input id="whUrl" readonly onclick="this.select()" style="width:100%"></label>
         <div style="display:flex;gap:8px;margin-top:8px">
           <label class="muted" style="font-size:12px;flex:1">User<br><input id="whUser" readonly onclick="this.select()" style="width:100%"></label>
