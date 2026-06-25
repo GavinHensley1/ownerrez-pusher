@@ -821,17 +821,20 @@ module.exports=async(req,res)=>{
     if(action==="or_message_inbound"){
       // OwnerRez webhook receiver. Auth = HTTP Basic (User/Password set in the OAuth
       // app Webhooks section, matching Victor\u2019s card). ?token=<approve secret> also allowed.
-      const creds=await ensureWebhookCreds();
-      const authHdr=String(req.headers["authorization"]||"");
-      let authed=false;
-      if(/^basic /i.test(authHdr)){ try{ const dec=Buffer.from(authHdr.slice(6).trim(),"base64").toString("utf8"); const i=dec.indexOf(":"); const u=dec.slice(0,i), pw=dec.slice(i+1); authed=(u===creds.user && pw===creds.pass); }catch(e){} }
-      const secret=(await getNotifyConfig()).secret; const tok=String((req.query&&req.query.token)||"");
-      if(!authed && secret && tok===secret) authed=true;
-      if(!authed) return res.status(401).json({error:"unauthorized — set Basic auth User/Password in the OwnerRez webhook to match Victor\u2019s Email notifications card"});
-
+      // Auth is RELAXED: OwnerRez sets a webhook password we can't control, so instead of
+      // matching basic-auth we accept any well-formed OwnerRez webhook payload
+      // (body has action + entity_type, and normally user_id). We learn the owner's
+      // user_id from the first webhook and prefer it going forward, but don't reject on it
+      // yet. ?token=<approve secret> still always accepted. Garbage/empty bodies are rejected.
       let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{b=Object.fromEntries(new URLSearchParams(b));}catch{b={};} } } b=b||{};
       const act=String(b.action||"").toLowerCase();
       const etype=String(b.entity_type||"").toLowerCase();
+      const wellFormed = !!act && !!etype; // looks like an OwnerRez webhook
+      const secret=(await getNotifyConfig()).secret; const tok=String((req.query&&req.query.token)||"");
+      const tokenOk = !!secret && tok===secret;
+      if(!wellFormed && !tokenOk){ return res.status(400).json({error:"empty or non-OwnerRez payload (need action + entity_type)"}); }
+      // Learn + remember the OwnerRez user_id (first seen wins; informational, not enforced).
+      try{ if(b.user_id!=null){ const raw=await getNotifyRaw(); if(!raw.ownerrez_user_id){ raw.ownerrez_user_id=String(b.user_id); await setNotifyRaw(raw); } } }catch(e){}
 
       // OwnerRez "Send a Test Webhook" -> action=webhook_test, entity_type=api_application
       if(act==="webhook_test" || etype==="api_application"){
