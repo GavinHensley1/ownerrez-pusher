@@ -680,12 +680,19 @@ module.exports=async(req,res)=>{
       // Only show real, live reservations — drop cancelled / void / declined / removed / inactive.
       const isLive=x=>!/cancel|void|declin|remov|inactive|expired/i.test(String(x.status||"").toLowerCase());
       const liveList=list.filter(isLive);
-      const tod=ymd(now);
-      const upcoming=liveList.filter(x=>(x.departure||x.arrival)>=tod).sort((a,b)=>a.arrival<b.arrival?-1:(a.arrival>b.arrival?1:0));
-      const past=liveList.filter(x=>(x.departure||x.arrival)<tod).sort((a,b)=>a.arrival>b.arrival?-1:(a.arrival<b.arrival?1:0));
+      // "Today" in the property's local tz (America/New_York) so UTC roll-over never
+      // drops a booking a day early. Drop anything whose checkout was 2+ days ago.
+      const etTodayStr=new Intl.DateTimeFormat("en-CA",{timeZone:"America/New_York"}).format(new Date()); // YYYY-MM-DD
+      const tod=etTodayStr;
+      const cutoffD=new Date(etTodayStr+"T00:00:00Z"); cutoffD.setUTCDate(cutoffD.getUTCDate()-2);
+      const cutoffStr=cutoffD.toISOString().slice(0,10); // today - 2 days (ET)
+      const recentOrFuture=liveList.filter(x=>(x.departure||x.arrival)>=cutoffStr);
+      const droppedPast=liveList.length-recentOrFuture.length;
+      const upcoming=recentOrFuture.filter(x=>(x.departure||x.arrival)>=tod).sort((a,b)=>a.arrival<b.arrival?-1:(a.arrival>b.arrival?1:0));
+      const past=recentOrFuture.filter(x=>(x.departure||x.arrival)<tod).sort((a,b)=>a.arrival>b.arrival?-1:(a.arrival<b.arrival?1:0));
       const out=upcoming.concat(past);
       if(redis) await redis.set("parkside:bookings",{ts:Date.now(),list:out});
-      return res.status(200).json({configured:true, count:out.length, totalBeforeFilter, excludedCancelled:totalBeforeFilter-liveList.length, bookings:out});
+      return res.status(200).json({configured:true, count:out.length, totalBeforeFilter, excludedCancelled:totalBeforeFilter-liveList.length, droppedPast, cutoff:cutoffStr, bookings:out});
     }
 
     // ===== (B) PUBLIC booking-inquiry capture — no auth =====
