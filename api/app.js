@@ -858,14 +858,22 @@ module.exports=async(req,res)=>{
 
       if(etype==="inquiry"){
         // Pre-booking guest question. Always inbound (guest -> host); no loop risk.
-        await writeWhStatus({ranAt:new Date().toISOString(), event:"inquiry", action:act, entity_id:b.entity_id, entityKeys:Object.keys(e),
-          guestKeys: Object.keys(g), hasThread: !!threadId, propertyId: e.property_id||e.listing_id||null});
-        const question=String(e.message||e.notes||e.comments||e.body||e.content||e.text||e.question||"").trim();
-        if(!question) return res.status(200).json({ok:true, ignored:"no inquiry text"});
         const guestName=nameFrom();
         const guestEmail=String(e.email||e.email_address||g.email||(Array.isArray(g.email_addresses)&&g.email_addresses[0]&&(g.email_addresses[0].address||g.email_addresses[0]))||"").trim();
+        const arrival=String(e.arrival||e.check_in||e.checkin||e.arrival_date||"").trim();
+        const departure=String(e.departure||e.check_out||e.checkout||e.departure_date||"").trim();
+        let question=String(e.message||e.notes||e.comments||e.body||e.content||e.text||e.question||e.guest_message||"").trim();
+        const hadMessage=!!question;
+        // NEVER drop an inquiry: availability inquiries often carry no message text.
+        // Synthesize a context line so the owner still gets an approval email.
+        if(!question){
+          const ctx=[]; if(arrival) ctx.push(arrival+(departure?(" to "+departure):"")); if(guestName) ctx.push("from "+guestName);
+          question="[New inquiry — no message text] A guest submitted an inquiry"+(ctx.length?(" ("+ctx.join(", ")+")"):"")+". Reply to greet them and ask how we can help with their stay.";
+        }
+        await writeWhStatus({ranAt:new Date().toISOString(), event:"inquiry", action:act, entity_id:b.entity_id, entityKeys:Object.keys(e),
+          guestKeys: Object.keys(g), hasThread: !!threadId, propertyId: e.property_id||e.listing_id||null, hadMessage, msgLen: question.length, arrival, departure});
         try{ const out=await processGuestQuestion(req,{question, threadId, bookingId, guestName, unit:String(e.property_id||e.listing_id||""), source:"ownerrez_inquiry"});
-          return res.status(200).json({ok:true, processed:true, type:"inquiry", auto_approved:!!out.auto_approved, queued:!!out.queued, replyThread:!!threadId, guestEmail:guestEmail||null}); }
+          return res.status(200).json({ok:true, processed:true, type:"inquiry", hadMessage, auto_approved:!!out.auto_approved, queued:!!out.queued, emailed:!!(out.victorEmail&&out.victorEmail.sent), emailReason:out.victorEmail&&(out.victorEmail.reason||out.victorEmail.detail||null), replyThread:!!threadId, guestEmail:guestEmail||null}); }
         catch(err){ return res.status(200).json({ok:true, processed:false, type:"inquiry", error:String(err&&err.message||err)}); }
       }
 
@@ -1006,7 +1014,7 @@ module.exports=async(req,res)=>{
       const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, approveSecretSet:!!cfg.secret,
         resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, webhook, _diag,
         messaging_enabled:!!stN.messaging_enabled,
-        counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
+        counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
         from:cfg.from||null, to:cfg.to||null,
         source:{ apiKey: raw.resendApiKey?"ui":(process.env.RESEND_API_KEY?"env":null), from: raw.from?"ui":(process.env.RESEND_FROM?"env":null), to: raw.victorEmail?"ui":(process.env.VICTOR_EMAIL?"env":null), secret: raw.approveSecret?"ui":(process.env.APPROVE_LINK_SECRET?"env":null) } };
