@@ -262,25 +262,34 @@ async function smsVictor(enabled, text){
 }
 
 // ===== Email approval channel (Resend) — interim channel before SMS is live =====
-function resendFrom(){ return process.env.RESEND_FROM||""; }
-function victorEmail(){ return process.env.VICTOR_EMAIL||""; }
-function approveSecret(){ return process.env.APPROVE_LINK_SECRET||""; }
-function resendConfigured(){ return !!(process.env.RESEND_API_KEY && resendFrom() && victorEmail()); }
+const NCKEY="parkside:notify_config";
+let _memNotify=null;
+async function getNotifyRaw(){ return (redis?(await redis.get(NCKEY)):_memNotify)||{}; }
+async function setNotifyRaw(c){ if(redis) await redis.set(NCKEY,c); else _memNotify=c; return c; }
+// Merged notify config: Redis (set via Victor's UI) wins, env vars are the fallback.
+async function getNotifyConfig(){ const c=await getNotifyRaw(); return {
+  apiKey: (c.resendApiKey||process.env.RESEND_API_KEY||"").trim(),
+  from:   (c.from||process.env.RESEND_FROM||"").trim(),
+  to:     (c.victorEmail||process.env.VICTOR_EMAIL||"").trim(),
+  secret: (c.approveSecret||process.env.APPROVE_LINK_SECRET||"").trim(),
+}; }
 function appOrigin(req){ const h=(req&&req.headers)||{}; const host=h["x-forwarded-host"]||h.host; const proto=h["x-forwarded-proto"]||"https"; return host?(proto+"://"+host):""; }
 function escHtml(x){ return String(x==null?"":x).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
-async function resendSend({from,to,subject,html}){
-  const key=process.env.RESEND_API_KEY;
-  if(!key) return {sent:false, staged:true, reason:"RESEND_API_KEY not set"};
-  if(!from) return {sent:false, staged:true, reason:"RESEND_FROM not set"};
-  if(!to) return {sent:false, staged:true, reason:"VICTOR_EMAIL not set"};
-  try{ const r=await fetch("https://api.resend.com/emails",{method:"POST",headers:{Authorization:"Bearer "+key,"Content-Type":"application/json"},body:JSON.stringify({from,to,subject,html})});
-    const t=await r.text(); return {sent:r.ok, status:r.status, body:t.slice(0,200)}; }
+async function resendSend({apiKey,from,to,subject,html}){
+  if(!apiKey) return {sent:false, staged:true, reason:"Resend API key not set (add it in Victor's Email notifications card, or RESEND_API_KEY env)"};
+  if(!from) return {sent:false, staged:true, reason:"From address not set"};
+  if(!to) return {sent:false, staged:true, reason:"Victor email (To) not set"};
+  try{ const r=await fetch("https://api.resend.com/emails",{method:"POST",headers:{Authorization:"Bearer "+apiKey,"Content-Type":"application/json"},body:JSON.stringify({from,to,subject,html})});
+    const t=await r.text(); let detail=t.slice(0,300);
+    try{ const j=JSON.parse(t); if(!r.ok && (j.message||j.error)) detail=j.message||j.error; }catch(e){}
+    return {sent:r.ok, status:r.status, detail}; }
   catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 // Build + send (or stage) the Victor approval email with Approve/Reject links.
 async function sendVictorApprovalEmail(req, item, ctx){
   ctx=ctx||{};
-  const origin=appOrigin(req); const secret=approveSecret();
+  const cfg=await getNotifyConfig();
+  const origin=appOrigin(req); const secret=cfg.secret;
   const base=origin+"/api/app?action=approve&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const yes=base+"&decision=yes", no=base+"&decision=no";
   const unit=ctx.unit||""; const guestName=ctx.guestName||"";
@@ -300,8 +309,8 @@ async function sendVictorApprovalEmail(req, item, ctx){
     +'<p style="color:#94a3b8;font-size:12px;margin-top:8px">Approve sends the reply to the guest and saves it to the knowledge base so it auto-answers next time. Reject sends nothing. (Ref '+escHtml(item.id)+')</p>'
     +(secret?'':'<p style="color:#dc2626;font-size:12px">\u26a0 APPROVE_LINK_SECRET is not set on the server, so these links will not work yet.</p>')
     +'</div>';
-  const result=await resendSend({from:resendFrom(), to:victorEmail(), subject, html});
-  return {...result, to:victorEmail()||null, from:resendFrom()||null, subject, approveUrl:yes, rejectUrl:no};
+  const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:cfg.to, subject, html});
+  return {...result, to:cfg.to||null, from:cfg.from||null, subject, approveUrl:yes, rejectUrl:no};
 }
 function htmlPage(title, msg){
   return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+escHtml(title)+'</title></head>'
@@ -683,7 +692,7 @@ module.exports=async(req,res)=>{
       const q=(req.query)||{};
       const isLink = (req.method==="GET") || !!q.token;
       if(isLink){
-        const secret=approveSecret();
+        const secret=(await getNotifyConfig()).secret;
         res.setHeader("Content-Type","text/html; charset=utf-8");
         if(!secret || String(q.token||"")!==secret){ res.statusCode=403; return res.end(htmlPage("Link error","This approval link is invalid or expired.")); }
         const out=await decideApproval(String(q.id||""), String(q.decision||"").toLowerCase(), null);
@@ -722,12 +731,46 @@ module.exports=async(req,res)=>{
       const m=kbAutoMatch(kb, q);
       return res.status(200).json({query:q, match:m, knownTopics:(kb.items||[]).filter(i=>String(i.a||"").trim()).map(i=>i.topic)});
     }
+    // Save email-notification config from Victor's UI (password). Stored in Redis,
+    // read first by the email flow (env vars remain the fallback). Blank/omitted
+    // fields are left unchanged; send "" explicitly to clear a field.
+    if(action==="set_notify_config"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+      const cur=await getNotifyRaw(); const next={...cur};
+      const setIf=(k,v)=>{ if(v===undefined||v===null) return; next[k]=String(v).trim(); };
+      setIf("victorEmail", b.victorEmail);
+      setIf("from", b.from);
+      setIf("approveSecret", b.approveSecret);
+      // Only overwrite the API key when a non-empty value is provided (so saving other
+      // fields never wipes a previously stored key). Pass apiKey:"" to clear it.
+      if(typeof b.resendApiKey==="string" && b.resendApiKey.trim()!=="") next.resendApiKey=b.resendApiKey.trim();
+      else if(b.resendApiKey==="") delete next.resendApiKey;
+      await setNotifyRaw(next);
+      const cfg=await getNotifyConfig();
+      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret }});
+    }
+    // Send ONE sample approval email to the configured Victor address (password).
+    if(action==="send_test_email"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      const sample={ id:"test-"+Date.now().toString(36), question:"TEST — Is there a fire pit guests can use?", proposed:"Yes! There's a shared fire pit at the resort, open in the evenings. 🔥", status:"pending", ts:new Date().toISOString() };
+      const r=await sendVictorApprovalEmail(req, sample, {unit:"Bear Claw (test)", guestName:"Test Guest"});
+      const ok = r.sent===true;
+      return res.status(ok?200:200).json({ ok, sent:ok, to:r.to, from:r.from,
+        error: ok?null:(r.detail||r.reason||r.error||("HTTP "+(r.status||"?"))),
+        note: ok?"Sample approval email sent — check Victor's inbox.":"Not sent — fix the config and try again." });
+    }
+
     // Config visibility for the email/notify channel. Booleans only (no secrets);
     // if a Resend key is present, also lists the account's verified sender domains.
     if(action==="notify_status"){
-      const out={ resendKey:!!process.env.RESEND_API_KEY, resendFromSet:!!resendFrom(), victorEmailSet:!!victorEmail(), approveSecretSet:!!approveSecret(), resendConfigured:resendConfigured() };
-      if(process.env.RESEND_API_KEY){
-        try{ const r=await fetch("https://api.resend.com/domains",{headers:{Authorization:"Bearer "+process.env.RESEND_API_KEY}});
+      const cfg=await getNotifyConfig(); const raw=await getNotifyRaw();
+      const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, approveSecretSet:!!cfg.secret,
+        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to),
+        from:cfg.from||null, to:cfg.to||null,
+        source:{ apiKey: raw.resendApiKey?"ui":(process.env.RESEND_API_KEY?"env":null), from: raw.from?"ui":(process.env.RESEND_FROM?"env":null), to: raw.victorEmail?"ui":(process.env.VICTOR_EMAIL?"env":null), secret: raw.approveSecret?"ui":(process.env.APPROVE_LINK_SECRET?"env":null) } };
+      if(cfg.apiKey){
+        try{ const r=await fetch("https://api.resend.com/domains",{headers:{Authorization:"Bearer "+cfg.apiKey}});
           out.domainsStatus=r.status; const j=await r.json().catch(()=>null);
           const arr=(j&&(j.data||j.domains))||[]; out.verifiedDomains=arr.map(d=>({name:d.name,status:d.status})); }
         catch(e){ out.domainsErr=String(e.message||e); }
