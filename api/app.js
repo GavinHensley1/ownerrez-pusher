@@ -1039,11 +1039,23 @@ module.exports=async(req,res)=>{
       if(cfg.ownerrezOauth){ try{ const pr=await fetch("https://api.ownerrez.com/v2/messages",{headers:{Authorization:"Bearer "+cfg.ownerrezOauth,"User-Agent":"parkside-control/1.0"}});
         oauthProbe={endpoint:"GET /v2/messages", status:pr.status, meaning:(pr.status===405?"token VALID (auth ok; GET not allowed)":(pr.status===401?"token INVALID/expired (401)":"status "+pr.status))}; }
         catch(e){ oauthProbe={error:String(e.message||e)}; } }
+      // SAFE send probe: POST /v2/messages with NO thread_id/recipient -> reveals whether
+      // the SEND endpoint is reachable (400 validation = sending works; 401/403 = access/
+      // messaging-agreement issue; 405 = method blocked) without messaging anyone.
+      let sendProbe=null;
+      if(cfg.ownerrezOauth){ try{ const sp=await fetch("https://api.ownerrez.com/v2/messages",{method:"POST",headers:{Authorization:"Bearer "+cfg.ownerrezOauth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},body:JSON.stringify({body:"(probe)"})});
+        const st=await sp.text(); sendProbe={endpoint:"POST /v2/messages (no thread_id)", status:sp.status, body:st.slice(0,200),
+          meaning:(sp.status===400?"SEND reachable (needs thread_id) — token+endpoint OK":(sp.status===401?"token invalid":(sp.status===403?"forbidden — messaging SEND may need the agreement":(sp.status===405?"method blocked":"status "+sp.status))))}; }
+        catch(e){ sendProbe={error:String(e.message||e)}; } }
+      // Summary of the most recent DECIDED approval (no message content) — did it have a thread?
+      let lastDecided=null;
+      try{ const _all=await getApprovals(); const dec=_all.filter(x=>x.status==="approved"||x.status==="rejected").sort((a,b)=>String(b.decidedAt||"").localeCompare(String(a.decidedAt||"")));
+        if(dec[0]){ const d=dec[0]; lastDecided={status:d.status, source:d.source, decidedAt:d.decidedAt, hasThread:!!d.thread_id, hasBooking:!!d.booking_id, sent:d.sent===true||(d.guestSend&&d.guestSend.sent===true)||undefined}; } }catch(e){}
       // Drive intake on load (throttled) so the pipeline runs without a Vercel cron/paid plan.
       const polledNow=await maybePollMessages(req);
       const stN=await getState(); const apprN=await getApprovals();
       const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, approveSecretSet:!!cfg.secret,
-        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, ownerrezOauthLen:(cfg.ownerrezOauth||"").length, oauthProbe, lastSend, webhook, _diag,
+        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, ownerrezOauthLen:(cfg.ownerrezOauth||"").length, oauthProbe, sendProbe, lastDecided, lastSend, webhook, _diag,
         messaging_enabled:!!stN.messaging_enabled,
         counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
