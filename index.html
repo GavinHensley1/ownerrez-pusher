@@ -537,8 +537,12 @@ async function saveNotify(){
   const ortk=document.getElementById('nOrToken').value.trim(); if(ortk) body.ownerrez_oauth_token=ortk;
   try{ const r=await fetch(api('set_notify_config'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
-    if(r.ok&&j.ok){ msg.textContent="Saved \u2713"; document.getElementById('nKey').value=""; document.getElementById('nOrToken').value=""; loadNotifyStatus(); }
-    else msg.textContent="Save failed: "+(j.error||r.status);
+    if(r.ok&&j.ok){
+      const sv=j.saved||{};
+      msg.textContent="Saved \u2713"+(sv.ownerrezOauthSet?" — OwnerRez token stored":"");
+      document.getElementById('nKey').value=""; document.getElementById('nOrToken').value="";
+      loadNotifyStatus();
+    } else msg.textContent="Save failed: "+(j.error||r.status);
   }catch(e){ msg.textContent="Save failed: "+e.message; }
 }
 async function sendTestEmail(){

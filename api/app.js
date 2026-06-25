@@ -887,7 +887,8 @@ module.exports=async(req,res)=>{
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
       const cur=await getNotifyRaw(); const next={...cur};
-      const setIf=(k,v)=>{ if(v===undefined||v===null) return; next[k]=String(v).trim(); };
+      // Only write non-empty values, so a blank field never wipes a saved one.
+      const setIf=(k,v)=>{ if(v===undefined||v===null) return; const t=String(v).trim(); if(t==="") return; next[k]=t; };
       setIf("victorEmail", b.victorEmail);
       setIf("from", b.from);
       setIf("approveSecret", b.approveSecret);
@@ -915,6 +916,7 @@ module.exports=async(req,res)=>{
     // Config visibility for the email/notify channel. Booleans only (no secrets);
     // if a Resend key is present, also lists the account's verified sender domains.
     if(action==="notify_status"){
+      res.setHeader("Cache-Control","no-store, max-age=0");
       const cfg=await getNotifyConfig(); const raw=await getNotifyRaw(); const reqAll=await requireApprovalAll();
       // Drive intake on load (throttled) so the pipeline runs without a Vercel cron/paid plan.
       const polledNow=await maybePollMessages(req);
