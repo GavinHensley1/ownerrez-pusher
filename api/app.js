@@ -360,6 +360,58 @@ function kbAutoMatch(kb, question){
   return null;
 }
 // KB-grounded AI draft (same policy as the ai_draft action). Returns {inKb, answer}.
+// ===== Separate, HIGH-WEIGHT "approved bank" (Q&A Victor physically approved) =====
+// Stored apart from the editable KB and checked FIRST by the matcher.
+const KBAKEY="parkside:kb_approved";
+let _memApprovedBank=[];
+async function getApprovedBank(){ return redis?((await redis.get(KBAKEY))||[]):_memApprovedBank; }
+async function setApprovedBank(list){ const t=list.slice(-1000); if(redis) await redis.set(KBAKEY,t); else _memApprovedBank=t; return t; }
+const _STOP=new Set("a an the is are am do does did can could would will to of for our your my we you i it at on in and or but please hi hello hey there this that what whats when where how who why be been was were as with about".split(" "));
+function _toks(s){ return normQ(s).split(" ").filter(w=>w&&!_STOP.has(w)); }
+function _jaccard(a,b){ const A=new Set(a),B=new Set(b); if(!A.size||!B.size) return 0; let i=0; for(const x of A) if(B.has(x)) i++; return i/(A.size+B.size-i); }
+const APPROVED_THRESHOLD=0.82; // auto-send only at/above this similarity to an approved Q
+async function approvedBankMatch(question){
+  const bank=await getApprovedBank(); const qn=normQ(question); const qt=_toks(question);
+  let best=null;
+  for(const e of bank){ if(!e||!String(e.a||"").trim()) continue;
+    const conf = (normQ(e.q)===qn) ? 1.0 : _jaccard(qt,_toks(e.q));
+    if(!best||conf>best.confidence) best={answer:String(e.a).trim(), matchedQuestion:e.q, confidence:conf}; }
+  return best;
+}
+async function upsertApprovedBank(question, answer){
+  const bank=await getApprovedBank(); const qn=normQ(question);
+  const ex=bank.find(e=>normQ(e.q)===qn);
+  if(ex){ ex.a=answer; ex.ts=new Date().toISOString(); } else bank.push({q:question, a:answer, ts:new Date().toISOString()});
+  await setApprovedBank(bank); return bank.length;
+}
+function orAuthHeader(){ const tok=process.env.OWNERREZ_OAUTH_TOKEN; if(tok) return "Bearer "+tok;
+  const u=process.env.OWNERREZ_API_USER,t=process.env.OWNERREZ_API_TOKEN; if(u&&t) return "Basic "+Buffer.from(u+":"+t).toString("base64"); return null; }
+
+// Shared intake pipeline for EVERY guest question (manual ask, OwnerRez poll, webhook).
+//  - APPROVED BANK match >= threshold -> auto-send to guest, no human, no email.
+//  - otherwise -> propose an answer (bank near-match -> KB synonym -> AI draft) and
+//    EMAIL Victor with Approve/Reject links. Nothing is sent to the guest until Approve.
+async function processGuestQuestion(req, p){
+  const question=String(p.question||"").trim(); if(!question) return {error:"no question"};
+  const bookingId=p.bookingId||null, unit=p.unit||"", guestName=p.guestName||"";
+  const st=await getState(); const enabled=!!st.messaging_enabled; const kb=st.kb||KB_SEED;
+  const ab=await approvedBankMatch(question);
+  if(ab && ab.confidence>=APPROVED_THRESHOLD){
+    const guestSend=await sendGuestReply(enabled, bookingId, ab.answer);
+    return {auto_approved:true, source:"approved_bank", confidence:Number(ab.confidence.toFixed(2)),
+      matchedQuestion:ab.matchedQuestion, answer:ab.answer, guestSend, sent:guestSend.sent===true};
+  }
+  let proposed = (ab && ab.answer) ? ab.answer : "";
+  if(!proposed){ const km=kbAutoMatch(kb, question); if(km && km.answer) proposed=km.answer; }
+  if(!proposed){ const draft=await aiDraftAnswer(kb, question); if(draft.inKb && draft.answer) proposed=draft.answer; }
+  const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed,
+    unit, guest_name:guestName, booking_id:bookingId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
+  const list=await getApprovals(); list.push(item); await setApprovals(list);
+  const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
+  const sms=await smsVictor(enabled, "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(write one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
+  return {queued:true, id:item.id, proposed, victorEmail, victorSms:sms};
+}
+
 async function aiDraftAnswer(kb, question){
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return {inKb:false, answer:"", noKey:true};
   const facts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
@@ -385,13 +437,16 @@ async function decideApproval(id, decision, overrideAnswer){
     const answer=(overrideAnswer&&overrideAnswer.trim())||it.proposed||"";
     if(!answer) return {ok:false, error:"no answer to send (proposed was empty — supply an answer)"};
     const guestSend=await sendGuestReply(enabled, it.booking_id, answer);
+    // (a) save to the SEPARATE high-weight approved bank (checked first by the matcher)
+    const bankSize=await upsertApprovedBank(it.question, answer);
+    // (b) also mirror into the editable KB so it shows in Victor's KB list (harmless)
     const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
     const nt=normQ(it.question); const existing=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
     if(existing) existing.a=answer; else kb.items.push({topic:it.question.slice(0,60), a:answer, src:"approved"});
     await setState({kb});
     it.status="approved"; it.answer=answer; it.decidedAt=new Date().toISOString();
     await setApprovals(list);
-    return {ok:true, decision:"approved", id, guestSend, sent:guestSend.sent===true, learned:true};
+    return {ok:true, decision:"approved", id, guestSend, sent:guestSend.sent===true, learned:true, approvedBankSize:bankSize};
   }
   it.status="rejected"; it.decidedAt=new Date().toISOString(); await setApprovals(list);
   return {ok:true, decision:"rejected", id};
@@ -655,28 +710,65 @@ module.exports=async(req,res)=>{
     }
     // ===== (D) Messaging approval pipeline =====
     // A guest question enters the pipeline: auto-approve if KB-known, else queue for Victor.
+    // ===== OwnerRez inbound intake -> approval pipeline =====
+    // Helper: does a message look like an INBOUND guest message (not our own outbound)?
+    // (Defensive across possible OwnerRez shapes; tune once a live channel exists.)
+    // Polling cron: pull recent OwnerRez messages and feed new guest ones into the pipeline.
+    if(action==="poll_messages"){
+      const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x")) || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__x"));
+      if(!okAuth) return res.status(401).json({error:"unauthorized"});
+      const auth=orAuthHeader(); if(!auth) return res.status(200).json({ok:false, polled:0, error:"OwnerRez creds not set (OWNERREZ_OAUTH_TOKEN or OWNERREZ_API_USER+TOKEN)"});
+      const H={Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
+      const sinceIso=new Date(Date.now()-1000*60*60*6).toISOString(); // last 6h window
+      let items=[];
+      try{ const r=await fetch("https://api.ownerrez.com/v2/messages?since_utc="+encodeURIComponent(sinceIso),{headers:H});
+        if(!r.ok){ const t=await r.text(); return res.status(200).json({ok:false, polled:0, error:"OwnerRez messages "+r.status, detail:t.slice(0,200), note:"If messages aren't supported on this token/plan, register the webhook instead (action=or_message_inbound)."}); }
+        const j=await r.json(); items=j.items||j.messages||(Array.isArray(j)?j:[]); }
+      catch(e){ return res.status(200).json({ok:false, polled:0, error:String(e.message||e)}); }
+      const seenArr=(redis&&await redis.get("parkside:msg_seen"))||[]; const seen=new Set(seenArr);
+      const isInbound=m=>{ const d=String(m.direction||m.type||"").toLowerCase(); if(/out|sent|host/.test(d)) return false; if(/in|received|guest/.test(d)) return true; if(m.is_from_guest===true||m.from_guest===true) return true; return d===""? true : true; };
+      let processed=0, queued=0, autoSent=0; const results=[];
+      for(const m of items){ const mid=String(m.id||m.message_id||m.guid||""); if(!mid||seen.has(mid)) continue;
+        seen.add(mid);
+        if(!isInbound(m)) continue;
+        const question=String(m.body||m.message||m.content||m.text||"").trim(); if(!question) continue;
+        const out=await processGuestQuestion(req,{question, bookingId:m.booking_id||m.bookingId||null, source:"ownerrez_poll"});
+        processed++; if(out.auto_approved) autoSent++; else if(out.queued) queued++;
+        results.push({mid, auto:!!out.auto_approved});
+      }
+      if(redis) await redis.set("parkside:msg_seen", Array.from(seen).slice(-5000));
+      return res.status(200).json({ok:true, polled:items.length, processed, queued, autoSent, results});
+    }
+    // Webhook intake: OwnerRez (or any source) POSTs an inbound message here.
+    // URL: /api/app?action=or_message_inbound&token=<APPROVE_LINK_SECRET>
+    if(action==="or_message_inbound"){
+      const secret=(await getNotifyConfig()).secret || process.env.CRON_SECRET || "";
+      const tok=String((req.query&&req.query.token)||"");
+      if(!secret || tok!==secret) return res.status(403).json({error:"bad or missing token"});
+      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{b=Object.fromEntries(new URLSearchParams(b));}catch{b={};} } } b=b||{};
+      const msg=b.message||b.data||b;
+      const dir=String(msg.direction||msg.type||"").toLowerCase();
+      if(/out|sent|host/.test(dir)) return res.status(200).json({ignored:true, reason:"outbound message"});
+      const question=String(msg.body||msg.message||msg.content||msg.text||"").trim();
+      if(!question) return res.status(200).json({ignored:true, reason:"no message text"});
+      const out=await processGuestQuestion(req,{question, bookingId:msg.booking_id||msg.bookingId||null, unit:String(msg.unit||""), guestName:String(msg.guest_name||msg.guestName||""), source:"ownerrez_webhook"});
+      return res.status(200).json({ok:true, ...out});
+    }
+    // View the approved bank (password) — the high-weight, physically-approved Q&A.
+    if(action==="approved_bank"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      const bank=await getApprovedBank();
+      return res.status(200).json({count:bank.length, items:bank.slice(-200).reverse()});
+    }
+
     if(action==="ask"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
-      const question=String(b.question||"").trim(); const bookingId=b.booking_id||null;
-      const unit=String(b.unit||"").trim(); const guestName=String(b.guest_name||b.guestName||"").trim();
+      const question=String(b.question||"").trim();
       if(!question) return res.status(400).json({error:"no question"});
-      const st=await getState(); const kb=st.kb||KB_SEED; const enabled=!!st.messaging_enabled;
-      // AUTO-APPROVE: high-confidence KB match -> send now, never bother Victor.
-      const match=kbAutoMatch(kb, question);
-      if(match){ const guestSend=await sendGuestReply(enabled, bookingId, match.answer);
-        return res.status(200).json({auto_approved:true, matchedTopic:match.topic, confidence:match.confidence, answer:match.answer, guestSend, sent:guestSend.sent===true}); }
-      // UNKNOWN/low-confidence -> propose a KB-grounded AI draft and QUEUE for Victor.
-      const draft=await aiDraftAnswer(kb, question);
-      const proposed=(draft.inKb && draft.answer) ? draft.answer : "";
-      const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed,
-        unit, guest_name:guestName, booking_id:bookingId, status:"pending", ts:new Date().toISOString() };
-      const list=await getApprovals(); list.push(item); await setApprovals(list);
-      // EMAIL is the active Victor channel now (interim before SMS). SMS abstraction kept for when the number is live.
-      const victorEmailRes=await sendVictorApprovalEmail(req, item, {unit, guestName});
-      const sms=await smsVictor(enabled,
-        "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(no KB answer — reply with one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
-      return res.status(200).json({queued:true, id:item.id, proposed, victorEmail:victorEmailRes, victorSms:sms});
+      const out=await processGuestQuestion(req, {question, bookingId:b.booking_id||null,
+        unit:String(b.unit||"").trim(), guestName:String(b.guest_name||b.guestName||"").trim(), source:"manual"});
+      return res.status(out.error?400:200).json(out);
     }
     // VICTOR'S: view the approval queue (password). ?status=pending|approved|rejected|all
     if(action==="approvals"){

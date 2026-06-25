@@ -1,5 +1,12 @@
 {
   "crons": [
-    { "path": "/api/app?action=run", "schedule": "45 6 * * *" }
+    {
+      "path": "/api/app?action=run",
+      "schedule": "45 6 * * *"
+    },
+    {
+      "path": "/api/app?action=poll_messages",
+      "schedule": "*/5 * * * *"
+    }
   ]
 }
