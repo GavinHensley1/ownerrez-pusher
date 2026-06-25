@@ -322,19 +322,22 @@ async function sendVictorApprovalEmail(req, item, ctx){
   const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const unit=ctx.unit||""; const guestName=ctx.guestName||"";
   const proposed=item.proposed||"";
-  const subject="Parkside approval needed"+(unit?(" — "+unit):"");
+  const esc=item.escalate===true;
+  const subject=(esc?"\u26a0 Unknown — approval needed":"Parkside approval needed")+(unit?(" — "+unit):"");
   const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#ffffff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
   const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
     +'<h2 style="margin:0 0 4px 0">Guest message — approval needed</h2>'
-    +'<p style="color:#475569;margin:0 0 14px 0">A guest question wasn\'t confidently answered from the knowledge base. Review and decide:</p>'
+    +(esc
+      ? '<div style="background:#fff7ed;border:1px solid #fdba74;border-radius:8px;padding:12px 14px;margin:0 0 14px 0;color:#9a3412;font-size:14px"><b>\u26a0 Not in your knowledge base — I don\u2019t know this one.</b><br>Tap <b>\u270f\ufe0f Write / edit the reply</b> to give the real answer (it gets saved for next time), or approve the holding message below to send it as-is.</div>'
+      : '<p style="color:#475569;margin:0 0 14px 0">This was answered from your knowledge base. Review and decide:</p>')
     +'<table style="width:100%;border-collapse:collapse;font-size:14px">'
     +(unit?'<tr><td style="padding:6px 0;color:#64748b;width:90px">Unit</td><td style="padding:6px 0;font-weight:600">'+escHtml(unit)+'</td></tr>':'')
     +(guestName?'<tr><td style="padding:6px 0;color:#64748b">Guest</td><td style="padding:6px 0;font-weight:600">'+escHtml(guestName)+'</td></tr>':'')
     +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Question</td><td style="padding:6px 0">'+escHtml(item.question)+'</td></tr>'
-    +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Proposed reply</td><td style="padding:6px 0">'+(proposed?escHtml(proposed):'<i style="color:#94a3b8">No suggested reply found in your saved data. Open Victor&rsquo;s area \u2192 Approval queue to type a reply and approve (the one-click Approve link can only send an existing suggested reply, never a blank).</i>')+'</td></tr>'
+    +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">'+(esc?'\u26a0 Holding reply (I don\u2019t know this)':'Suggested reply (from your knowledge base)')+'</td><td style="padding:6px 0">'+(proposed?escHtml(proposed):'<i style="color:#94a3b8">No suggested reply found in your saved data. Open Victor&rsquo;s area \u2192 Approval queue to type a reply and approve (the one-click Approve link can only send an existing suggested reply, never a blank).</i>')+'</td></tr>'
     +'</table>'
     +'<div style="margin:18px 0">'+btn(yes,"#16a34a","\u2705 Approve & Send")+btn(editUrl,"#2563eb","\u270f\ufe0f Write / edit the reply")+btn(no,"#dc2626","\u274c Reject")+'</div>'
-    +'<p style="color:#94a3b8;font-size:12px;margin-top:8px">Approve sends the reply to the guest and saves it to the knowledge base so it auto-answers next time. Reject sends nothing. (Ref '+escHtml(item.id)+')</p>'
+    +'<p style="color:#94a3b8;font-size:12px;margin-top:8px">'+(esc?'Approving the holding message sends it as-is and does NOT save it as an answer. Use \u270f\ufe0f to provide the real answer (that gets saved). ':'Approve sends this reply to the guest and saves it so it auto-answers next time. ')+'Reject sends nothing. (Ref '+escHtml(item.id)+')</p>'
     +(secret?'':'<p style="color:#dc2626;font-size:12px">\u26a0 APPROVE_LINK_SECRET is not set on the server, so these links will not work yet.</p>')
     +'</div>';
   const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:cfg.to, subject, html});
@@ -525,11 +528,16 @@ async function processGuestQuestion(req, p){
   // and ONLY when the match is relevant enough (weak/irrelevant matches -> no suggestion,
   // so the owner writes it). approved bank (>=PROPOSE_MIN) -> KB synonym -> KB-grounded AI draft.
   const PROPOSE_MIN=0.4;
-  let proposed="", pSource="none";
-  if(ab && ab.confidence>=PROPOSE_MIN && ab.answer){ proposed=ab.answer; pSource="approved_bank"; }
-  if(!proposed){ const km=kbAutoMatch(kb, question); if(km && km.answer){ proposed=km.answer; pSource="kb"; } }
-  if(!proposed){ const draft=await aiDraftAnswer(kb, question, guestName); if(draft.answer){ proposed=draft.answer; pSource=draft.inKb?"kb_ai":"kb_ai_partial"; } }
-  const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed,
+  let proposed="", pSource="none", escalate=false;
+  if(ab && ab.confidence>=PROPOSE_MIN && ab.answer){ proposed=ab.answer; pSource="approved_bank"; }       // known
+  if(!proposed){ const km=kbAutoMatch(kb, question); if(km && km.answer){ proposed=km.answer; pSource="kb"; } } // known
+  if(!proposed){ const draft=await aiDraftAnswer(kb, question, guestName);
+    proposed=draft.answer||holdingMessage(guestName);
+    if(draft.known==="full"){ pSource="kb_ai"; }
+    else if(draft.known==="partial"){ pSource="kb_ai_partial"; escalate=true; }   // some unknown -> flag
+    else { pSource="escalation"; escalate=true; }                                  // none known -> holding
+  }
+  const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate,
     unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
   const list=await getApprovals(); list.push(item); await setApprovals(list);
   const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
@@ -537,28 +545,32 @@ async function processGuestQuestion(req, p){
   return {queued:true, require_approval_all:requireAll, id:item.id, proposed, matchSource: proposed?pSource:"none", proposedConfidence: ab?Number(ab.confidence.toFixed(2)):0, victorEmail, victorSms:sms};
 }
 
+function holdingMessage(guestName){ const f=String(guestName||"").trim().split(/\s+/)[0];
+  return "Hi "+(f||"there")+"! Great question \u2014 I want to make sure I get you the right info, so let me check with my manager and I\u2019ll get right back to you shortly. \uD83D\uDE4F"; }
+// KB-grounded draft. Returns {known:"full"|"partial"|"none", answer}. NEVER fabricates:
+// unknown parts -> say we will confirm with the manager and follow up (no guessing).
 async function aiDraftAnswer(kb, question, guestName){
-  const key=process.env.ANTHROPIC_API_KEY; if(!key) return {inKb:false, answer:"", noKey:true};
+  const key=process.env.ANTHROPIC_API_KEY; if(!key) return {known:"none", answer:holdingMessage(guestName), noKey:true};
   const facts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
   const first=String(guestName||"").trim().split(/\s+/)[0]||"";
-  const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). "
-    +"Write ONE warm reply to the guest's message; a human will review it before it is sent.\n"
-    +"RULES:\n"
-    +"1. GREET the guest warmly by FIRST NAME if provided: 'Hi "+(first||"there")+"!' (if no name, 'Hi there!').\n"
-    +"2. Be KIND, warm and friendly like a gracious host — never terse or robotic. Add a brief friendly closing (e.g. 'We can't wait to host you! \uD83D\uDE0A'). Say 'we/us'. No long sign-off.\n"
-    +"3. Answer EVERY part of the message. If it asks multiple things (e.g. check-in time AND where to go / directions), address ALL of them — never drop a part.\n"
-    +"4. Use ONLY the KNOWN INFO facts for specific details (times, addresses, codes, policies, amenities). NEVER invent or guess specifics.\n"
-    +"4b. MATCH THE QUESTION WORD to the right kind of fact: 'where' wants a LOCATION/place/address; 'when' or 'what time' wants a TIME; 'how' wants a process/steps; 'what'/'which' wants the specific item. Do NOT substitute a different fact for the one asked. Example: if the guest asks WHERE to check in but you only know the check-in TIME, do NOT answer with the time \u2014 use '[need info: where to check in / location]' for that part (you may still mention the time only if they also asked when).\n"
-    +"5. If a part of the question is NOT covered by KNOWN INFO, do NOT make it up — include a clearly-marked placeholder for that part like '[need info: <what is missing>]' so the host can fill it in. Never silently skip a part.\n"
-    +"6. Reply with ONLY a JSON object: {\"in_kb\": true|false, \"answer\": \"...\"}. Set in_kb=true ONLY if every part was fully answered from KNOWN INFO with NO placeholder. 'answer' is ALWAYS the complete warm message (greeting + every part + closing), even when in_kb is false.\n\n"
+  const hold=holdingMessage(guestName);
+  const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). A human reviews your draft before it is sent. "
+    +"Use ONLY the KNOWN INFO below. NEVER invent, guess, infer, or substitute a different fact. Keep the reply SHORT.\n"
+    +"First decide how much of the guest's message the KNOWN INFO answers: 'full' (every part), 'partial' (some parts), or 'none'.\n"
+    +"Match the question word to the right fact: 'where'->a location/place/address; 'when'/'what time'->a time; 'how'->a process; 'what'/'which'->the specific item. If the specific thing asked is NOT in KNOWN INFO, treat that part as UNKNOWN (do not substitute a different fact).\n"
+    +"Format: ONE warm greeting line ('Hi "+(first||"there")+"!'), then the answer in 1-3 short sentences, then a brief friendly closing. No padding, no over-explaining.\n"
+    +"- full: answer every part using ONLY KNOWN INFO.\n"
+    +"- partial: answer the part(s) you DO know from KNOWN INFO; for the unknown part(s) say you'll check with your manager and follow up shortly \u2014 NEVER guess it.\n"
+    +"- none: do NOT attempt an answer. Use this exact warm holding message: \""+hold+"\"\n"
+    +"Reply with ONLY a JSON object: {\"known\":\"full\"|\"partial\"|\"none\", \"answer\":\"...\"}. 'answer' is always the full message text.\n\n"
     +"KNOWN INFO:\n"+(facts||"(none saved yet)");
   const userMsg=(first?("Guest first name: "+first+"\n"):"")+"Guest message: "+String(question);
-  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:500,temperature:0.3,system:sys,messages:[{role:"user",content:userMsg}]})});
-    const j=await r.json(); if(!r.ok) return {inKb:false, answer:"", error:JSON.stringify(j).slice(0,200)};
+  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:350,temperature:0.2,system:sys,messages:[{role:"user",content:userMsg}]})});
+    const j=await r.json(); if(!r.ok) return {known:"none", answer:holdingMessage(guestName), error:JSON.stringify(j).slice(0,200)};
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
-    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); return {inKb:o.in_kb===true, answer:String(o.answer||"").trim()}; }
-    catch{ return {inKb:false, answer:""}; }
-  }catch(e){ return {inKb:false, answer:"", error:String(e.message||e)}; }
+    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; let answer=String(o.answer||"").trim(); if(!answer) answer=holdingMessage(guestName); return {known, answer}; }
+    catch{ return {known:"none", answer:holdingMessage(guestName)}; }
+  }catch(e){ return {known:"none", answer:holdingMessage(guestName), error:String(e.message||e)}; }
 }
 // Decide a queued approval item: YES -> send to guest + learn into KB; NO -> reject.
 async function decideApproval(id, decision, overrideAnswer){
@@ -568,19 +580,24 @@ async function decideApproval(id, decision, overrideAnswer){
   if(it.status!=="pending") return {ok:false, error:"already "+it.status, item:it};
   const st=await getState(); const enabled=!!st.messaging_enabled;
   if(decision==="yes"||decision==="approve"){
-    const answer=(overrideAnswer&&overrideAnswer.trim())||it.proposed||"";
+    const isOverride=!!(overrideAnswer&&overrideAnswer.trim());
+    const answer=(isOverride?overrideAnswer.trim():"")||it.proposed||"";
     if(!answer) return {ok:false, error:"no answer to send (proposed was empty — supply an answer)"};
     const guestSend=await sendGuestReply(enabled, {threadId:it.thread_id, bookingId:it.booking_id}, answer);
-    // (a) save to the SEPARATE high-weight approved bank (checked first by the matcher)
-    const bankSize=await upsertApprovedBank(it.question, answer);
-    // (b) also mirror into the editable KB so it shows in Victor's KB list (harmless)
-    const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
-    const nt=normQ(it.question); const existing=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
-    if(existing) existing.a=answer; else kb.items.push({topic:it.question.slice(0,60), a:answer, src:"approved"});
-    await setState({kb});
+    // LEARN only a REAL answer: an owner-typed answer (override) OR an approved known answer.
+    // NEVER learn a holding/escalation message (it.escalate && not overridden).
+    const shouldLearn = isOverride || !it.escalate;
+    let bankSize=null;
+    if(shouldLearn){
+      bankSize=await upsertApprovedBank(it.question, answer); // high-weight approved bank
+      const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
+      const nt=normQ(it.question); const existing=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
+      if(existing) existing.a=answer; else kb.items.push({topic:it.question.slice(0,60), a:answer, src:"approved"});
+      await setState({kb});
+    }
     it.status="approved"; it.answer=answer; it.decidedAt=new Date().toISOString();
     await setApprovals(list);
-    return {ok:true, decision:"approved", id, guestSend, sent:guestSend.sent===true, learned:true, approvedBankSize:bankSize};
+    return {ok:true, decision:"approved", id, guestSend, sent:guestSend.sent===true, learned:shouldLearn, approvedBankSize:bankSize};
   }
   it.status="rejected"; it.decidedAt=new Date().toISOString(); await setApprovals(list);
   try{ const rk=(redis?(await redis.get("parkside:kb_rejected")):_memRejected)||[];
