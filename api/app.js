@@ -543,9 +543,17 @@ module.exports=async(req,res)=>{
       }catch(e){ return res.status(200).json({configured:true, bookings:[], error:String(e.message||e)}); }
       // Resolve guest contact for each unique guest_id (OwnerRez bookings carry guest_id, not inline contact).
       const unitName={}; for(const u of UNITS) unitName[u.orp]=u.name;
-      const guestIds=[...new Set(items.map(b=>b.guest_id).filter(Boolean))].slice(0,250);
+      if(items[0]) console.log("OR_BOOKING_SAMPLE "+JSON.stringify(items[0]).slice(0,800));
+      const gidOf=b=> b && (b.guest_id||b.guestId||(b.guest&&b.guest.id)||null);
+      const guestIds=[...new Set(items.map(gidOf).filter(Boolean))].slice(0,250);
+      console.log("OR_GUESTIDS count="+guestIds.length+" sample="+JSON.stringify(guestIds.slice(0,3)));
       const guests={};
-      await Promise.all(guestIds.map(async gid=>{ try{ const r=await fetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:H}); if(r.ok) guests[gid]=await r.json(); }catch(e){} }));
+      const withTimeout=(pr,ms)=>Promise.race([pr, new Promise(res=>setTimeout(()=>res(null),ms))]);
+      await Promise.all(guestIds.map(async gid=>{ try{
+        const r=await withTimeout(fetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:H}), 4000);
+        if(r&&r.ok){ const gj=await withTimeout(r.json(),2000); if(gj) guests[gid]=gj; }
+      }catch(e){} }));
+      { const gs=Object.values(guests)[0]; if(gs) console.log("OR_GUEST_SAMPLE "+JSON.stringify(gs).slice(0,800)); else console.log("OR_GUEST_SAMPLE none (resolved "+Object.keys(guests).length+")"); }
       const gName=g=>{ if(!g) return ""; const n=((g.first_name||"")+" "+(g.last_name||"")).trim(); return n||g.name||""; };
       const gEmail=g=>{ if(!g) return ""; if(Array.isArray(g.email_addresses)&&g.email_addresses.length){ const e=g.email_addresses.find(x=>x.is_default)||g.email_addresses[0]; return e.address||e.email||""; } if(Array.isArray(g.emails)&&g.emails.length){ const e=g.emails[0]; return (typeof e==="string")?e:(e.address||""); } return g.email||""; };
       const gPhone=g=>{ if(!g) return ""; if(Array.isArray(g.phones)&&g.phones.length){ const p=g.phones.find(x=>x.is_default)||g.phones[0]; return p.number||p.phone||""; } return g.phone||""; };
@@ -556,7 +564,7 @@ module.exports=async(req,res)=>{
         if(gid){ try{ const gr=await fetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:H}); guestProbe={status:gr.status, keys:null, body:null}; const gj=await gr.json().catch(()=>null); guestProbe.keys=gj?Object.keys(gj):null; guestProbe.body=gj; }catch(e){ guestProbe={err:String(e.message||e)}; } }
         return res.status(200).json({count:items.length, sampleKeys:sample?Object.keys(sample):null, sampleBooking:sample, guestIdFound:gid||null, guestProbe});
       }
-      const list=(items||[]).map(b=>{ const g=guests[b.guest_id];
+      const list=(items||[]).map(b=>{ const g=guests[gidOf(b)];
           return { arrival:b.arrival||b.check_in||b.arrival_date||"", departure:b.departure||b.check_out||b.departure_date||"",
             name:gName(g), email:gEmail(g), phone:gPhone(g),
             unit:unitName[b.property_id]||String(b.property_id||""), status:b.status||b.type||"" }; })
