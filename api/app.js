@@ -403,6 +403,22 @@ async function upsertApprovedBank(question, answer){
 }
 async function orAuthHeader(){ const cfg=await getNotifyConfig(); if(cfg.ownerrezOauth) return "Bearer "+cfg.ownerrezOauth;
   const u=process.env.OWNERREZ_API_USER,t=process.env.OWNERREZ_API_TOKEN; if(u&&t) return "Basic "+Buffer.from(u+":"+t).toString("base64"); return null; }
+function orBasicHeader(){ const u=process.env.OWNERREZ_API_USER,t=process.env.OWNERREZ_API_TOKEN; return (u&&t)?("Basic "+Buffer.from(u+":"+t).toString("base64")):null; }
+async function orOauthHeader(){ const cfg=await getNotifyConfig(); return cfg.ownerrezOauth?("Bearer "+cfg.ownerrezOauth):null; }
+// Endpoint-agnostic OwnerRez fetch: try the preferred auth, fall back to the OTHER on
+// 401/403/405. The OAuth "Grant Access To Me" token works for messaging but is rejected
+// (401 Invalid token) by /v2/bookings + /v2/guests, which need the Basic PAT — and vice
+// versa. This uses whichever actually works per endpoint. prefer: "oauth" | "basic".
+async function orFetch(url, opts){ opts=opts||{}; const baseHeaders=opts.headers||{};
+  const oauth=await orOauthHeader(); const basic=orBasicHeader();
+  const order=(opts.prefer==="basic")?[["basic",basic],["oauth",oauth]]:[["oauth",oauth],["basic",basic]];
+  let last=null;
+  for(const [name,a] of order){ if(!a) continue;
+    const r=await fetch(url,{...opts, headers:{...baseHeaders, Authorization:a}});
+    if(r.status!==401 && r.status!==403 && r.status!==405){ r._authUsed=name; return r; }
+    last=r;
+  }
+  return last; }
 
 let _memPollStatus=null, _memPollLast=0;
 async function writePollStatus(o){ const s={...o, ranAt:new Date().toISOString()}; if(redis) await redis.set("parkside:poll_status",s); else _memPollStatus=s; return s; }
@@ -717,18 +733,18 @@ module.exports=async(req,res)=>{
     // ===== PUBLIC read-only booking roster — pulled live from OwnerRez (no auth) =====
     if(action==="bookings"){
       try{ await maybePollMessages(req); }catch(e){}
-      const orAuth=await orAuthHeader();
-      if(!orAuth) return res.status(200).json({configured:false, bookings:[], error:"OwnerRez credentials not set (OwnerRez OAuth token in Victor\u2019s card, or OWNERREZ_OAUTH_TOKEN / OWNERREZ_API_USER + OWNERREZ_API_TOKEN)"});
+      const _haveAuth = !!(orBasicHeader() || (await orOauthHeader()));
+      if(!_haveAuth) return res.status(200).json({configured:false, bookings:[], error:"OwnerRez credentials not set (OwnerRez OAuth token in Victor\u2019s card, or OWNERREZ_OAUTH_TOKEN / OWNERREZ_API_USER + OWNERREZ_API_TOKEN)"});
       const fresh=req.query&&req.query.fresh==="1";
       if(redis&&!fresh){ const c=await redis.get("parkside:bookings"); if(c&&(Date.now()-c.ts)<300000) return res.status(200).json({configured:true, cached:true, count:(c.list||[]).length, bookings:c.list}); }
       const ymd=d=>d.toISOString().slice(0,10);
       const now=new Date(); const from=new Date(now); from.setUTCDate(from.getUTCDate()-14); const to=new Date(now); to.setUTCDate(to.getUTCDate()+365);
       const pids=UNITS.map(u=>u.orp).join(",");
-      const H={Authorization:orAuth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
+      const HBASE={"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
       let url="https://api.ownerrez.com/v2/bookings?property_ids="+encodeURIComponent(pids)+"&from="+ymd(from)+"&to="+ymd(to)+"&limit=50";
       let items=[], pages=0;
-      try{ while(url&&pages<30){ const r=await fetch(url,{headers:H}); if(!r.ok){ const t=await r.text();
-            return res.status(200).json({configured:true, bookings:[], error:"OwnerRez bookings "+r.status, detail:t.slice(0,200)}); }
+      try{ while(url&&pages<30){ const r=await orFetch(url,{headers:HBASE, prefer:"basic"}); if(!r||!r.ok){ const t=r?await r.text():""; 
+            return res.status(200).json({configured:true, bookings:[], error:"OwnerRez bookings "+(r?r.status:"no-response"), detail:t.slice(0,200), note:"tried Basic PAT + OAuth; both rejected for /v2/bookings"}); }
           const j=await r.json(); const arr=j.items||j.bookings||(Array.isArray(j)?j:[]); items=items.concat(arr||[]);
           let nxt=j.next_page_url||(j.next_page&&j.next_page.url)||null;
           if(nxt && !/^https?:\/\//i.test(nxt)) nxt="https://api.ownerrez.com"+(nxt[0]==="/"?"":"/")+nxt;
@@ -741,7 +757,7 @@ module.exports=async(req,res)=>{
       const guests={};
       const withTimeout=(pr,ms)=>Promise.race([pr, new Promise(res=>setTimeout(()=>res(null),ms))]);
       await Promise.all(guestIds.map(async gid=>{ try{
-        const r=await withTimeout(fetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:H}), 4000);
+        const r=await withTimeout(orFetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:HBASE, prefer:"basic"}), 4000);
         if(r&&r.ok){ const gj=await withTimeout(r.json(),2000); if(gj) guests[gid]=gj; }
       }catch(e){} }));
       const gName=g=>{ if(!g) return ""; const n=((g.first_name||"")+" "+(g.last_name||"")).trim(); return n||g.name||""; };
