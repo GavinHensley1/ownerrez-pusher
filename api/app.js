@@ -387,6 +387,48 @@ async function upsertApprovedBank(question, answer){
 function orAuthHeader(){ const tok=process.env.OWNERREZ_OAUTH_TOKEN; if(tok) return "Bearer "+tok;
   const u=process.env.OWNERREZ_API_USER,t=process.env.OWNERREZ_API_TOKEN; if(u&&t) return "Basic "+Buffer.from(u+":"+t).toString("base64"); return null; }
 
+let _memPollStatus=null, _memPollLast=0;
+async function writePollStatus(o){ const s={...o, ranAt:new Date().toISOString()}; if(redis) await redis.set("parkside:poll_status",s); else _memPollStatus=s; return s; }
+async function getPollStatus(){ return (redis?await redis.get("parkside:poll_status"):_memPollStatus)||null; }
+// Pull recent OwnerRez messages and feed NEW inbound guest ones into the pipeline.
+async function runPollMessages(req){
+  const auth=orAuthHeader();
+  if(!auth) return await writePollStatus({ok:false, polled:0, error:"OwnerRez creds not set (OWNERREZ_OAUTH_TOKEN or OWNERREZ_API_USER+TOKEN)"});
+  const H={Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
+  const sinceIso=new Date(Date.now()-1000*60*60*24).toISOString(); // last 24h window
+  let items=[];
+  try{ const r=await fetch("https://api.ownerrez.com/v2/messages?since_utc="+encodeURIComponent(sinceIso),{headers:H});
+    if(!r.ok){ const t=await r.text(); return await writePollStatus({ok:false, polled:0, status:r.status, error:"OwnerRez messages "+r.status, detail:t.slice(0,200), note:"token may lack message-read scope, or endpoint differs — register webhook or check scope"}); }
+    const j=await r.json(); items=j.items||j.messages||(Array.isArray(j)?j:[]); }
+  catch(e){ return await writePollStatus({ok:false, polled:0, error:String(e.message||e)}); }
+  const seenArr=(redis&&await redis.get("parkside:msg_seen"))||[]; const seen=new Set(seenArr);
+  const isInbound=m=>{ const d=String(m.direction||m.type||m.sender_type||"").toLowerCase();
+    if(/out|sent|host|owner|staff|me\b/.test(d)) return false;
+    if(/in|recv|received|guest|traveler|customer/.test(d)) return true;
+    if(m.is_from_guest===true||m.from_guest===true||m.incoming===true) return true;
+    return true; }; // default: treat unknown as inbound (de-duped, so worst case one extra email)
+  let processed=0, queued=0, autoSent=0, skipped=0;
+  for(const m of items){ const mid=String(m.id||m.message_id||m.guid||""); if(!mid||seen.has(mid)){ continue; }
+    seen.add(mid);
+    if(!isInbound(m)){ skipped++; continue; }
+    const question=String(m.body||m.message||m.content||m.text||"").trim(); if(!question){ skipped++; continue; }
+    try{ const out=await processGuestQuestion(req,{question, bookingId:m.booking_id||m.bookingId||null, source:"ownerrez_poll"});
+      processed++; if(out.auto_approved) autoSent++; else if(out.queued) queued++; }
+    catch(e){ /* keep going */ }
+  }
+  if(redis) await redis.set("parkside:msg_seen", Array.from(seen).slice(-5000));
+  return await writePollStatus({ok:true, polled:items.length, processed, queued, autoSent, skipped,
+    sampleKeys: items[0]?Object.keys(items[0]):null,
+    sampleDirection: items[0]?(items[0].direction||items[0].type||items[0].sender_type||null):null });
+}
+// Throttled wrapper so any page load can safely drive intake (>=60s apart).
+async function maybePollMessages(req){
+  const now=Date.now(); const last=(redis?(await redis.get("parkside:poll_last")):_memPollLast)||0;
+  if(now-last<60000) return null;
+  if(redis) await redis.set("parkside:poll_last",now); else _memPollLast=now;
+  try{ return await runPollMessages(req); }catch(e){ return {ok:false, error:String(e.message||e)}; }
+}
+
 // Shared intake pipeline for EVERY guest question (manual ask, OwnerRez poll, webhook).
 //  - APPROVED BANK match >= threshold -> auto-send to guest, no human, no email.
 //  - otherwise -> propose an answer (bank near-match -> KB synonym -> AI draft) and
@@ -653,6 +695,7 @@ module.exports=async(req,res)=>{
     }
     // ===== PUBLIC read-only booking roster — pulled live from OwnerRez (no auth) =====
     if(action==="bookings"){
+      try{ await maybePollMessages(req); }catch(e){}
       const orAuth=(()=>{ const tok=process.env.OWNERREZ_OAUTH_TOKEN; if(tok) return "Bearer "+tok;
         const u=process.env.OWNERREZ_API_USER, t=process.env.OWNERREZ_API_TOKEN; if(u&&t) return "Basic "+Buffer.from(u+":"+t).toString("base64"); return null; })();
       if(!orAuth) return res.status(200).json({configured:false, bookings:[], error:"OwnerRez credentials not set (OWNERREZ_OAUTH_TOKEN, or OWNERREZ_API_USER + OWNERREZ_API_TOKEN)"});
@@ -736,29 +779,22 @@ module.exports=async(req,res)=>{
     // (Defensive across possible OwnerRez shapes; tune once a live channel exists.)
     // Polling cron: pull recent OwnerRez messages and feed new guest ones into the pipeline.
     if(action==="poll_messages"){
-      const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x")) || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__x"));
+      const tok=String((req.query&&req.query.token)||""); const secret=(await getNotifyConfig()).secret;
+      const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x"))
+        || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__x"))
+        || (!!secret && tok===secret);
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
-      const auth=orAuthHeader(); if(!auth) return res.status(200).json({ok:false, polled:0, error:"OwnerRez creds not set (OWNERREZ_OAUTH_TOKEN or OWNERREZ_API_USER+TOKEN)"});
-      const H={Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
-      const sinceIso=new Date(Date.now()-1000*60*60*6).toISOString(); // last 6h window
-      let items=[];
-      try{ const r=await fetch("https://api.ownerrez.com/v2/messages?since_utc="+encodeURIComponent(sinceIso),{headers:H});
-        if(!r.ok){ const t=await r.text(); return res.status(200).json({ok:false, polled:0, error:"OwnerRez messages "+r.status, detail:t.slice(0,200), note:"If messages aren't supported on this token/plan, register the webhook instead (action=or_message_inbound)."}); }
-        const j=await r.json(); items=j.items||j.messages||(Array.isArray(j)?j:[]); }
-      catch(e){ return res.status(200).json({ok:false, polled:0, error:String(e.message||e)}); }
-      const seenArr=(redis&&await redis.get("parkside:msg_seen"))||[]; const seen=new Set(seenArr);
-      const isInbound=m=>{ const d=String(m.direction||m.type||"").toLowerCase(); if(/out|sent|host/.test(d)) return false; if(/in|received|guest/.test(d)) return true; if(m.is_from_guest===true||m.from_guest===true) return true; return d===""? true : true; };
-      let processed=0, queued=0, autoSent=0; const results=[];
-      for(const m of items){ const mid=String(m.id||m.message_id||m.guid||""); if(!mid||seen.has(mid)) continue;
-        seen.add(mid);
-        if(!isInbound(m)) continue;
-        const question=String(m.body||m.message||m.content||m.text||"").trim(); if(!question) continue;
-        const out=await processGuestQuestion(req,{question, bookingId:m.booking_id||m.bookingId||null, source:"ownerrez_poll"});
-        processed++; if(out.auto_approved) autoSent++; else if(out.queued) queued++;
-        results.push({mid, auto:!!out.auto_approved});
-      }
-      if(redis) await redis.set("parkside:msg_seen", Array.from(seen).slice(-5000));
-      return res.status(200).json({ok:true, polled:items.length, processed, queued, autoSent, results});
+      const out=await runPollMessages(req);
+      return res.status(200).json(out);
+    }
+    // PUBLIC plan-free heartbeat: hit by an external free cron (cron-job.org/UptimeRobot)
+    // or by page loads. Token-gated by the approve-link secret. Drives intake without
+    // a Vercel paid plan / Vercel cron.
+    if(action==="tick"){
+      const tok=String((req.query&&req.query.token)||""); const secret=(await getNotifyConfig()).secret;
+      if(!secret || tok!==secret) return res.status(403).json({error:"bad or missing token"});
+      const out=await maybePollMessages(req);
+      return res.status(200).json(out||{skipped:true, reason:"throttled (<60s since last poll)", lastPoll:await getPollStatus()});
     }
     // Webhook intake: OwnerRez (or any source) POSTs an inbound message here.
     // URL: /api/app?action=or_message_inbound&token=<APPROVE_LINK_SECRET>
@@ -878,8 +914,14 @@ module.exports=async(req,res)=>{
     // if a Resend key is present, also lists the account's verified sender domains.
     if(action==="notify_status"){
       const cfg=await getNotifyConfig(); const raw=await getNotifyRaw(); const reqAll=await requireApprovalAll();
+      // Drive intake on load (throttled) so the pipeline runs without a Vercel cron/paid plan.
+      const polledNow=await maybePollMessages(req);
+      const stN=await getState(); const apprN=await getApprovals();
       const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, approveSecretSet:!!cfg.secret,
         resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll,
+        messaging_enabled:!!stN.messaging_enabled,
+        counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
+        lastPoll: polledNow||await getPollStatus(),
         from:cfg.from||null, to:cfg.to||null,
         source:{ apiKey: raw.resendApiKey?"ui":(process.env.RESEND_API_KEY?"env":null), from: raw.from?"ui":(process.env.RESEND_FROM?"env":null), to: raw.victorEmail?"ui":(process.env.VICTOR_EMAIL?"env":null), secret: raw.approveSecret?"ui":(process.env.APPROVE_LINK_SECRET?"env":null) } };
       if(cfg.apiKey){
