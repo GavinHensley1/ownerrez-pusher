@@ -532,11 +532,14 @@ module.exports=async(req,res)=>{
       const now=new Date(); const from=new Date(now); from.setUTCDate(from.getUTCDate()-14); const to=new Date(now); to.setUTCDate(to.getUTCDate()+365);
       const pids=UNITS.map(u=>u.orp).join(",");
       const H={Authorization:orAuth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
-      let url="https://api.ownerrez.com/v2/bookings?property_ids="+encodeURIComponent(pids)+"&from="+ymd(from)+"&to="+ymd(to);
+      let url="https://api.ownerrez.com/v2/bookings?property_ids="+encodeURIComponent(pids)+"&from="+ymd(from)+"&to="+ymd(to)+"&limit=50";
       let items=[], pages=0;
-      try{ while(url&&pages<6){ const r=await fetch(url,{headers:H}); if(!r.ok){ const t=await r.text();
+      try{ while(url&&pages<30){ const r=await fetch(url,{headers:H}); if(!r.ok){ const t=await r.text();
             return res.status(200).json({configured:true, bookings:[], error:"OwnerRez bookings "+r.status, detail:t.slice(0,200)}); }
-          const j=await r.json(); const arr=j.items||j.bookings||(Array.isArray(j)?j:[]); items=items.concat(arr||[]); url=j.next_page_url||null; pages++; }
+          const j=await r.json(); const arr=j.items||j.bookings||(Array.isArray(j)?j:[]); items=items.concat(arr||[]);
+          let nxt=j.next_page_url||(j.next_page&&j.next_page.url)||null;
+          if(nxt && !/^https?:\/\//i.test(nxt)) nxt="https://api.ownerrez.com"+(nxt[0]==="/"?"":"/")+nxt;
+          url=nxt; pages++; }
       }catch(e){ return res.status(200).json({configured:true, bookings:[], error:String(e.message||e)}); }
       // Resolve guest contact for each unique guest_id (OwnerRez bookings carry guest_id, not inline contact).
       const unitName={}; for(const u of UNITS) unitName[u.orp]=u.name;
@@ -557,6 +560,25 @@ module.exports=async(req,res)=>{
       const out=upcoming.concat(past);
       if(redis) await redis.set("parkside:bookings",{ts:Date.now(),list:out});
       return res.status(200).json({configured:true, count:out.length, bookings:out});
+    }
+
+    // TEMP debug: raw OwnerRez shapes (properties + first bookings page + first guest). Remove after verification.
+    if(action==="ordebug" && (req.query&&req.query.z)==="sd9217"){
+      const orAuth=(()=>{ const tok=process.env.OWNERREZ_OAUTH_TOKEN; if(tok) return "Bearer "+tok; const u=process.env.OWNERREZ_API_USER,t=process.env.OWNERREZ_API_TOKEN; if(u&&t) return "Basic "+Buffer.from(u+":"+t).toString("base64"); return null; })();
+      const which=(()=>{ if(process.env.OWNERREZ_OAUTH_TOKEN) return "oauth"; if(process.env.OWNERREZ_API_USER&&process.env.OWNERREZ_API_TOKEN) return "basic"; return "none"; })();
+      if(!orAuth) return res.status(200).json({auth:which});
+      const H={Authorization:orAuth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
+      const out={auth:which}; const ymd=d=>d.toISOString().slice(0,10);
+      try{ const pr=await fetch("https://api.ownerrez.com/v2/properties?limit=50",{headers:H}); out.propStatus=pr.status; const pj=await pr.json().catch(()=>null);
+        out.propKeys=pj?Object.keys(pj):null; const pit=(pj&&(pj.items||pj.properties))||[]; out.propCount=pit.length; out.propSample=pit.slice(0,12).map(x=>({id:x.id,name:x.name})); }catch(e){ out.propErr=String(e.message||e); }
+      const now=new Date(); const from=new Date(now); from.setUTCDate(from.getUTCDate()-30); const to=new Date(now); to.setUTCDate(to.getUTCDate()+365);
+      const pids=UNITS.map(u=>u.orp).join(",");
+      try{ const br=await fetch("https://api.ownerrez.com/v2/bookings?property_ids="+encodeURIComponent(pids)+"&from="+ymd(from)+"&to="+ymd(to)+"&limit=5",{headers:H});
+        out.bkStatus=br.status; const bj=await br.json().catch(()=>null); out.bkTopKeys=bj?Object.keys(bj):null; out.bkCount=bj&&(bj.count!=null?bj.count:((bj.items||bj.bookings||[]).length));
+        out.bkNext=bj&&(bj.next_page_url||null); const bit=(bj&&(bj.items||bj.bookings))||[]; out.bookingSample=bit[0]||null;
+        const gid=bit[0]&&bit[0].guest_id; if(gid){ const gr=await fetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:H}); out.guestStatus=gr.status; out.guestSample=await gr.json().catch(()=>null); }
+      }catch(e){ out.bkErr=String(e.message||e); }
+      return res.status(200).json(out);
     }
 
     // ===== (B) PUBLIC booking-inquiry capture — no auth =====
