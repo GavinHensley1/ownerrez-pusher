@@ -215,20 +215,30 @@ function computePace(poolAgg,targets,learned,today,months){ const pace={};
   return pace; }
 // ===== Guest-messaging send path (added) =====
 const APOLOGY="I'm sorry, I don't know the answer to that. Let me check with a manager and I'll get back to you soon.";
+let _memLastSend=null;
 async function sendGuestReply(enabled, ids, body){
-  if(!enabled) return {sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"};
-  const auth=await orAuthHeader();
-  if(!auth) return {sent:false, staged:true, reason:"no OwnerRez token (paste the OwnerRez OAuth token in "+CARD+")"};
+  const cfg=await getNotifyConfig(); const tokenLen=(cfg.ownerrezOauth||"").length;
   const threadId=(ids&&typeof ids==="object")?(ids.threadId||ids.thread_id||null):null;
   const bookingId=(ids&&typeof ids==="object")?(ids.bookingId||ids.booking_id||null):(ids||null);
-  if(!threadId && !bookingId) return {sent:false, staged:true, reason:"no thread_id / booking_id (need an inbound thread to reply to)"};
-  // OwnerRez send: POST /v2/messages with the thread_id (from the inbound webhook).
-  const payload = threadId ? {thread_id:threadId, body} : {booking_id:bookingId, body};
-  try{ const r=await fetch("https://api.ownerrez.com/v2/messages",{method:"POST",
-      headers:{Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},
-      body:JSON.stringify(payload)});
-    const t=await r.text(); return {sent:r.ok, status:r.status, via:(threadId?"thread_id":"booking_id"), body:t.slice(0,200)}; }
-  catch(e){ return {sent:false, error:String(e.message||e)}; }
+  let result;
+  if(!enabled){ result={sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"}; }
+  else { const auth=await orAuthHeader();
+    if(!auth){ result={sent:false, staged:true, reason:"no OwnerRez token (paste the OwnerRez OAuth token in "+CARD+")"}; }
+    else if(!threadId && !bookingId){ result={sent:false, staged:true, reason:"no thread_id / booking_id (need an inbound thread to reply to)"}; }
+    else {
+      // OwnerRez send: POST /v2/messages with the thread_id (from the inbound webhook).
+      const payload = threadId ? {thread_id:threadId, body} : {booking_id:bookingId, body};
+      try{ const r=await fetch("https://api.ownerrez.com/v2/messages",{method:"POST",
+          headers:{Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},
+          body:JSON.stringify(payload)});
+        const t=await r.text(); result={sent:r.ok, status:r.status, via:(threadId?"thread_id":"booking_id"), body:t.slice(0,300)}; }
+      catch(e){ result={sent:false, error:String(e.message||e)}; }
+    }
+  }
+  // Persist the exact outcome so the owner/dev can see it in notify_status.lastSend.
+  try{ const rec={ranAt:new Date().toISOString(), tokenLen, hasThread:!!threadId, hasBooking:!!bookingId, ...result};
+       if(redis) await redis.set("parkside:last_send",rec); else _memLastSend=rec; }catch(e){}
+  return result;
 }
 // ===== Configurable SMS provider (replaces the old hardcoded Twilio / "Willow" path) =====
 // Fully env-driven so the owner can drop in the NEW number + ANY provider with no code change:
@@ -1024,11 +1034,16 @@ module.exports=async(req,res)=>{
       try{ if(redis){ const ping="pong-"+Date.now(); await redis.set("parkside:diag_ping",ping); _diag.redisRoundTrip=((await redis.get("parkside:diag_ping"))===ping); } }catch(e){ _diag.redisErr=String(e.message||e); }
       try{ const raw=await getNotifyRaw(); _diag.notifyConfigKeys=Object.keys(raw); _diag.ownerrezLen=String(raw.ownerrez_oauth_token||"").length; _diag.resendKeyLen=String(raw.resendApiKey||"").length; }catch(e){ _diag.rawErr=String(e.message||e); }
       const cfg=await getNotifyConfig(); const raw=await getNotifyRaw(); const reqAll=await requireApprovalAll();
+      const lastSend=(redis?await redis.get("parkside:last_send"):_memLastSend)||null;
+      let oauthProbe=null;
+      if(cfg.ownerrezOauth){ try{ const pr=await fetch("https://api.ownerrez.com/v2/messages",{headers:{Authorization:"Bearer "+cfg.ownerrezOauth,"User-Agent":"parkside-control/1.0"}});
+        oauthProbe={endpoint:"GET /v2/messages", status:pr.status, meaning:(pr.status===405?"token VALID (auth ok; GET not allowed)":(pr.status===401?"token INVALID/expired (401)":"status "+pr.status))}; }
+        catch(e){ oauthProbe={error:String(e.message||e)}; } }
       // Drive intake on load (throttled) so the pipeline runs without a Vercel cron/paid plan.
       const polledNow=await maybePollMessages(req);
       const stN=await getState(); const apprN=await getApprovals();
       const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, approveSecretSet:!!cfg.secret,
-        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, webhook, _diag,
+        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, ownerrezOauthLen:(cfg.ownerrezOauth||"").length, oauthProbe, lastSend, webhook, _diag,
         messaging_enabled:!!stN.messaging_enabled,
         counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
