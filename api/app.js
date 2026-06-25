@@ -215,15 +215,19 @@ function computePace(poolAgg,targets,learned,today,months){ const pace={};
   return pace; }
 // ===== Guest-messaging send path (added) =====
 const APOLOGY="I'm sorry, I don't know the answer to that. Let me check with a manager and I'll get back to you soon.";
-async function sendGuestReply(enabled, bookingId, body){
+async function sendGuestReply(enabled, ids, body){
   if(!enabled) return {sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"};
   const auth=await orAuthHeader();
   if(!auth) return {sent:false, staged:true, reason:"no OwnerRez token (paste the OwnerRez OAuth token in "+CARD+")"};
-  if(!bookingId) return {sent:false, staged:true, reason:"no booking_id (no inbound guest thread / no connected channel yet)"};
+  const threadId=(ids&&typeof ids==="object")?(ids.threadId||ids.thread_id||null):null;
+  const bookingId=(ids&&typeof ids==="object")?(ids.bookingId||ids.booking_id||null):(ids||null);
+  if(!threadId && !bookingId) return {sent:false, staged:true, reason:"no thread_id / booking_id (need an inbound thread to reply to)"};
+  // OwnerRez send: POST /v2/messages with the thread_id (from the inbound webhook).
+  const payload = threadId ? {thread_id:threadId, body} : {booking_id:bookingId, body};
   try{ const r=await fetch("https://api.ownerrez.com/v2/messages",{method:"POST",
       headers:{Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},
-      body:JSON.stringify({booking_id:bookingId, body})});
-    const t=await r.text(); return {sent:r.ok, status:r.status, body:t.slice(0,200)}; }
+      body:JSON.stringify(payload)});
+    const t=await r.text(); return {sent:r.ok, status:r.status, via:(threadId?"thread_id":"booking_id"), body:t.slice(0,200)}; }
   catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 // ===== Configurable SMS provider (replaces the old hardcoded Twilio / "Willow" path) =====
@@ -273,7 +277,19 @@ async function getNotifyConfig(){ const c=await getNotifyRaw(); return {
   to:     (c.victorEmail||process.env.VICTOR_EMAIL||"").trim(),
   secret: (c.approveSecret||process.env.APPROVE_LINK_SECRET||"").trim(),
   ownerrezOauth: (c.ownerrez_oauth_token||process.env.OWNERREZ_OAUTH_TOKEN||"").trim(),
+  webhookUser: (c.webhook_user||process.env.OR_WEBHOOK_USER||"").trim(),
+  webhookPass: (c.webhook_pass||process.env.OR_WEBHOOK_PASS||"").trim(),
 }; }
+let _memWh=null;
+async function writeWhStatus(o){ const x={...o}; if(redis) await redis.set("parkside:wh_status",x); else _memWh=x; return x; }
+async function getWhStatus(){ return (redis?await redis.get("parkside:wh_status"):_memWh)||null; }
+// Auto-generate stable webhook Basic-auth creds so the owner just COPIES them into
+// the OwnerRez OAuth app Webhooks section (no secret for the assistant to handle).
+async function ensureWebhookCreds(){ const raw=await getNotifyRaw(); let changed=false;
+  if(!raw.webhook_user){ raw.webhook_user="parkside"; changed=true; }
+  if(!raw.webhook_pass){ raw.webhook_pass=("wh"+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)).slice(0,28); changed=true; }
+  if(changed) await setNotifyRaw(raw);
+  return {user:raw.webhook_user, pass:raw.webhook_pass}; }
 function appOrigin(req){ const h=(req&&req.headers)||{}; const host=h["x-forwarded-host"]||h.host; const proto=h["x-forwarded-proto"]||"https"; return host?(proto+"://"+host):""; }
 function escHtml(x){ return String(x==null?"":x).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 async function resendSend({apiKey,from,to,subject,html}){
@@ -393,6 +409,10 @@ async function writePollStatus(o){ const s={...o, ranAt:new Date().toISOString()
 async function getPollStatus(){ return (redis?await redis.get("parkside:poll_status"):_memPollStatus)||null; }
 // Pull recent OwnerRez messages and feed NEW inbound guest ones into the pipeline.
 async function runPollMessages(req){
+  // Inbound now arrives via OwnerRez webhook (thread_message -> action=or_message_inbound).
+  // GET /v2/messages is not readable (405), so polling is disabled to stop the noise.
+  return await writePollStatus({ok:true, polled:0, disabled:true, note:"inbound via OwnerRez webhook (thread_message); GET /v2/messages polling disabled"});
+  /* eslint-disable no-unreachable */
   const auth=await orAuthHeader();
   if(!auth) return await writePollStatus({ok:false, polled:0, error:"OwnerRez token not set (paste the OwnerRez OAuth token in "+CARD+", or set OWNERREZ_OAUTH_TOKEN / OWNERREZ_API_USER+TOKEN)"});
   const H={Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
@@ -443,13 +463,13 @@ async function requireApprovalAll(){ const raw=await getNotifyRaw();
 
 async function processGuestQuestion(req, p){
   const question=String(p.question||"").trim(); if(!question) return {error:"no question"};
-  const bookingId=p.bookingId||null, unit=p.unit||"", guestName=p.guestName||"";
+  const bookingId=p.bookingId||null, unit=p.unit||"", guestName=p.guestName||"", threadId=p.threadId||p.thread_id||null;
   const st=await getState(); const enabled=!!st.messaging_enabled; const kb=st.kb||KB_SEED;
   const requireAll=await requireApprovalAll();
   const ab=await approvedBankMatch(question);
   if(!requireAll && ab && ab.confidence>=APPROVED_THRESHOLD){
     // (auto-send mode, currently OFF) high-confidence approved-bank match -> send now.
-    const guestSend=await sendGuestReply(enabled, bookingId, ab.answer);
+    const guestSend=await sendGuestReply(enabled, {threadId, bookingId}, ab.answer);
     return {auto_approved:true, source:"approved_bank", confidence:Number(ab.confidence.toFixed(2)),
       matchedQuestion:ab.matchedQuestion, answer:ab.answer, guestSend, sent:guestSend.sent===true};
   }
@@ -462,7 +482,7 @@ async function processGuestQuestion(req, p){
   if(!proposed){ const km=kbAutoMatch(kb, question); if(km && km.answer){ proposed=km.answer; pSource="kb"; } }
   if(!proposed){ const draft=await aiDraftAnswer(kb, question); if(draft.inKb && draft.answer){ proposed=draft.answer; pSource="kb_ai"; } }
   const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed,
-    unit, guest_name:guestName, booking_id:bookingId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
+    unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
   const list=await getApprovals(); list.push(item); await setApprovals(list);
   const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
   const sms=await smsVictor(enabled, "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(write one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
@@ -493,7 +513,7 @@ async function decideApproval(id, decision, overrideAnswer){
   if(decision==="yes"||decision==="approve"){
     const answer=(overrideAnswer&&overrideAnswer.trim())||it.proposed||"";
     if(!answer) return {ok:false, error:"no answer to send (proposed was empty — supply an answer)"};
-    const guestSend=await sendGuestReply(enabled, it.booking_id, answer);
+    const guestSend=await sendGuestReply(enabled, {threadId:it.thread_id, bookingId:it.booking_id}, answer);
     // (a) save to the SEPARATE high-weight approved bank (checked first by the matcher)
     const bankSize=await upsertApprovedBank(it.question, answer);
     // (b) also mirror into the editable KB so it shows in Victor's KB list (harmless)
@@ -587,10 +607,10 @@ module.exports=async(req,res)=>{
         try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); inKb=o.in_kb===true; answer=String(o.answer||"").trim(); }catch{ inKb=false; answer=""; }
         if(!inKb || !answer){
           const victorSms=await smsVictor(enabled, "Parkside escalation — guest asked: "+String(question).slice(0,300)+(bookingId?(" (booking "+bookingId+")"):""));
-          const guestSend=await sendGuestReply(enabled, bookingId, APOLOGY);
+          const guestSend=await sendGuestReply(enabled, {bookingId}, APOLOGY);
           return res.status(200).json({escalate:true, escalatedTo:"Victor", draft:APOLOGY, victorSms, guestSend, sent:guestSend.sent===true});
         }
-        const guestSend=await sendGuestReply(enabled, bookingId, answer);
+        const guestSend=await sendGuestReply(enabled, {bookingId}, answer);
         return res.status(200).json({escalate:false, draft:answer, guestSend, sent:guestSend.sent===true});
       }
       catch(e){ return res.status(200).json({error:"request failed: "+String(e.message||e)}); }
@@ -799,17 +819,53 @@ module.exports=async(req,res)=>{
     // Webhook intake: OwnerRez (or any source) POSTs an inbound message here.
     // URL: /api/app?action=or_message_inbound&token=<APPROVE_LINK_SECRET>
     if(action==="or_message_inbound"){
-      const secret=(await getNotifyConfig()).secret || process.env.CRON_SECRET || "";
-      const tok=String((req.query&&req.query.token)||"");
-      if(!secret || tok!==secret) return res.status(403).json({error:"bad or missing token"});
+      // OwnerRez webhook receiver. Auth = HTTP Basic (User/Password set in the OAuth
+      // app Webhooks section, matching Victor\u2019s card). ?token=<approve secret> also allowed.
+      const creds=await ensureWebhookCreds();
+      const authHdr=String(req.headers["authorization"]||"");
+      let authed=false;
+      if(/^basic /i.test(authHdr)){ try{ const dec=Buffer.from(authHdr.slice(6).trim(),"base64").toString("utf8"); const i=dec.indexOf(":"); const u=dec.slice(0,i), pw=dec.slice(i+1); authed=(u===creds.user && pw===creds.pass); }catch(e){} }
+      const secret=(await getNotifyConfig()).secret; const tok=String((req.query&&req.query.token)||"");
+      if(!authed && secret && tok===secret) authed=true;
+      if(!authed) return res.status(401).json({error:"unauthorized — set Basic auth User/Password in the OwnerRez webhook to match Victor\u2019s Email notifications card"});
+
       let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{b=Object.fromEntries(new URLSearchParams(b));}catch{b={};} } } b=b||{};
-      const msg=b.message||b.data||b;
-      const dir=String(msg.direction||msg.type||"").toLowerCase();
-      if(/out|sent|host/.test(dir)) return res.status(200).json({ignored:true, reason:"outbound message"});
-      const question=String(msg.body||msg.message||msg.content||msg.text||"").trim();
-      if(!question) return res.status(200).json({ignored:true, reason:"no message text"});
-      const out=await processGuestQuestion(req,{question, bookingId:msg.booking_id||msg.bookingId||null, unit:String(msg.unit||""), guestName:String(msg.guest_name||msg.guestName||""), source:"ownerrez_webhook"});
-      return res.status(200).json({ok:true, ...out});
+      const act=String(b.action||"").toLowerCase();
+      const etype=String(b.entity_type||"").toLowerCase();
+
+      // OwnerRez "Send a Test Webhook" -> action=webhook_test, entity_type=api_application
+      if(act==="webhook_test" || etype==="api_application"){
+        await writeWhStatus({ranAt:new Date().toISOString(), event:"webhook_test", ok:true});
+        return res.status(200).json({ok:true, test:true});
+      }
+      if(etype!=="thread_message"){ await writeWhStatus({ranAt:new Date().toISOString(), event:"ignored", entity_type:etype}); return res.status(200).json({ok:true, ignored:"entity_type "+etype}); }
+
+      // De-dupe by payload id (mark seen BEFORE processing so retries skip).
+      const pid=String(b.id||b.entity_id||"");
+      const seenArr=(redis&&await redis.get("parkside:wh_seen"))||[]; const seen=new Set(seenArr);
+      if(pid && seen.has(pid)) return res.status(200).json({ok:true, dedup:true});
+      if(pid){ seen.add(pid); if(redis) await redis.set("parkside:wh_seen", Array.from(seen).slice(-5000)); }
+
+      const e=(b.entity&&typeof b.entity==="object")?b.entity:{};
+      // Record the real shape (no message content) so direction parsing can be tuned.
+      await writeWhStatus({ranAt:new Date().toISOString(), event:"thread_message", action:act, entity_id:b.entity_id, entityKeys:Object.keys(e),
+        dir:{direction:e.direction,type:e.type,incoming:e.incoming,is_incoming:e.is_incoming,outgoing:e.outgoing,is_outgoing:e.is_outgoing,sender:e.sender,from_type:e.from_type}});
+
+      // Only INBOUND guest messages. Critically skip our OWN outbound replies (which
+      // also fire a thread_message webhook) to avoid a reply loop.
+      const ds=String(e.direction||e.type||e.sender||e.from_type||"").toLowerCase();
+      const outgoing = e.outgoing===true || e.is_outgoing===true || /out|host|owner|staff|sent|me\b|reply/.test(ds);
+      const incoming = e.incoming===true || e.is_incoming===true || /in\b|incoming|guest|traveler|customer|received|recv/.test(ds);
+      if(outgoing && !incoming) return res.status(200).json({ok:true, ignored:"outbound"});
+
+      const question=String(e.body||e.message||e.content||e.text||"").trim();
+      if(!question) return res.status(200).json({ok:true, ignored:"no text"});
+      const threadId=e.thread_id||e.threadId||e.thread||null;
+      const bookingId=e.booking_id||e.bookingId||null;
+      const guestName=String(e.guest_name||e.guestName||e.from_name||"").trim();
+      try{ const out=await processGuestQuestion(req,{question, threadId, bookingId, guestName, unit:"", source:"ownerrez_webhook"});
+        return res.status(200).json({ok:true, processed:true, auto_approved:!!out.auto_approved, queued:!!out.queued}); }
+      catch(err){ return res.status(200).json({ok:true, processed:false, error:String(err&&err.message||err)}); }
     }
     // View the approved bank (password) — the high-weight, physically-approved Q&A.
     if(action==="approved_bank"){
@@ -917,6 +973,9 @@ module.exports=async(req,res)=>{
     // if a Resend key is present, also lists the account's verified sender domains.
     if(action==="notify_status"){
       res.setHeader("Cache-Control","no-store, max-age=0");
+      const _wcreds=await ensureWebhookCreds();
+      const _origin=appOrigin(req)||("https://"+(req.headers&&(req.headers["x-forwarded-host"]||req.headers.host)||"project-jvyw3.vercel.app"));
+      const webhook={ url:_origin+"/api/app?action=or_message_inbound", user:_wcreds.user, password:_wcreds.pass, entityTypeToEnable:"thread_message", lastEvent:await getWhStatus() };
       let _diag={redisPresent:!!redis};
       try{ if(redis){ const ping="pong-"+Date.now(); await redis.set("parkside:diag_ping",ping); _diag.redisRoundTrip=((await redis.get("parkside:diag_ping"))===ping); } }catch(e){ _diag.redisErr=String(e.message||e); }
       try{ const raw=await getNotifyRaw(); _diag.notifyConfigKeys=Object.keys(raw); _diag.ownerrezLen=String(raw.ownerrez_oauth_token||"").length; _diag.resendKeyLen=String(raw.resendApiKey||"").length; }catch(e){ _diag.rawErr=String(e.message||e); }
@@ -925,7 +984,7 @@ module.exports=async(req,res)=>{
       const polledNow=await maybePollMessages(req);
       const stN=await getState(); const apprN=await getApprovals();
       const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, approveSecretSet:!!cfg.secret,
-        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, _diag,
+        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, webhook, _diag,
         messaging_enabled:!!stN.messaging_enabled,
         counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
