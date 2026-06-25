@@ -319,6 +319,7 @@ async function sendVictorApprovalEmail(req, item, ctx){
   const origin=appOrigin(req); const secret=cfg.secret;
   const base=origin+"/api/app?action=approve&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const yes=base+"&decision=yes", no=base+"&decision=no";
+  const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const unit=ctx.unit||""; const guestName=ctx.guestName||"";
   const proposed=item.proposed||"";
   const subject="Parkside approval needed"+(unit?(" — "+unit):"");
@@ -332,12 +333,12 @@ async function sendVictorApprovalEmail(req, item, ctx){
     +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Question</td><td style="padding:6px 0">'+escHtml(item.question)+'</td></tr>'
     +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Proposed reply</td><td style="padding:6px 0">'+(proposed?escHtml(proposed):'<i style="color:#94a3b8">No suggested reply found in your saved data. Open Victor&rsquo;s area \u2192 Approval queue to type a reply and approve (the one-click Approve link can only send an existing suggested reply, never a blank).</i>')+'</td></tr>'
     +'</table>'
-    +'<div style="margin:18px 0">'+btn(yes,"#16a34a","\u2705 Approve & Send")+btn(no,"#dc2626","\u274c Reject")+'</div>'
+    +'<div style="margin:18px 0">'+btn(yes,"#16a34a","\u2705 Approve & Send")+btn(editUrl,"#2563eb","\u270f\ufe0f Write / edit the reply")+btn(no,"#dc2626","\u274c Reject")+'</div>'
     +'<p style="color:#94a3b8;font-size:12px;margin-top:8px">Approve sends the reply to the guest and saves it to the knowledge base so it auto-answers next time. Reject sends nothing. (Ref '+escHtml(item.id)+')</p>'
     +(secret?'':'<p style="color:#dc2626;font-size:12px">\u26a0 APPROVE_LINK_SECRET is not set on the server, so these links will not work yet.</p>')
     +'</div>';
   const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:cfg.to, subject, html});
-  return {...result, to:cfg.to||null, from:cfg.from||null, subject, approveUrl:yes, rejectUrl:no};
+  return {...result, to:cfg.to||null, from:cfg.from||null, subject, approveUrl:yes, editUrl, rejectUrl:no};
 }
 function htmlPage(title, msg){
   return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+escHtml(title)+'</title></head>'
@@ -345,6 +346,26 @@ function htmlPage(title, msg){
     +'<div style="background:#16212e;border:1px solid #26354a;border-radius:12px;padding:28px 32px;max-width:420px;text-align:center">'
     +'<h1 style="margin:0 0 8px 0;font-size:22px">'+escHtml(title)+'</h1>'
     +'<p style="color:#9fb0c0;margin:0">'+escHtml(msg)+'</p></div></body></html>';
+}
+function editPageHtml(it, token, unit, guestName, errMsg){
+  const action='/api/app?action=edit_approval&id='+encodeURIComponent(it.id)+'&token='+encodeURIComponent(token||'');
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Write the reply</title></head>'
+    +'<body style="font-family:-apple-system,Arial,Helvetica,sans-serif;background:#0f1720;color:#e7eef6;margin:0;padding:16px">'
+    +'<div style="max-width:560px;margin:0 auto">'
+    +'<h1 style="font-size:20px;margin:6px 0 12px 0">Write the reply</h1>'
+    +(unit?'<div style="color:#9fb0c0;font-size:13px">Unit: <b style="color:#e7eef6">'+escHtml(unit)+'</b></div>':'')
+    +(guestName?'<div style="color:#9fb0c0;font-size:13px">Guest: <b style="color:#e7eef6">'+escHtml(guestName)+'</b></div>':'')
+    +'<div style="background:#16212e;border:1px solid #26354a;border-radius:10px;padding:12px 14px;margin:12px 0">'
+    +'<div style="color:#9fb0c0;font-size:12px;margin-bottom:4px">Guest asked</div>'
+    +'<div style="font-size:15px">'+escHtml(it.question)+'</div></div>'
+    +(errMsg?'<div style="color:#f87171;font-size:13px;margin:6px 0">'+escHtml(errMsg)+'</div>':'')
+    +'<form method="POST" action="'+action+'">'
+    +'<label style="color:#9fb0c0;font-size:12px">Your reply to the guest</label>'
+    +'<textarea name="answer" style="width:100%;min-height:160px;font-size:16px;padding:12px;border-radius:10px;border:1px solid #26354a;background:#0c141d;color:#e7eef6;box-sizing:border-box;margin-top:6px">'+escHtml(it.proposed||"")+'</textarea>'
+    +'<button type="submit" style="width:100%;margin-top:12px;background:#16a34a;color:#fff;border:none;border-radius:10px;padding:15px;font-size:17px;font-weight:700">Send reply to guest</button>'
+    +'</form>'
+    +'<p style="color:#64748b;font-size:12px;margin-top:10px">Sending replies to the guest via OwnerRez and saves this exact answer so similar questions suggest it next time. (Ref '+escHtml(it.id)+')</p>'
+    +'</div></body></html>';
 }
 
 // ===== Approval queue + knowledge-base matching (human-in-the-loop messaging) =====
@@ -391,6 +412,7 @@ function kbAutoMatch(kb, question){
 // Stored apart from the editable KB and checked FIRST by the matcher.
 const KBAKEY="parkside:kb_approved";
 let _memApprovedBank=[];
+let _memRejected=[];
 async function getApprovedBank(){ return redis?((await redis.get(KBAKEY))||[]):_memApprovedBank; }
 async function setApprovedBank(list){ const t=list.slice(-1000); if(redis) await redis.set(KBAKEY,t); else _memApprovedBank=t; return t; }
 const _STOP=new Set("a an the is are am do does did can could would will to of for our your my we you i it at on in and or but please hi hello hey there this that what whats when where how who why be been was were as with about".split(" "));
@@ -526,6 +548,7 @@ async function aiDraftAnswer(kb, question, guestName){
     +"2. Be KIND, warm and friendly like a gracious host — never terse or robotic. Add a brief friendly closing (e.g. 'We can't wait to host you! \uD83D\uDE0A'). Say 'we/us'. No long sign-off.\n"
     +"3. Answer EVERY part of the message. If it asks multiple things (e.g. check-in time AND where to go / directions), address ALL of them — never drop a part.\n"
     +"4. Use ONLY the KNOWN INFO facts for specific details (times, addresses, codes, policies, amenities). NEVER invent or guess specifics.\n"
+    +"4b. MATCH THE QUESTION WORD to the right kind of fact: 'where' wants a LOCATION/place/address; 'when' or 'what time' wants a TIME; 'how' wants a process/steps; 'what'/'which' wants the specific item. Do NOT substitute a different fact for the one asked. Example: if the guest asks WHERE to check in but you only know the check-in TIME, do NOT answer with the time \u2014 use '[need info: where to check in / location]' for that part (you may still mention the time only if they also asked when).\n"
     +"5. If a part of the question is NOT covered by KNOWN INFO, do NOT make it up — include a clearly-marked placeholder for that part like '[need info: <what is missing>]' so the host can fill it in. Never silently skip a part.\n"
     +"6. Reply with ONLY a JSON object: {\"in_kb\": true|false, \"answer\": \"...\"}. Set in_kb=true ONLY if every part was fully answered from KNOWN INFO with NO placeholder. 'answer' is ALWAYS the complete warm message (greeting + every part + closing), even when in_kb is false.\n\n"
     +"KNOWN INFO:\n"+(facts||"(none saved yet)");
@@ -560,6 +583,9 @@ async function decideApproval(id, decision, overrideAnswer){
     return {ok:true, decision:"approved", id, guestSend, sent:guestSend.sent===true, learned:true, approvedBankSize:bankSize};
   }
   it.status="rejected"; it.decidedAt=new Date().toISOString(); await setApprovals(list);
+  try{ const rk=(redis?(await redis.get("parkside:kb_rejected")):_memRejected)||[];
+    rk.push({id:it.id, q:it.question, draft:it.proposed||"", source:it.source||null, ts:new Date().toISOString()});
+    const trimmed=rk.slice(-500); if(redis) await redis.set("parkside:kb_rejected", trimmed); else _memRejected=trimmed; }catch(e){}
   return {ok:true, decision:"rejected", id};
 }
 
@@ -982,6 +1008,36 @@ module.exports=async(req,res)=>{
       const list=await getApprovals(); const status=(req.query&&req.query.status)||"pending";
       const out=status==="all"?list:list.filter(x=>x.status===status);
       return res.status(200).json({approvals:out.slice(-200).reverse(), counts:{pending:list.filter(x=>x.status==="pending").length, approved:list.filter(x=>x.status==="approved").length, rejected:list.filter(x=>x.status==="rejected").length}});
+    }
+    // Edit & send: a tiny mobile page to write/correct the reply, then send THAT.
+    // Auth: x-app-password OR ?token=<approve secret>.
+    if(action==="edit_approval"){
+      res.setHeader("Content-Type","text/html; charset=utf-8");
+      const q=req.query||{}; const secret=(await getNotifyConfig()).secret;
+      const pwOk=((req.headers||{})["x-app-password"]||"")===(process.env.APP_PASSWORD||"");
+      const tok=String(q.token||"");
+      if(!pwOk && !(secret && tok===secret)){ res.statusCode=403; return res.end(htmlPage("Link error","This edit link is invalid or expired.")); }
+      const id=String(q.id||"");
+      const list=await getApprovals(); const it=list.find(x=>x.id===id);
+      if(req.method==="POST"){
+        let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{b=Object.fromEntries(new URLSearchParams(b));}catch{b={};} } } b=b||{};
+        const answer=String(b.answer||"").trim();
+        if(!it){ res.statusCode=200; return res.end(htmlPage("Not found","This request was not found (it may already be handled).")); }
+        if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status, "This request was already "+it.status+". Nothing was changed.")); }
+        if(!answer){ res.statusCode=200; return res.end(editPageHtml(it, tok, it.unit, it.guest_name, "Please enter a reply before sending.")); }
+        const out=await decideApproval(id, "yes", answer); // sends owner's edited text + learns it into the approved bank/KB
+        if(out.ok && out.decision==="approved"){ res.statusCode=200; return res.end(htmlPage("Sent \u2713", "Your reply was sent to the guest and saved so similar questions suggest it next time.")); }
+        res.statusCode=200; return res.end(htmlPage("Couldn\u2019t send", (out.error||"Unknown error")+".")); }
+      // GET -> render editor
+      if(!it){ res.statusCode=200; return res.end(htmlPage("Not found","This request was not found (it may already be handled).")); }
+      if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status, "This request was already "+it.status+".")); }
+      res.statusCode=200; return res.end(editPageHtml(it, tok, it.unit, it.guest_name, ""));
+    }
+    // View rejected drafts (password) so the owner can see what was wrong.
+    if(action==="rejected_log"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      const rk=(redis?(await redis.get("parkside:kb_rejected")):_memRejected)||[];
+      return res.status(200).json({count:rk.length, items:rk.slice(-200).reverse()});
     }
     // VICTOR'S decision. Two ways in:
     //  (1) Email link (GET ?id=&decision=&token=APPROVE_LINK_SECRET) -> HTML confirmation page.
