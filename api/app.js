@@ -561,7 +561,7 @@ module.exports=async(req,res)=>{
         const sample=items[0]||null;
         const gid=sample&&(sample.guest_id||sample.guestId||(sample.guest&&sample.guest.id));
         let guestProbe=null;
-        if(gid){ try{ const gr=await fetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:H}); guestProbe={status:gr.status, keys:null, body:null}; const gj=await gr.json().catch(()=>null); guestProbe.keys=gj?Object.keys(gj):null; guestProbe.body=gj; }catch(e){ guestProbe={err:String(e.message||e)}; } }
+        if(gid && (req.query&&req.query.debug==="guest")){ try{ const gr=await fetch("https://api.ownerrez.com/v2/guests/"+gid,{headers:H}); guestProbe={status:gr.status, keys:null, body:null}; const gj=await gr.json().catch(()=>null); guestProbe.keys=gj?Object.keys(gj):null; guestProbe.body=gj; }catch(e){ guestProbe={err:String(e.message||e)}; } }
         return res.status(200).json({count:items.length, sampleKeys:sample?Object.keys(sample):null, sampleBooking:sample, guestIdFound:gid||null, guestProbe});
       }
       const list=(items||[]).map(b=>{ const g=guests[gidOf(b)];
