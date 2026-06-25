@@ -198,9 +198,11 @@
     <div class="legend">When a question isn’t confidently answered by the knowledge base, it’s queued here and (once the SMS number is live) texted to Victor for a YES/NO. Approving sends the answer to the guest <b>and</b> saves it to the knowledge base so it auto-answers next time. You can also decide right here.</div>
     <div style="margin:8px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button onclick="loadApprovals()">Refresh queue</button>
+      <button class="ghost" onclick="pruneLastApproved()" title="Delete the most recently approved answer from the approved bank + KB">🗑 Remove last approved answer</button>
       <span id="apCounts" class="muted"></span>
       <span id="apSms" class="muted" style="margin-left:auto"></span>
     </div>
+    <div id="apPrune" class="muted" style="margin:-2px 0 6px 0"></div>
     <div id="apList" class="legend"></div>
   </div>
 
@@ -481,6 +483,15 @@ async function loadBookings(){
   }catch(e){ st.textContent='Error loading bookings: '+e.message; }
 }
 // ===== Victor's: approval queue + pipeline tester + inquiries =====
+async function pruneLastApproved(){
+  if(!confirm("Remove the MOST RECENTLY approved answer from the approved bank (and KB)? It will no longer be suggested.")) return;
+  const el=document.getElementById('apPrune'); if(el) el.textContent="Removing…";
+  try{ const r=await fetch(api('delete_approved'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:'{}'});
+    const j=await r.json().catch(()=>({}));
+    if(r.ok&&j.ok&&j.deleted){ if(el) el.textContent="Removed: \u201c"+(j.deleted.qPreview||"")+"\u201d — approved answers left: "+j.approvedBankCount; }
+    else if(el) el.textContent = j.deleted===null ? "Approved bank is already empty." : ("Could not remove: "+(j.error||r.status));
+  }catch(e){ if(el) el.textContent="Error: "+e.message; }
+}
 async function loadApprovals(){
   const el=document.getElementById('apList'); if(!el) return;
   try{ const r=await fetch(api('approvals')+'&status=pending',{headers:{'x-app-password':PW}}); const j=await r.json();
