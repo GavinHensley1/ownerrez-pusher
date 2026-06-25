@@ -225,8 +225,8 @@
     <div style="display:grid;gap:12px;max-width:560px">
       <label class="muted" style="font-size:12px">Victor&rsquo;s email (To)<br><input id="nTo" type="email" style="width:100%" placeholder="victor@example.com"></label>
       <label class="muted" style="font-size:12px">From address<br><input id="nFrom" style="width:100%" placeholder="Parkside Tepees &lt;notifications@send.parksidetepees.com&gt;"></label>
-      <label class="muted" style="font-size:12px">Resend API key <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nKey" type="password" autocomplete="new-password" style="width:100%" placeholder="re_********************"></label>
-      <label class="muted" style="font-size:12px">OwnerRez OAuth token (messaging) <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nOrToken" type="password" autocomplete="new-password" style="width:100%" placeholder="paste OwnerRez OAuth access token"></label>
+      <label class="muted" style="font-size:12px">Resend API key <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nKey" type="password" autocomplete="new-password" style="width:100%" placeholder="re_********************"> <span id="nKeyState" style="font-size:12px;font-weight:600"></span></label>
+      <label class="muted" style="font-size:12px">OwnerRez OAuth token (messaging) <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nOrToken" type="password" autocomplete="new-password" style="width:100%" placeholder="paste OwnerRez OAuth access token"> <span id="nOrState" style="font-size:12px;font-weight:600"></span></label>
       <label class="muted" style="font-size:12px">Approve-link secret <span style="color:#9fb0c0">(makes approve/reject links unguessable)</span>
         <div style="display:flex;gap:8px;margin-top:4px"><input id="nSecret" style="flex:1" placeholder="long random string"><button type="button" onclick="genSecret()">Generate</button></div></label>
     </div>
@@ -518,6 +518,10 @@ async function loadNotifyStatus(){
     if(to && !to.value) to.value=j.to||"";
     if(from && !from.value) from.value=j.from||DEFAULT_FROM;
     const yn=b=>b?"\u2705":"\u2014";
+    const kS=document.getElementById('nKeyState'), oS=document.getElementById('nOrState');
+    const kIn=document.getElementById('nKey'), oIn=document.getElementById('nOrToken');
+    if(kS){ if(j.resendKey){ kS.textContent="\u2705 Saved"; kS.style.color="#2ecc71"; if(kIn&&!kIn.value) kIn.placeholder="\u2022\u2022\u2022\u2022\u2022\u2022 saved — paste a new key to replace"; } else { kS.textContent="\u2014 not set"; kS.style.color="#9fb0c0"; } }
+    if(oS){ if(j.ownerrez_oauth_set){ oS.textContent="\u2705 Saved"; oS.style.color="#2ecc71"; if(oIn&&!oIn.value) oIn.placeholder="\u2022\u2022\u2022\u2022\u2022\u2022 saved — paste a new token to replace"; } else { oS.textContent="\u2014 not set"; oS.style.color="#9fb0c0"; } }
     let dom="";
     if(Array.isArray(j.verifiedDomains)) dom=" · domains: "+(j.verifiedDomains.map(d=>d.name+"("+d.status+")").join(", ")||"none");
     el.innerHTML="Key "+yn(j.resendKey)+" · From "+yn(j.resendFromSet)+" · To "+yn(j.victorEmailSet)+" · Approve-secret "+yn(j.approveSecretSet)+" · OwnerRez token "+yn(j.ownerrez_oauth_set)
