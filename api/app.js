@@ -560,12 +560,16 @@ module.exports=async(req,res)=>{
             name:gName(g), email:gEmail(g), phone:gPhone(g),
             reference:b.title||"", unit, status:b.status||b.type||"" }; })
         .filter(x=>x.arrival);
+      const totalBeforeFilter=list.length;
+      // Only show real, live reservations — drop cancelled / void / declined / removed / inactive.
+      const isLive=x=>!/cancel|void|declin|remov|inactive|expired/i.test(String(x.status||"").toLowerCase());
+      const liveList=list.filter(isLive);
       const tod=ymd(now);
-      const upcoming=list.filter(x=>(x.departure||x.arrival)>=tod).sort((a,b)=>a.arrival<b.arrival?-1:(a.arrival>b.arrival?1:0));
-      const past=list.filter(x=>(x.departure||x.arrival)<tod).sort((a,b)=>a.arrival>b.arrival?-1:(a.arrival<b.arrival?1:0));
+      const upcoming=liveList.filter(x=>(x.departure||x.arrival)>=tod).sort((a,b)=>a.arrival<b.arrival?-1:(a.arrival>b.arrival?1:0));
+      const past=liveList.filter(x=>(x.departure||x.arrival)<tod).sort((a,b)=>a.arrival>b.arrival?-1:(a.arrival<b.arrival?1:0));
       const out=upcoming.concat(past);
       if(redis) await redis.set("parkside:bookings",{ts:Date.now(),list:out});
-      return res.status(200).json({configured:true, count:out.length, bookings:out});
+      return res.status(200).json({configured:true, count:out.length, totalBeforeFilter, excludedCancelled:totalBeforeFilter-liveList.length, bookings:out});
     }
 
     // ===== (B) PUBLIC booking-inquiry capture — no auth =====
