@@ -237,7 +237,7 @@
         </div>
       </div>
       <label class="muted" style="font-size:12px">Approve-link secret <span style="color:#9fb0c0">(makes approve/reject links unguessable)</span>
-        <div style="display:flex;gap:8px;margin-top:4px"><input id="nSecret" style="flex:1" placeholder="long random string"><button type="button" onclick="genSecret()">Generate</button></div></label>
+        <div style="display:flex;gap:8px;margin-top:4px;align-items:center"><input id="nSecret" style="flex:1" placeholder="long random string"><button type="button" onclick="genSecret()">Generate</button><span id="nSecState" style="font-size:12px;font-weight:600"></span></div></label>
     </div>
     <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button onclick="saveNotify()">Save settings</button>
@@ -527,10 +527,12 @@ async function loadNotifyStatus(){
     if(to && !to.value) to.value=j.to||"";
     if(from && !from.value) from.value=j.from||DEFAULT_FROM;
     const yn=b=>b?"\u2705":"\u2014";
-    const kS=document.getElementById('nKeyState'), oS=document.getElementById('nOrState');
+    const kS=document.getElementById('nKeyState'), oS=document.getElementById('nOrState'), sS=document.getElementById('nSecState');
     const kIn=document.getElementById('nKey'), oIn=document.getElementById('nOrToken');
     if(kS){ if(j.resendKey){ kS.textContent="\u2705 Saved"; kS.style.color="#2ecc71"; if(kIn&&!kIn.value) kIn.placeholder="\u2022\u2022\u2022\u2022\u2022\u2022 saved — paste a new key to replace"; } else { kS.textContent="\u2014 not set"; kS.style.color="#9fb0c0"; } }
     if(oS){ if(j.ownerrez_oauth_set){ oS.textContent="\u2705 Saved"; oS.style.color="#2ecc71"; if(oIn&&!oIn.value) oIn.placeholder="\u2022\u2022\u2022\u2022\u2022\u2022 saved — paste a new token to replace"; } else { oS.textContent="\u2014 not set"; oS.style.color="#9fb0c0"; } }
+    const sIn=document.getElementById('nSecret');
+    if(sS){ if(j.approveSecretSet){ sS.textContent="\u2705 Saved"; sS.style.color="#2ecc71"; if(sIn&&!sIn.value) sIn.placeholder="\u2022\u2022\u2022\u2022\u2022\u2022 saved — Generate or type to replace"; } else { sS.textContent="\u2014 not set"; sS.style.color="#9fb0c0"; } }
     if(j.webhook){ const wu=document.getElementById('whUrl'), wus=document.getElementById('whUser'), wp=document.getElementById('whPass');
       if(wu) wu.value=j.webhook.url||""; if(wus) wus.value=j.webhook.user||""; if(wp) wp.value=j.webhook.password||""; }
     let dom="";
@@ -544,6 +546,7 @@ function genSecret(){
   (window.crypto||{}).getRandomValues ? crypto.getRandomValues(a) : a.forEach((_,i)=>a[i]=Math.floor(Math.random()*256));
   for(const x of a) out+=("0"+x.toString(16)).slice(-2);
   document.getElementById('nSecret').value=out;
+  const sS=document.getElementById('nSecState'); if(sS){ sS.textContent="\u270e unsaved — click Save settings"; sS.style.color="#f4b942"; }
 }
 async function saveNotify(){
   const msg=document.getElementById('nMsg'); msg.textContent="Saving…";
