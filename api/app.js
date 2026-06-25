@@ -517,45 +517,37 @@ async function processGuestQuestion(req, p){
   const bookingId=p.bookingId||null, unit=p.unit||"", guestName=p.guestName||"", threadId=p.threadId||p.thread_id||null;
   const st=await getState(); const enabled=!!st.messaging_enabled; const kb=st.kb||KB_SEED;
   const requireAll=await requireApprovalAll();
-  const ab=await approvedBankMatch(question);
-  if(!requireAll && ab && ab.confidence>=APPROVED_THRESHOLD){
-    // (auto-send mode, currently OFF) high-confidence approved-bank match -> send now.
-    const guestSend=await sendGuestReply(enabled, {threadId, bookingId}, ab.answer);
-    return {auto_approved:true, source:"approved_bank", confidence:Number(ab.confidence.toFixed(2)),
-      matchedQuestion:ab.matchedQuestion, answer:ab.answer, guestSend, sent:guestSend.sent===true};
-  }
-  // STRICT mode: never auto-send. Pre-fill the suggested reply from our OWN data only,
-  // and ONLY when the match is relevant enough (weak/irrelevant matches -> no suggestion,
-  // so the owner writes it). approved bank (>=PROPOSE_MIN) -> KB synonym -> KB-grounded AI draft.
-  const PROPOSE_MIN=0.4;
-  let proposed="", pSource="none", escalate=false;
-  if(ab && ab.confidence>=PROPOSE_MIN && ab.answer){ proposed=ab.answer; pSource="approved_bank"; }       // known
-  if(!proposed){ const km=kbAutoMatch(kb, question); if(km && km.answer){ proposed=km.answer; pSource="kb"; } } // known
-  if(!proposed){ const draft=await aiDraftAnswer(kb, question, guestName);
-    proposed=draft.answer||holdingMessage(guestName);
-    if(draft.known==="full"){ pSource="kb_ai"; }
-    else if(draft.known==="partial"){ pSource="kb_ai_partial"; escalate=true; }   // some unknown -> flag
-    else { pSource="escalation"; escalate=true; }                                  // none known -> holding
-  }
+  // Saved answers (approved bank) + KB are used purely as FACTS/reference — never sent
+  // verbatim. ALWAYS compose a FRESH reply tailored to exactly what THIS guest asked,
+  // pulling only the relevant facts. If the specific thing asked isn't in our info ->
+  // escalate with the holding message (do NOT fall back to an unrelated saved answer).
+  const draft=await aiDraftAnswer(kb, question, guestName, await getApprovedBank());
+  let proposed=draft.answer||holdingMessage(guestName), pSource="composed", escalate=false;
+  if(draft.known==="full"){ pSource="composed"; }
+  else if(draft.known==="partial"){ pSource="composed_partial"; escalate=true; }
+  else { pSource="escalation"; escalate=true; }
   const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate,
     unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
   const list=await getApprovals(); list.push(item); await setApprovals(list);
   const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
   const sms=await smsVictor(enabled, "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(write one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
-  return {queued:true, require_approval_all:requireAll, id:item.id, proposed, matchSource: proposed?pSource:"none", proposedConfidence: ab?Number(ab.confidence.toFixed(2)):0, victorEmail, victorSms:sms};
+  return {queued:true, require_approval_all:requireAll, id:item.id, proposed, matchSource:pSource, escalate, victorEmail, victorSms:sms};
 }
 
 function holdingMessage(guestName){ const f=String(guestName||"").trim().split(/\s+/)[0];
   return "Hi "+(f||"there")+"! Great question \u2014 I want to make sure I get you the right info, so let me check with my manager and I\u2019ll get right back to you shortly. \uD83D\uDE0A"; }
 // KB-grounded draft. Returns {known:"full"|"partial"|"none", answer}. NEVER fabricates:
 // unknown parts -> say we will confirm with the manager and follow up (no guessing).
-async function aiDraftAnswer(kb, question, guestName){
+async function aiDraftAnswer(kb, question, guestName, approvedBank){
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return {known:"none", answer:holdingMessage(guestName), noKey:true};
-  const facts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
+  const kbFacts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a);
+  const bankFacts=((approvedBank)||[]).filter(e=>e&&String(e.a||"").trim()).map(e=>"- "+(e.q?("(previously asked: "+String(e.q).slice(0,70)+") "):"")+String(e.a).trim());
+  const facts=[...kbFacts, ...bankFacts].join("\n");
   const first=String(guestName||"").trim().split(/\s+/)[0]||"";
   const hold=holdingMessage(guestName);
   const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). A human reviews your draft before it is sent. "
     +"Use ONLY the KNOWN INFO below. NEVER invent, guess, infer, or substitute a different fact. Keep the reply SHORT.\n"
+    +"The KNOWN INFO entries (including previously-approved answers) are REFERENCE FACTS, NOT templates. COMPOSE a fresh reply tailored to exactly what THIS guest asked, pulling only the relevant fact(s). Do NOT paste a whole prior answer that does not match what was asked.\n"
     +"First decide how much of the guest's message the KNOWN INFO answers: 'full' (every part), 'partial' (some parts), or 'none'.\n"
     +"Match the question word to the right fact: 'where'->a location/place/address; 'when'/'what time'->a time; 'how'->a process; 'what'/'which'->the specific item. If the specific thing asked is NOT in KNOWN INFO, treat that part as UNKNOWN (do not substitute a different fact).\n"
     +"Format: ONE warm greeting line ('Hi "+(first||"there")+"!'), then the answer in 1-3 short sentences, then a brief friendly closing. No padding, no over-explaining.\n"
