@@ -546,7 +546,7 @@ async function processGuestQuestion(req, p){
 }
 
 function holdingMessage(guestName){ const f=String(guestName||"").trim().split(/\s+/)[0];
-  return "Hi "+(f||"there")+"! Great question \u2014 I want to make sure I get you the right info, so let me check with my manager and I\u2019ll get right back to you shortly. \uD83D\uDE4F"; }
+  return "Hi "+(f||"there")+"! Great question \u2014 I want to make sure I get you the right info, so let me check with my manager and I\u2019ll get right back to you shortly. \uD83D\uDE0A"; }
 // KB-grounded draft. Returns {known:"full"|"partial"|"none", answer}. NEVER fabricates:
 // unknown parts -> say we will confirm with the manager and follow up (no guessing).
 async function aiDraftAnswer(kb, question, guestName){
