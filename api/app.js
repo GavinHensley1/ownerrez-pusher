@@ -398,7 +398,7 @@ async function runPollMessages(req){
   const sinceIso=new Date(Date.now()-1000*60*60*24).toISOString(); // last 24h window
   let items=[];
   try{ const r=await fetch("https://api.ownerrez.com/v2/messages?since_utc="+encodeURIComponent(sinceIso),{headers:H});
-    if(!r.ok){ const t=await r.text(); return await writePollStatus({ok:false, polled:0, status:r.status, error:"OwnerRez messages "+r.status, detail:t.slice(0,200), note:"token may lack message-read scope, or endpoint differs — register webhook or check scope"}); }
+    if(!r.ok){ const t=await r.text(); return await writePollStatus({ok:false, polled:0, status:r.status, error:"OwnerRez messages "+r.status, detail:t.slice(0,200), note:"OwnerRez Messaging API is gated: GET /v2/messages + message webhooks require (1) an OAuth app token (NOT a Personal Access Token) with messaging scope, and (2) a Messaging API partnership agreement (email partnerhelp@ownerrez.com, subject 'Messaging API Access'). A 405 here means the current token/app lacks that access."}); }
     const j=await r.json(); items=j.items||j.messages||(Array.isArray(j)?j:[]); }
   catch(e){ return await writePollStatus({ok:false, polled:0, error:String(e.message||e)}); }
   const seenArr=(redis&&await redis.get("parkside:msg_seen"))||[]; const seen=new Set(seenArr);
