@@ -303,7 +303,7 @@ async function sendVictorApprovalEmail(req, item, ctx){
     +(unit?'<tr><td style="padding:6px 0;color:#64748b;width:90px">Unit</td><td style="padding:6px 0;font-weight:600">'+escHtml(unit)+'</td></tr>':'')
     +(guestName?'<tr><td style="padding:6px 0;color:#64748b">Guest</td><td style="padding:6px 0;font-weight:600">'+escHtml(guestName)+'</td></tr>':'')
     +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Question</td><td style="padding:6px 0">'+escHtml(item.question)+'</td></tr>'
-    +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Proposed reply</td><td style="padding:6px 0">'+(proposed?escHtml(proposed):'<i style="color:#94a3b8">(no KB answer — Approve will send a blank unless an answer exists; better to add one in Victor\'s area)</i>')+'</td></tr>'
+    +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Proposed reply</td><td style="padding:6px 0">'+(proposed?escHtml(proposed):'<i style="color:#94a3b8">No suggested reply found in your saved data. Open Victor&rsquo;s area \u2192 Approval queue to type a reply and approve (the one-click Approve link can only send an existing suggested reply, never a blank).</i>')+'</td></tr>'
     +'</table>'
     +'<div style="margin:18px 0">'+btn(yes,"#16a34a","\u2705 Approve & Send")+btn(no,"#dc2626","\u274c Reject")+'</div>'
     +'<p style="color:#94a3b8;font-size:12px;margin-top:8px">Approve sends the reply to the guest and saves it to the knowledge base so it auto-answers next time. Reject sends nothing. (Ref '+escHtml(item.id)+')</p>'
@@ -391,25 +391,39 @@ function orAuthHeader(){ const tok=process.env.OWNERREZ_OAUTH_TOKEN; if(tok) ret
 //  - APPROVED BANK match >= threshold -> auto-send to guest, no human, no email.
 //  - otherwise -> propose an answer (bank near-match -> KB synonym -> AI draft) and
 //    EMAIL Victor with Approve/Reject links. Nothing is sent to the guest until Approve.
+// Strict human-approval mode. Default ON: NOTHING auto-sends; even a high-confidence
+// approved-bank/KB match is used only to PRE-FILL the suggested reply in the email.
+// Toggle off later via env REQUIRE_APPROVAL_ALL=false or notify_config.requireApprovalAll=false.
+async function requireApprovalAll(){ const raw=await getNotifyRaw();
+  if(typeof raw.requireApprovalAll==="boolean") return raw.requireApprovalAll;
+  return String(process.env.REQUIRE_APPROVAL_ALL||"true").toLowerCase()!=="false"; }
+
 async function processGuestQuestion(req, p){
   const question=String(p.question||"").trim(); if(!question) return {error:"no question"};
   const bookingId=p.bookingId||null, unit=p.unit||"", guestName=p.guestName||"";
   const st=await getState(); const enabled=!!st.messaging_enabled; const kb=st.kb||KB_SEED;
+  const requireAll=await requireApprovalAll();
   const ab=await approvedBankMatch(question);
-  if(ab && ab.confidence>=APPROVED_THRESHOLD){
+  if(!requireAll && ab && ab.confidence>=APPROVED_THRESHOLD){
+    // (auto-send mode, currently OFF) high-confidence approved-bank match -> send now.
     const guestSend=await sendGuestReply(enabled, bookingId, ab.answer);
     return {auto_approved:true, source:"approved_bank", confidence:Number(ab.confidence.toFixed(2)),
       matchedQuestion:ab.matchedQuestion, answer:ab.answer, guestSend, sent:guestSend.sent===true};
   }
-  let proposed = (ab && ab.answer) ? ab.answer : "";
-  if(!proposed){ const km=kbAutoMatch(kb, question); if(km && km.answer) proposed=km.answer; }
-  if(!proposed){ const draft=await aiDraftAnswer(kb, question); if(draft.inKb && draft.answer) proposed=draft.answer; }
+  // STRICT mode: never auto-send. Pre-fill the suggested reply from our OWN data only,
+  // and ONLY when the match is relevant enough (weak/irrelevant matches -> no suggestion,
+  // so the owner writes it). approved bank (>=PROPOSE_MIN) -> KB synonym -> KB-grounded AI draft.
+  const PROPOSE_MIN=0.4;
+  let proposed="", pSource="none";
+  if(ab && ab.confidence>=PROPOSE_MIN && ab.answer){ proposed=ab.answer; pSource="approved_bank"; }
+  if(!proposed){ const km=kbAutoMatch(kb, question); if(km && km.answer){ proposed=km.answer; pSource="kb"; } }
+  if(!proposed){ const draft=await aiDraftAnswer(kb, question); if(draft.inKb && draft.answer){ proposed=draft.answer; pSource="kb_ai"; } }
   const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed,
     unit, guest_name:guestName, booking_id:bookingId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
   const list=await getApprovals(); list.push(item); await setApprovals(list);
   const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
   const sms=await smsVictor(enabled, "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(write one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
-  return {queued:true, id:item.id, proposed, victorEmail, victorSms:sms};
+  return {queued:true, require_approval_all:requireAll, id:item.id, proposed, matchSource: proposed?pSource:"none", proposedConfidence: ab?Number(ab.confidence.toFixed(2)):0, victorEmail, victorSms:sms};
 }
 
 async function aiDraftAnswer(kb, question){
@@ -863,9 +877,9 @@ module.exports=async(req,res)=>{
     // Config visibility for the email/notify channel. Booleans only (no secrets);
     // if a Resend key is present, also lists the account's verified sender domains.
     if(action==="notify_status"){
-      const cfg=await getNotifyConfig(); const raw=await getNotifyRaw();
+      const cfg=await getNotifyConfig(); const raw=await getNotifyRaw(); const reqAll=await requireApprovalAll();
       const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, approveSecretSet:!!cfg.secret,
-        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to),
+        resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll,
         from:cfg.from||null, to:cfg.to||null,
         source:{ apiKey: raw.resendApiKey?"ui":(process.env.RESEND_API_KEY?"env":null), from: raw.from?"ui":(process.env.RESEND_FROM?"env":null), to: raw.victorEmail?"ui":(process.env.VICTOR_EMAIL?"env":null), secret: raw.approveSecret?"ui":(process.env.APPROVE_LINK_SECRET?"env":null) } };
       if(cfg.apiKey){
