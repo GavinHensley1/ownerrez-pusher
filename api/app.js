@@ -1037,7 +1037,7 @@ module.exports=async(req,res)=>{
       const lastSend=(redis?await redis.get("parkside:last_send"):_memLastSend)||null;
       let oauthProbe=null;
       if(cfg.ownerrezOauth){ try{ const pr=await fetch("https://api.ownerrez.com/v2/messages",{headers:{Authorization:"Bearer "+cfg.ownerrezOauth,"User-Agent":"parkside-control/1.0"}});
-        oauthProbe={endpoint:"GET /v2/messages", status:pr.status, meaning:(pr.status===405?"token VALID (auth ok; GET not allowed)":(pr.status===401?"token INVALID/expired (401)":"status "+pr.status))}; }
+        oauthProbe={endpoint:"GET /v2/messages", status:pr.status, meaning:(pr.status===401?"token INVALID/expired (401)":(pr.status===405?"GET route-rejected (NOT an auth test — see sendProbe POST for the real token check)":"status "+pr.status))}; }
         catch(e){ oauthProbe={error:String(e.message||e)}; } }
       // SAFE send probe: POST /v2/messages with NO thread_id/recipient -> reveals whether
       // the SEND endpoint is reachable (400 validation = sending works; 401/403 = access/
