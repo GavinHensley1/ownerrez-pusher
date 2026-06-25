@@ -879,7 +879,8 @@ module.exports=async(req,res)=>{
       const e=(b.entity&&typeof b.entity==="object")?b.entity:{};
       const g=(e.guest&&typeof e.guest==="object")?e.guest:{};
       const nameFrom=()=>String(e.guest_name||e.guestName||e.from_name||((g.first_name||"")+" "+(g.last_name||"")).trim()||g.name||"").trim();
-      const threadId=e.thread_id||e.threadId||e.thread||(g&&g.thread_id)||null;
+      const _threadRaw=e.thread_id||e.threadId||e.thread||(g&&g.thread_id)||null;
+      const threadId=(_threadRaw&&typeof _threadRaw==="object")?(_threadRaw.id||_threadRaw.thread_id||null):_threadRaw;
       const bookingId=e.booking_id||e.bookingId||null;
 
       if(etype==="inquiry"){
@@ -903,16 +904,18 @@ module.exports=async(req,res)=>{
         catch(err){ return res.status(200).json({ok:true, processed:false, type:"inquiry", error:String(err&&err.message||err)}); }
       }
 
-      // thread_message: record the real shape (no message content) so direction parsing can be tuned.
+      // thread_message direction is determined by OwnerRez's from_role + is_draft.
+      // INBOUND (process)  = guest/traveler. OUTBOUND (ignore) = host/owner/pm/etc.
+      // Drafts and our own outbound replies (from_role=host) are ignored -> no reply loop.
+      const role=String(e.from_role||"").toLowerCase().trim();
+      const isDraft = e.is_draft===true || e.is_draft==="true";
+      const inboundRole = /guest|travel|renter|customer|inquir/.test(role);
+      const direction = isDraft ? "draft" : (inboundRole ? "inbound" : (role ? "outbound" : "unknown"));
       await writeWhStatus({ranAt:new Date().toISOString(), event:"thread_message", action:act, entity_id:b.entity_id, entityKeys:Object.keys(e),
-        dir:{direction:e.direction,type:e.type,incoming:e.incoming,is_incoming:e.is_incoming,outgoing:e.outgoing,is_outgoing:e.is_outgoing,sender:e.sender,from_type:e.from_type}});
+        dir:{from_role:e.from_role, from_contact_id:e.from_contact_id, is_draft:e.is_draft, resolved:direction}});
 
-      // Only INBOUND guest messages. Critically skip our OWN outbound replies (which
-      // also fire a thread_message webhook) to avoid a reply loop.
-      const ds=String(e.direction||e.type||e.sender||e.from_type||"").toLowerCase();
-      const outgoing = e.outgoing===true || e.is_outgoing===true || /out|host|owner|staff|sent|me\b|reply/.test(ds);
-      const incoming = e.incoming===true || e.is_incoming===true || /in\b|incoming|guest|traveler|customer|received|recv/.test(ds);
-      if(outgoing && !incoming) return res.status(200).json({ok:true, ignored:"outbound"});
+      if(isDraft) return res.status(200).json({ok:true, ignored:"draft"});
+      if(!inboundRole) return res.status(200).json({ok:true, ignored:"not inbound (from_role="+(e.from_role||"")+")"});
 
       const question=String(e.body||e.message||e.content||e.text||"").trim();
       if(!question) return res.status(200).json({ok:true, ignored:"no text"});
