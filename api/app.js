@@ -408,7 +408,7 @@ async function approvedBankMatch(question){
 async function upsertApprovedBank(question, answer){
   const bank=await getApprovedBank(); const qn=normQ(question);
   const ex=bank.find(e=>normQ(e.q)===qn);
-  if(ex){ ex.a=answer; ex.ts=new Date().toISOString(); } else bank.push({q:question, a:answer, ts:new Date().toISOString()});
+  if(ex){ ex.a=answer; ex.ts=new Date().toISOString(); } else bank.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), q:question, a:answer, ts:new Date().toISOString()});
   await setApprovedBank(bank); return bank.length;
 }
 async function orAuthHeader(){ const cfg=await getNotifyConfig(); if(cfg.ownerrezOauth) return "Bearer "+cfg.ownerrezOauth;
@@ -506,7 +506,7 @@ async function processGuestQuestion(req, p){
   let proposed="", pSource="none";
   if(ab && ab.confidence>=PROPOSE_MIN && ab.answer){ proposed=ab.answer; pSource="approved_bank"; }
   if(!proposed){ const km=kbAutoMatch(kb, question); if(km && km.answer){ proposed=km.answer; pSource="kb"; } }
-  if(!proposed){ const draft=await aiDraftAnswer(kb, question); if(draft.inKb && draft.answer){ proposed=draft.answer; pSource="kb_ai"; } }
+  if(!proposed){ const draft=await aiDraftAnswer(kb, question, guestName); if(draft.answer){ proposed=draft.answer; pSource=draft.inKb?"kb_ai":"kb_ai_partial"; } }
   const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed,
     unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
   const list=await getApprovals(); list.push(item); await setApprovals(list);
@@ -515,14 +515,22 @@ async function processGuestQuestion(req, p){
   return {queued:true, require_approval_all:requireAll, id:item.id, proposed, matchSource: proposed?pSource:"none", proposedConfidence: ab?Number(ab.confidence.toFixed(2)):0, victorEmail, victorSms:sms};
 }
 
-async function aiDraftAnswer(kb, question){
+async function aiDraftAnswer(kb, question, guestName){
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return {inKb:false, answer:"", noKey:true};
   const facts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
+  const first=String(guestName||"").trim().split(/\s+/)[0]||"";
   const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). "
-    +"You have NO knowledge except the KNOWN INFO list below. Decide if KNOWN INFO DIRECTLY and FULLY answers the question. "
-    +"NEVER guess or infer. Reply with ONLY a JSON object: {\"in_kb\": true|false, \"answer\": \"...\"}. "
-    +"If in_kb is false, answer MUST be \"\". If true, 1-2 short warm sentences, 'we/us'. \n\nKNOWN INFO:\n"+(facts||"(none saved yet)");
-  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0,system:sys,messages:[{role:"user",content:String(question)}]})});
+    +"Write ONE warm reply to the guest's message; a human will review it before it is sent.\n"
+    +"RULES:\n"
+    +"1. GREET the guest warmly by FIRST NAME if provided: 'Hi "+(first||"there")+"!' (if no name, 'Hi there!').\n"
+    +"2. Be KIND, warm and friendly like a gracious host — never terse or robotic. Add a brief friendly closing (e.g. 'We can't wait to host you! \uD83D\uDE0A'). Say 'we/us'. No long sign-off.\n"
+    +"3. Answer EVERY part of the message. If it asks multiple things (e.g. check-in time AND where to go / directions), address ALL of them — never drop a part.\n"
+    +"4. Use ONLY the KNOWN INFO facts for specific details (times, addresses, codes, policies, amenities). NEVER invent or guess specifics.\n"
+    +"5. If a part of the question is NOT covered by KNOWN INFO, do NOT make it up — include a clearly-marked placeholder for that part like '[need info: <what is missing>]' so the host can fill it in. Never silently skip a part.\n"
+    +"6. Reply with ONLY a JSON object: {\"in_kb\": true|false, \"answer\": \"...\"}. Set in_kb=true ONLY if every part was fully answered from KNOWN INFO with NO placeholder. 'answer' is ALWAYS the complete warm message (greeting + every part + closing), even when in_kb is false.\n\n"
+    +"KNOWN INFO:\n"+(facts||"(none saved yet)");
+  const userMsg=(first?("Guest first name: "+first+"\n"):"")+"Guest message: "+String(question);
+  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:500,temperature:0.3,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return {inKb:false, answer:"", error:JSON.stringify(j).slice(0,200)};
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
     try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); return {inKb:o.in_kb===true, answer:String(o.answer||"").trim()}; }
@@ -929,6 +937,34 @@ module.exports=async(req,res)=>{
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       const bank=await getApprovedBank();
       return res.status(200).json({count:bank.length, items:bank.slice(-200).reverse()});
+    }
+    // Prune a bad approved answer. Auth: x-app-password OR ?token=<approve secret>.
+    // Target (query or body): id | ts | q (normalized match) | default = latest.
+    if(action==="delete_approved"){
+      const secret=(await getNotifyConfig()).secret; const tok=String((req.query&&req.query.token)||"");
+      const pwOk=(req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"");
+      if(!pwOk && !(secret && tok===secret)) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+      const q=req.query||{};
+      const byId=String(b.id||q.id||""); const byTs=String(b.ts||q.ts||""); const byQ=String(b.q||q.q||"");
+      const bank=await getApprovedBank();
+      if(!bank.length) return res.status(200).json({ok:true, deleted:null, approvedBankCount:0, note:"bank empty"});
+      let idx=-1;
+      if(byId) idx=bank.findIndex(e=>String(e.id||"")===byId);
+      else if(byTs) idx=bank.findIndex(e=>String(e.ts||"")===byTs);
+      else if(byQ) idx=bank.findIndex(e=>normQ(e.q)===normQ(byQ));
+      else idx=bank.length-1; // latest (entries are appended)
+      if(idx<0) return res.status(200).json({ok:false, error:"no matching approved entry", approvedBankCount:bank.length});
+      const removed=bank.splice(idx,1)[0];
+      await setApprovedBank(bank);
+      // Also remove the mirrored editable-KB item (topic = question.slice(0,60)).
+      let kbRemoved=0;
+      try{ const st=await getState(); const kb=st.kb||{items:[]}; kb.items=kb.items||[];
+        const target=normQ(String(removed.q||"").slice(0,60));
+        const before=kb.items.length;
+        kb.items=kb.items.filter(x=>normQ(String(x.topic||""))!==target);
+        kbRemoved=before-kb.items.length; if(kbRemoved) await setState({kb}); }catch(e){}
+      return res.status(200).json({ok:true, deleted:{id:removed.id||null, ts:removed.ts||null, qPreview:String(removed.q||"").slice(0,80)}, kbMirrorRemoved:kbRemoved, approvedBankCount:bank.length});
     }
 
     if(action==="ask"){
