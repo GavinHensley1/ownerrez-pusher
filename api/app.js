@@ -46,8 +46,9 @@ const DEFAULTS={targets:SEED_TARGETS,auto_sync:false,overrides:{},kb:KB_SEED,mes
 const OWNERREZ_ICAL={486910:"https://app.ownerrez.com/feeds/ical/8f39d35971614fe68f65c2d60ebee98a",486911:"https://app.ownerrez.com/feeds/ical/8b443e66b91d42f78312c1b96456e721",486912:"https://app.ownerrez.com/feeds/ical/c11b9bdcccd0407b94a471ec1d4bf184",486913:"https://app.ownerrez.com/feeds/ical/6b7aadd1089a4545acfd76d4896cd1f4",486891:"https://app.ownerrez.com/feeds/ical/a803006016a94e429b22c4af21655c6e",486914:"https://app.ownerrez.com/feeds/ical/a6a81900436e48538ca68c999084a00f",486915:"https://app.ownerrez.com/feeds/ical/a33c27437b734216b0f153e4d112673b",486916:"https://app.ownerrez.com/feeds/ical/2fc1ac9ea2a744708fe515fec9a45543",486917:"https://app.ownerrez.com/feeds/ical/b5e770592bfe401c93c472df3ca912e1",486918:"https://app.ownerrez.com/feeds/ical/5706333006cf4e34a1ed058c9f3a695a"}; // OwnerRez availability/blocks = single occupancy source
 const SKEY="parkside:state";
 
-async function getState(){ if(!redis) return JSON.parse(JSON.stringify(DEFAULTS)); const s=await redis.get(SKEY); return {...JSON.parse(JSON.stringify(DEFAULTS)),...(s||{})}; }
-async function setState(p){ const cur=await getState(); const next={...cur,...p}; delete next.icals; if(redis) await redis.set(SKEY,next); return next; }
+let _memState=null;
+async function getState(){ if(!redis) return {...JSON.parse(JSON.stringify(DEFAULTS)),...(_memState||{})}; const s=await redis.get(SKEY); return {...JSON.parse(JSON.stringify(DEFAULTS)),...(s||{})}; }
+async function setState(p){ const cur=await getState(); const next={...cur,...p}; delete next.icals; if(redis) await redis.set(SKEY,next); else _memState={...(_memState||{}),...p}; return next; }
 const isWe=d=>KNOBS.weekendDays.includes(d.getUTCDay());
 function targetFor(d,t){ const m=t[d.getUTCMonth()+1]; return isWe(d)?m.we:m.wd; }
 function monthLead(ds,today){ const first=new Date(ds.slice(0,7)+"-01T00:00:00Z"); const t=new Date(today+"T00:00:00Z"); return Math.max(0,Math.round((first-t)/86400000)); }
@@ -260,10 +261,61 @@ async function smsVictor(enabled, text){
   return sendSms(victorNumber(), text);
 }
 
+// ===== Email approval channel (Resend) — interim channel before SMS is live =====
+function resendFrom(){ return process.env.RESEND_FROM||""; }
+function victorEmail(){ return process.env.VICTOR_EMAIL||""; }
+function approveSecret(){ return process.env.APPROVE_LINK_SECRET||""; }
+function resendConfigured(){ return !!(process.env.RESEND_API_KEY && resendFrom() && victorEmail()); }
+function appOrigin(req){ const h=(req&&req.headers)||{}; const host=h["x-forwarded-host"]||h.host; const proto=h["x-forwarded-proto"]||"https"; return host?(proto+"://"+host):""; }
+function escHtml(x){ return String(x==null?"":x).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+async function resendSend({from,to,subject,html}){
+  const key=process.env.RESEND_API_KEY;
+  if(!key) return {sent:false, staged:true, reason:"RESEND_API_KEY not set"};
+  if(!from) return {sent:false, staged:true, reason:"RESEND_FROM not set"};
+  if(!to) return {sent:false, staged:true, reason:"VICTOR_EMAIL not set"};
+  try{ const r=await fetch("https://api.resend.com/emails",{method:"POST",headers:{Authorization:"Bearer "+key,"Content-Type":"application/json"},body:JSON.stringify({from,to,subject,html})});
+    const t=await r.text(); return {sent:r.ok, status:r.status, body:t.slice(0,200)}; }
+  catch(e){ return {sent:false, error:String(e.message||e)}; }
+}
+// Build + send (or stage) the Victor approval email with Approve/Reject links.
+async function sendVictorApprovalEmail(req, item, ctx){
+  ctx=ctx||{};
+  const origin=appOrigin(req); const secret=approveSecret();
+  const base=origin+"/api/app?action=approve&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
+  const yes=base+"&decision=yes", no=base+"&decision=no";
+  const unit=ctx.unit||""; const guestName=ctx.guestName||"";
+  const proposed=item.proposed||"";
+  const subject="Parkside approval needed"+(unit?(" — "+unit):"");
+  const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#ffffff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
+  const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
+    +'<h2 style="margin:0 0 4px 0">Guest message — approval needed</h2>'
+    +'<p style="color:#475569;margin:0 0 14px 0">A guest question wasn\'t confidently answered from the knowledge base. Review and decide:</p>'
+    +'<table style="width:100%;border-collapse:collapse;font-size:14px">'
+    +(unit?'<tr><td style="padding:6px 0;color:#64748b;width:90px">Unit</td><td style="padding:6px 0;font-weight:600">'+escHtml(unit)+'</td></tr>':'')
+    +(guestName?'<tr><td style="padding:6px 0;color:#64748b">Guest</td><td style="padding:6px 0;font-weight:600">'+escHtml(guestName)+'</td></tr>':'')
+    +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Question</td><td style="padding:6px 0">'+escHtml(item.question)+'</td></tr>'
+    +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Proposed reply</td><td style="padding:6px 0">'+(proposed?escHtml(proposed):'<i style="color:#94a3b8">(no KB answer — Approve will send a blank unless an answer exists; better to add one in Victor\'s area)</i>')+'</td></tr>'
+    +'</table>'
+    +'<div style="margin:18px 0">'+btn(yes,"#16a34a","\u2705 Approve & Send")+btn(no,"#dc2626","\u274c Reject")+'</div>'
+    +'<p style="color:#94a3b8;font-size:12px;margin-top:8px">Approve sends the reply to the guest and saves it to the knowledge base so it auto-answers next time. Reject sends nothing. (Ref '+escHtml(item.id)+')</p>'
+    +(secret?'':'<p style="color:#dc2626;font-size:12px">\u26a0 APPROVE_LINK_SECRET is not set on the server, so these links will not work yet.</p>')
+    +'</div>';
+  const result=await resendSend({from:resendFrom(), to:victorEmail(), subject, html});
+  return {...result, to:victorEmail()||null, from:resendFrom()||null, subject, approveUrl:yes, rejectUrl:no};
+}
+function htmlPage(title, msg){
+  return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+escHtml(title)+'</title></head>'
+    +'<body style="font-family:Arial,Helvetica,sans-serif;background:#0f1720;color:#e7eef6;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">'
+    +'<div style="background:#16212e;border:1px solid #26354a;border-radius:12px;padding:28px 32px;max-width:420px;text-align:center">'
+    +'<h1 style="margin:0 0 8px 0;font-size:22px">'+escHtml(title)+'</h1>'
+    +'<p style="color:#9fb0c0;margin:0">'+escHtml(msg)+'</p></div></body></html>';
+}
+
 // ===== Approval queue + knowledge-base matching (human-in-the-loop messaging) =====
 const AQKEY="parkside:approvals", INQKEY="parkside:inquiries";
-async function getApprovals(){ return (redis&&await redis.get(AQKEY))||[]; }
-async function setApprovals(list){ if(redis) await redis.set(AQKEY, list.slice(-500)); return list; }
+let _memApprovals=[];
+async function getApprovals(){ return redis?((await redis.get(AQKEY))||[]):_memApprovals; }
+async function setApprovals(list){ const trimmed=list.slice(-500); if(redis) await redis.set(AQKEY, trimmed); else _memApprovals=trimmed; return list; }
 function normQ(x){ return String(x||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim(); }
 
 // Deterministic auto-approve matcher: map a guest question to a KB topic; if that
@@ -598,6 +650,7 @@ module.exports=async(req,res)=>{
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
       const question=String(b.question||"").trim(); const bookingId=b.booking_id||null;
+      const unit=String(b.unit||"").trim(); const guestName=String(b.guest_name||b.guestName||"").trim();
       if(!question) return res.status(400).json({error:"no question"});
       const st=await getState(); const kb=st.kb||KB_SEED; const enabled=!!st.messaging_enabled;
       // AUTO-APPROVE: high-confidence KB match -> send now, never bother Victor.
@@ -608,11 +661,13 @@ module.exports=async(req,res)=>{
       const draft=await aiDraftAnswer(kb, question);
       const proposed=(draft.inKb && draft.answer) ? draft.answer : "";
       const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed,
-        booking_id:bookingId, status:"pending", ts:new Date().toISOString() };
+        unit, guest_name:guestName, booking_id:bookingId, status:"pending", ts:new Date().toISOString() };
       const list=await getApprovals(); list.push(item); await setApprovals(list);
+      // EMAIL is the active Victor channel now (interim before SMS). SMS abstraction kept for when the number is live.
+      const victorEmailRes=await sendVictorApprovalEmail(req, item, {unit, guestName});
       const sms=await smsVictor(enabled,
         "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(no KB answer — reply with one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
-      return res.status(200).json({queued:true, id:item.id, proposed, victorSms:sms});
+      return res.status(200).json({queued:true, id:item.id, proposed, victorEmail:victorEmailRes, victorSms:sms});
     }
     // VICTOR'S: view the approval queue (password). ?status=pending|approved|rejected|all
     if(action==="approvals"){
@@ -621,8 +676,23 @@ module.exports=async(req,res)=>{
       const out=status==="all"?list:list.filter(x=>x.status===status);
       return res.status(200).json({approvals:out.slice(-200).reverse(), counts:{pending:list.filter(x=>x.status==="pending").length, approved:list.filter(x=>x.status==="approved").length, rejected:list.filter(x=>x.status==="rejected").length}});
     }
-    // VICTOR'S / manual decision (password): {id, decision:'yes'|'no', answer?}
+    // VICTOR'S decision. Two ways in:
+    //  (1) Email link (GET ?id=&decision=&token=APPROVE_LINK_SECRET) -> HTML confirmation page.
+    //  (2) Victor's UI (POST {id,decision,answer?} with x-app-password) -> JSON.
     if(action==="approve"){
+      const q=(req.query)||{};
+      const isLink = (req.method==="GET") || !!q.token;
+      if(isLink){
+        const secret=approveSecret();
+        res.setHeader("Content-Type","text/html; charset=utf-8");
+        if(!secret || String(q.token||"")!==secret){ res.statusCode=403; return res.end(htmlPage("Link error","This approval link is invalid or expired.")); }
+        const out=await decideApproval(String(q.id||""), String(q.decision||"").toLowerCase(), null);
+        let title, msg;
+        if(out.ok && out.decision==="approved"){ title="Approved — reply sent"; msg="The guest reply was sent and saved to the knowledge base."; }
+        else if(out.ok && out.decision==="rejected"){ title="Rejected"; msg="This request was rejected. Nothing was sent to the guest."; }
+        else { title="Couldn't complete"; msg=(out.error||"Unknown error")+"."; }
+        res.statusCode=200; return res.end(htmlPage(title,msg));
+      }
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
       const out=await decideApproval(String(b.id||""), String(b.decision||"").toLowerCase(), b.answer!=null?String(b.answer):null);
@@ -651,6 +721,18 @@ module.exports=async(req,res)=>{
       const st=await getState(); const kb=st.kb||KB_SEED; const q=(req.query&&req.query.q)||"";
       const m=kbAutoMatch(kb, q);
       return res.status(200).json({query:q, match:m, knownTopics:(kb.items||[]).filter(i=>String(i.a||"").trim()).map(i=>i.topic)});
+    }
+    // Config visibility for the email/notify channel. Booleans only (no secrets);
+    // if a Resend key is present, also lists the account's verified sender domains.
+    if(action==="notify_status"){
+      const out={ resendKey:!!process.env.RESEND_API_KEY, resendFromSet:!!resendFrom(), victorEmailSet:!!victorEmail(), approveSecretSet:!!approveSecret(), resendConfigured:resendConfigured() };
+      if(process.env.RESEND_API_KEY){
+        try{ const r=await fetch("https://api.resend.com/domains",{headers:{Authorization:"Bearer "+process.env.RESEND_API_KEY}});
+          out.domainsStatus=r.status; const j=await r.json().catch(()=>null);
+          const arr=(j&&(j.data||j.domains))||[]; out.verifiedDomains=arr.map(d=>({name:d.name,status:d.status})); }
+        catch(e){ out.domainsErr=String(e.message||e); }
+      }
+      return res.status(200).json(out);
     }
     // Config visibility for the SMS provider (password) — never reveals secrets.
     if(action==="sms_status"){
