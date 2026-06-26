@@ -98,6 +98,17 @@
     <strong>Preview mode.</strong> <span class="muted">Auto-sync is OFF — edit targets / set overrides and review here; nothing is written to OwnerRez until you turn auto-sync ON.</span>
   </div>
 
+  <div class="card" id="golive" style="border-color:#2f7d4f">
+    <h2>🚀 Go live — glide-slope pricing</h2>
+    <div class="legend" id="goliveState" style="margin-bottom:10px">Loading status…</div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <button class="ghost" onclick="wipeLearning()">🧹 Wipe all learning data</button>
+      <button onclick="goLive()" style="background:#2f7d4f;border-color:#2f7d4f;color:#fff">🟢 Go live — enable glide-slope pricing</button>
+      <span id="goliveStatus" class="muted" style="align-self:center"></span>
+    </div>
+    <div class="legend" style="margin-top:10px"><b>Order (do this top to bottom):</b> 1) click <b>🧹 Wipe all learning data</b> first — clears the old demand/learning history, keeps your targets &amp; knobs (existing OwnerRez bookings still count toward occupancy). 2) then click <b>🟢 Go live</b> — switches pricing to the glide-slope model and turns auto-sync ON, which <b>starts pushing the new rates to OwnerRez → Airbnb</b> and kicks an immediate first push.</div>
+  </div>
+
   <div class="card">
     <h2>Current occupancy % (actual, from OwnerRez)</h2>
     <div class="scroll"><table class="occ" id="occTable"></table></div>
@@ -337,6 +348,41 @@ async function saveTargets(){
   if(r.ok){ document.getElementById('tStatus').textContent="Targets saved ✓ · recomputing…"; await applyPreview(); document.getElementById('tStatus').textContent="Targets saved ✓ · calendar updated"; }
   else document.getElementById('tStatus').textContent="Save failed";
 }
+async function loadGoLiveStatus(){
+  try{ const j=await (await fetch(api('state'))).json();
+    const pm=j.pricing_model||'legacy'; const as=!!j.auto_sync; const le=(j.learning_enabled!==false);
+    const el=document.getElementById('goliveState'); if(!el) return;
+    const live=(pm==='glide'&&as);
+    el.innerHTML="Status — pricing model: <b>"+pm+"</b> &nbsp;·&nbsp; auto-sync: <b>"+(as?'ON':'OFF')+"</b> &nbsp;·&nbsp; learning: <b>"+(le?'on':'wiped / off')+"</b>"+(live?" &nbsp;·&nbsp; <b style='color:#4ade80'>🟢 LIVE</b>":" &nbsp;·&nbsp; <span class='muted'>not live yet</span>");
+  }catch(e){}
+}
+async function wipeLearning(){
+  if(!confirm("Wipe ALL accumulated learning data (demand / elasticity / pace history)?\n\nThis KEEPS your targets and knobs. Existing OwnerRez bookings still count toward current occupancy. This cannot be undone.")) return;
+  const s=document.getElementById('goliveStatus'); s.textContent="Wiping…";
+  try{
+    const r=await fetch(api('wipe_learning'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:'{}'});
+    const j=await r.json();
+    if(!r.ok||!j.ok){ s.textContent="Wipe failed: "+(j.error||('HTTP '+r.status)); return; }
+    const w=j.wiped||{};
+    s.textContent="✅ Wiped — events "+(w.events||0)+", learn buckets "+(w.learnBuckets||0)+", snapshot cells "+(w.snapCells||0)+", glide state "+(w.glideState||0)+". Targets + knobs kept. Now click 🟢 Go live.";
+    loadGoLiveStatus();
+  }catch(e){ s.textContent="Wipe error: "+e; }
+}
+async function goLive(){
+  if(!confirm("GO LIVE — enable glide-slope pricing AND turn auto-sync ON.\n\n\u26a0\ufe0f This STARTS pushing the new glide-slope rates to OwnerRez \u2192 Airbnb now and on every recurring run. Guests will see the new prices.\n\nMake sure you clicked \ud83e\uddf9 Wipe all learning data first. Proceed?")) return;
+  const s=document.getElementById('goliveStatus'); s.textContent="Enabling glide-slope + auto-sync…";
+  try{
+    const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({pricing_model:'glide',auto_sync:true,learning_enabled:false})});
+    const j=await r.json();
+    if(!r.ok){ s.textContent="Enable failed: "+(j.error||('HTTP '+r.status)); return; }
+    STATE.auto_sync=true; setSyncUI();
+    s.textContent="Enabled. Pushing first run to OwnerRez…";
+    const rr=await fetch(api('run'),{headers:{'x-app-password':PW}}); const jr=await rr.json();
+    if(jr.mode==='LIVE_SYNC'){ s.textContent="\ud83d\udfe2 LIVE — glide-slope pricing on. First push: "+(jr.sent||0)+" rates "+(jr.ownerrezOk?'sent to OwnerRez \u2713':'— OwnerRez error '+(jr.status||'')); }
+    else { s.textContent="Glide + auto-sync set, but first run returned "+(jr.mode||('HTTP '+rr.status))+" — "+(jr.note||jr.error||'check OwnerRez API credentials'); }
+    loadGoLiveStatus();
+  }catch(e){ s.textContent="Go-live error: "+e; }
+}
 async function toggleSync(){
   const next=!STATE.auto_sync;
   if(next && !confirm("Turn auto-sync ON? The engine will write prices to OwnerRez (now + nightly).")) return;
@@ -459,7 +505,7 @@ function boot(){
   HMIN=sY*12+sM; HMAX=eY*12+eM;
   document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611c`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
-  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning();
+  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning(); loadGoLiveStatus();
 }
 
 // ===== Public inquiry + Victor's gate toggles =====

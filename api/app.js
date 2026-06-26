@@ -652,7 +652,7 @@ module.exports=async(req,res)=>{
     const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
     if(action==="state"){
       if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=OWNERREZ_ICAL[u.orp]?1:0;
-        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,overrides:s.overrides||{},icalCount,occupancySource:'ownerrez',kb:s.kb||KB_SEED,messaging_enabled:!!s.messaging_enabled}); }
+        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,pricing_model:s.pricing_model||'legacy',learning_enabled:s.learning_enabled!==false,overrides:s.overrides||{},icalCount,occupancySource:'ownerrez',kb:s.kb||KB_SEED,messaging_enabled:!!s.messaging_enabled}); }
       if(req.method==="POST"){ if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
         let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{return res.status(400).json({error:"bad json"});}}
         const cur=await getState(); const p={};
