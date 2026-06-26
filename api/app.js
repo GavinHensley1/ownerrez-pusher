@@ -87,6 +87,7 @@ function signalFallback(sig,ds){ const k=Object.keys(sig); if(!k.length)return 0
   let s=k.filter(x=>{const e=new Date(x+"T00:00:00Z");return e.getUTCMonth()===mo&&e.getUTCDay()===dw;}).map(x=>sig[x]); if(s.length)return med(s);
   s=k.filter(x=>new Date(x+"T00:00:00Z").getUTCDay()===dw).map(x=>sig[x]); if(s.length)return med(s); return med(k.map(x=>sig[x])); }
 async function getSignal(){
+  if(redis){ const ov=await redis.get("parkside:signal_override"); if(ov!=null&&Number(ov)>0){ const v=Math.round(Number(ov)); const m={}; const _t=new Date(); for(let _i=0;_i<400;_i++){ const _d=new Date(_t); _d.setUTCDate(_d.getUTCDate()+_i); m[_d.toISOString().slice(0,10)]=v; } return m; } }
   if(redis){ const c=await redis.get("parkside:signal"); if(c&&c.day===new Date().toISOString().slice(0,10)) return c.map; }
   const key=process.env.PRICELABS_API_KEY; if(!key) throw new Error("PRICELABS_API_KEY not set");
   const id=process.env.PRICELABS_REF_ID||"486915", pms=process.env.PRICELABS_REF_PMS||"ownerrez";
@@ -210,6 +211,9 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
 function validate(es){ const ok=[]; for(const e of es){ const pid=Number(e.property_id), amt=Number(e.amount);
   if(Number.isInteger(pid)&&/^\d{4}-\d{2}-\d{2}$/.test(e.date)&&amt>=OV_MIN&&amt<=OV_MAX&&e.currency==="USD") ok.push({property_id:pid,date:e.date,amount:Math.round(amt),currency:"USD"}); } return ok; }
 async function pushOwnerRez(es){ const user=process.env.OWNERREZ_API_USER,token=process.env.OWNERREZ_API_TOKEN; if(!user||!token) throw new Error("missing OWNERREZ creds");
+  const SANE_MIN=Number(process.env.SANE_MIN_PUSH||110); const _flagged=[];
+  for(const _e of es){ const _amt=Math.round(Number(_e.amount)); const _base=Number(_e.base)||_amt; const _sane=Math.max(SANE_MIN,Math.round(_base*0.60)); if(_amt<_sane){ _flagged.push({property_id:_e.property_id,date:_e.date,was:_amt,base:Math.round(_base),raisedTo:_sane}); _e.amount=_sane; } }
+  if(_flagged.length){ console.warn("[price-sanity] raised "+_flagged.length+" sub-min push prices to >=$"+SANE_MIN,JSON.stringify(_flagged.slice(0,40))); if(redis){ try{ await redis.set("parkside:sanity_flags",{ts:Date.now(),count:_flagged.length,sane_min:SANE_MIN,items:_flagged.slice(0,200)}); }catch(_x){} } }
   const ok=validate(es); if(!ok.length) throw new Error("no valid entries"); const auth="Basic "+Buffer.from(`${user}:${token}`).toString("base64");
   const r=await fetch(ENDPOINT,{method:"PATCH",headers:{Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},body:JSON.stringify(ok)});
   const t=await r.text(); return {status:r.status,sent:ok.length,ownerrezOk:r.ok,body:t.slice(0,200)}; }
@@ -719,6 +723,13 @@ module.exports=async(req,res)=>{
       await redis.del("parkside:events"); await redis.del("parkside:learn"); await redis.del("parkside:snap"); await redis.del("parkside:gs");
       await setState({learning_enabled:false}); // bookings still count toward occupancy via iCal; they no longer feed demand/elasticity learning
       return res.status(200).json({ok:true,wiped:cleared,learning_enabled:false,note:"Demand/elasticity learning reset. OwnerRez bookings still count toward current occupancy (iCal). Targets + knobs preserved."});
+    }
+    if(action==="signal_override"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
+      if(b&&b.clear){ if(redis) await redis.del("parkside:signal_override"); return res.status(200).json({ok:true,cleared:true,note:"signal_override cleared - PriceLabs sourcing restored"}); }
+      const _v=Math.round(Number(b&&b.value)); if(!(_v>0)) return res.status(400).json({error:"value must be a positive number"});
+      if(redis) await redis.set("parkside:signal_override",_v); return res.status(200).json({ok:true,override:_v,note:"TEMP flat base override active - clear with {clear:true} once PriceLabs reflects the new base"});
     }
     if(action==="run"){
       const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x")) || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__x"));
