@@ -338,7 +338,7 @@ async function applyPreview(){
   const r=await fetch(api('preview'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targets:readTargets()})});
   const j=await r.json();
   if(j.error){ document.getElementById('tStatus').textContent="Error: "+j.error; return; }
-  RATES={}; for(const e of j.rates){ (RATES[e.property_id]??={})[e.date]={a:e.amount,o:e.overridden,g:e.orphan}; }
+  RATES={}; for(const e of j.rates){ (RATES[e.property_id]??={})[e.date]={a:e.amount,o:e.overridden,g:(e.lm>0)||(e.appliedMult!=null&&e.appliedMult<1)}; }
   document.getElementById('tStatus').textContent=`Preview: ${j.count} nights, $${j.min}–$${j.max} (avg $${j.avg})`+(j.coldStart?" · no OwnerRez bookings yet → priced at market":"")+(j.overrideCount?` · ${j.overrideCount} pinned`:"");
   if(j.pace) renderPaceTable(OCC.months, j.pace, j.paceLearn);
   render();
