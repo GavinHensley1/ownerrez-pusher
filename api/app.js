@@ -686,7 +686,7 @@ module.exports=async(req,res)=>{
       const st=await getState(); const targets=(b&&b.targets)||st.targets; const sig=await getSignal(); const learned=await getLearned();
       let occ; if(b&&typeof b.mockOcc==="number") occ={hasData:true,mock:b.mockOcc};
       else { const od=await getOccData(st,today,days,true); occ={hasData:od.booked.total>0, agg:od.agg}; }
-      const rates=compute(sig,targets,today,today,days,occ,st.overrides,learned); const amts=rates.map(r=>r.amount);
+      const model=(st.pricing_model==="glide")?"glide":"legacy";let rates;if(model==="glide"){const gsState=(redis&&await redis.get("parkside:gs"))||{};rates=computeGlide(sig,targets,today,today,days,occ,st.overrides,gsState,{mode:"step"}).rates;}else{rates=compute(sig,targets,today,today,days,occ,st.overrides,learned);} const amts=rates.map(r=>r.amount);
       const pace = occ.agg ? computePace(occ.agg.poolAgg, targets, learned, today, monthList(today,days)) : null;
       const paceLearn={weekend:learned.weekend.n||0,weekday:learned.weekday.n||0,blendWeight:Math.min(0.8,((learned.weekend.n||0)+(learned.weekday.n||0))/600).toFixed(2)};
       return res.status(200).json({mode:"PREVIEW",wrote:false,count:rates.length,coldStart:!occ.hasData,min:Math.min(...amts),max:Math.max(...amts),avg:Math.round(amts.reduce((a,c)=>a+c,0)/amts.length),overrideCount:rates.filter(r=>r.overridden).length,pace,paceLearn,rates});
