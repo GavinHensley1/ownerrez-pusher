@@ -94,19 +94,17 @@
 </header>
 
 <div class="wrap" id="main" style="display:none">
-  <div class="card" id="banner" style="border-color:var(--warn)">
-    <strong>Preview mode.</strong> <span class="muted">Auto-sync is OFF — edit targets / set overrides and review here; nothing is written to OwnerRez until you turn auto-sync ON.</span>
-  </div>
-
-  <div class="card" id="golive" style="border-color:#2f7d4f">
-    <h2>🚀 Go live — glide-slope pricing</h2>
-    <div class="legend" id="goliveState" style="margin-bottom:10px">Loading status…</div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-      <button class="ghost" onclick="wipeLearning()">🧹 Wipe all learning data</button>
-      <button onclick="goLive()" style="background:#2f7d4f;border-color:#2f7d4f;color:#fff">🟢 Go live — enable glide-slope pricing</button>
-      <span id="goliveStatus" class="muted" style="align-self:center"></span>
+  <div class="card" id="statusCard">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">
+      <div style="min-width:230px">
+        <div style="font-weight:700;font-size:16px" id="statusLine">Pricing status…</div>
+        <div class="legend" id="statusSub" style="margin-top:4px"></div>
+        <div class="legend" id="statusGap" style="margin-top:6px"></div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="ghost" onclick="syncNow()" id="pushNow">⟳ Push now</button>
+      </div>
     </div>
-    <div class="legend" style="margin-top:10px"><b>Order (do this top to bottom):</b> 1) click <b>🧹 Wipe all learning data</b> first — clears the old demand/learning history, keeps your targets &amp; knobs (existing OwnerRez bookings still count toward occupancy). 2) then click <b>🟢 Go live</b> — switches pricing to the glide-slope model and turns auto-sync ON, which <b>starts pushing the new rates to OwnerRez → Airbnb</b> and kicks an immediate first push.</div>
   </div>
 
   <div class="card">
@@ -116,12 +114,6 @@
     <h2 style="margin-top:18px">Resort pace vs target (ahead ▲ / behind ▼)</h2>
     <div class="scroll"><table class="occ" id="paceTable"></table></div>
     <div class="legend" id="paceNote"></div>
-  </div>
-
-  <div class="card">
-    <h2>Learning status — self-tuning levers</h2>
-    <div class="legend" id="learnNote">Loading…</div>
-    <div class="scroll"><table class="occ" id="learnTable" style="margin-top:8px"></table></div>
   </div>
 
   <div class="card">
@@ -147,7 +139,42 @@
     </div>
     <div class="cal" id="dows"></div>
     <div class="cal" id="grid"></div>
-    <div class="legend">📌 purple = manual override (engine + cron never change it). Grey dashed = already booked on a channel (imported into OwnerRez).</div>
+    <div class="legend">Click any day → full price breakdown + pin/override. 📌 purple = manual override (engine + cron never change it). Grey dashed = already booked. <span style="color:#e6b85c">GAP</span> = orphan-night discount.</div>
+  </div>
+
+  <div class="card" id="advCard">
+    <h2 style="cursor:pointer;user-select:none" onclick="toggleAdv()">⚙ Advanced / setup <span id="advCaret" style="color:var(--mut)">▸</span></h2>
+    <div id="advBody" style="display:none">
+      <div class="legend" id="advState">…</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px">
+        <button class="ghost" onclick="setModelGlide()">Set model: glide</button>
+        <button class="ghost" onclick="wipeLearning()">🧹 Wipe learning data</button>
+        <span id="goliveStatus" class="muted" style="align-self:center"></span>
+      </div>
+      <h2 style="margin-top:18px">Learning status — self-tuning levers</h2>
+      <div class="legend" id="learnNote">Loading…</div>
+      <div class="scroll"><table class="occ" id="learnTable" style="margin-top:8px"></table></div>
+    </div>
+  </div>
+</div>
+
+<!-- Per-day price breakdown + override -->
+<div id="bdModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60;align-items:center;justify-content:center;padding:16px">
+  <div class="card" style="max-width:460px;width:100%;max-height:88vh;overflow:auto;margin:0">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <h2 id="bdTitle" style="margin:0;text-transform:none;letter-spacing:0;color:var(--ink);font-size:15px">Price breakdown</h2>
+      <button class="seg-x" onclick="closeBd()">✕</button>
+    </div>
+    <div id="bdBody" style="margin-top:12px;font-size:13px">Loading…</div>
+    <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+      <div class="muted" style="font-size:12px;margin-bottom:6px">Override this night — purple pin; engine &amp; cron never change it</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input id="bdPrice" type="number" min="50" max="1000" placeholder="$ price" style="width:96px">
+        <button onclick="bdSavePin()">📌 Pin price</button>
+        <button class="ghost" onclick="bdClearPin()">Clear pin</button>
+        <span id="bdPinStatus" class="muted"></span>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -295,7 +322,37 @@ function setSyncUI(){
   document.getElementById('syncState').textContent=on?'ON':'OFF';
   document.getElementById('syncState').style.background=on?'var(--ok)':'#3a4759';
   document.getElementById('syncNow').style.display=on?'inline-block':'none';
-  document.getElementById('banner').style.display=on?'none':'block';
+  updateStatusCard();
+}
+function fmtAgo(ts){ if(!ts) return null; const s=Math.round((Date.now()-ts)/1000);
+  if(s<90) return s+'s ago'; const m=Math.round(s/60); if(m<90) return m+'m ago'; const h=Math.round(m/60); if(h<36) return h+'h ago'; return Math.round(h/24)+'d ago'; }
+function updateStatusCard(){
+  if(!STATE) return; const on=!!STATE.auto_sync; const glide=(STATE.pricing_model==='glide'); const live=on&&glide;
+  const line=document.getElementById('statusLine'); const sub=document.getElementById('statusSub'); const gapEl=document.getElementById('statusGap');
+  if(line) line.innerHTML = live ? '🟢 Pricing LIVE <span class="muted" style="font-weight:400">— glide-slope, auto-syncing to OwnerRez</span>'
+                                 : (on ? '🟢 Auto-sync ON <span class="muted" style="font-weight:400">— model: '+(STATE.pricing_model||'legacy')+'</span>'
+                                       : '⏸ Auto-sync OFF <span class="muted" style="font-weight:400">— prices computed but not pushed</span>');
+  const lr=STATE.last_run; const ago=lr&&lr.ts?fmtAgo(lr.ts):null;
+  if(sub) sub.innerHTML = (ago?('Last push '+ago+' · '+(lr.sent||0)+' rates'+(lr.gapNights?(' · '+lr.gapNights+' gap nights'):'')):'No push recorded yet')
+    + ' · <span style="cursor:pointer;text-decoration:underline" onclick="toggleSync()">'+(on?'turn auto-sync off':'turn auto-sync on')+'</span>';
+  if(gapEl){ const g=!!STATE.gap_enabled;
+    gapEl.innerHTML = 'Gap-night discounting: <b style="color:'+(g?'#4ade80':'var(--warn)')+'">'+(g?'ON':'OFF')+'</b> '
+      +'<button class="ghost" style="padding:3px 9px;font-size:12px;margin-left:6px" onclick="toggleGap('+(!g)+')">'+(g?'Disable':'Enable')+'</button>'
+      +'<span id="gapToggleStatus" class="muted" style="margin-left:8px"></span>'; }
+}
+function toggleAdv(){ const b=document.getElementById('advBody'); const c=document.getElementById('advCaret'); const open=b.style.display!=='none'; b.style.display=open?'none':'block'; c.textContent=open?'▸':'▾'; }
+async function setModelGlide(){
+  if(!confirm("Switch pricing model to glide-slope? (Recommended — the active model.)")) return;
+  const s=document.getElementById('goliveStatus'); s.textContent='Setting…';
+  const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({pricing_model:'glide'})});
+  if(r.ok){ STATE.pricing_model='glide'; s.textContent='Model: glide ✓'; updateStatusCard(); await applyPreview(); } else s.textContent='Failed';
+}
+async function toggleGap(on){
+  if(on && !confirm("Enable gap-night discounting?\n\nOrphan/short-gap nights (1–3 nights trapped between bookings) will be discounted (1-night −30%, 2 −18%, 3 −8%; weekend halved) and their min-stay dropped, on the next push.\n\nReview the gap preview first. Proceed?")) return;
+  const st=document.getElementById('gapToggleStatus'); if(st) st.textContent='…';
+  const r=await fetch(api('gap_toggle'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({enabled:!!on})});
+  const j=await r.json().catch(()=>({}));
+  if(r.ok&&j.ok){ STATE.gap_enabled=!!on; updateStatusCard(); await applyPreview(); } else if(st) st.textContent=(j.error||'failed');
 }
 function setMsgUI(){
   const on=!!STATE.messaging_enabled;
@@ -338,7 +395,7 @@ async function applyPreview(){
   const r=await fetch(api('preview'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targets:readTargets()})});
   const j=await r.json();
   if(j.error){ document.getElementById('tStatus').textContent="Error: "+j.error; return; }
-  RATES={}; for(const e of j.rates){ (RATES[e.property_id]??={})[e.date]={a:e.amount,o:e.overridden,g:(e.lm>0)||(e.appliedMult!=null&&e.appliedMult<1)}; }
+  RATES={}; for(const e of j.rates){ (RATES[e.property_id]??={})[e.date]={a:e.amount,o:e.overridden,g:(e.lm>0)||(e.appliedMult!=null&&e.appliedMult<1),gp:(e.gapApplied?{t:e.gapTier,d:Math.round(e.gapDisc*100)}:null)}; }
   document.getElementById('tStatus').textContent=`Preview: ${j.count} nights, $${j.min}–$${j.max} (avg $${j.avg})`+(j.coldStart?" · no OwnerRez bookings yet → priced at market":"")+(j.overrideCount?` · ${j.overrideCount} pinned`:"");
   if(j.pace) renderPaceTable(OCC.months, j.pace, j.paceLearn);
   render();
@@ -351,9 +408,11 @@ async function saveTargets(){
 async function loadGoLiveStatus(){
   try{ const j=await (await fetch(api('state'))).json();
     const pm=j.pricing_model||'legacy'; const as=!!j.auto_sync; const le=(j.learning_enabled!==false);
-    const el=document.getElementById('goliveState'); if(!el) return;
+    // keep STATE in sync so the status card reflects live server state
+    STATE.pricing_model=pm; STATE.auto_sync=as; STATE.gap_enabled=!!j.gap_enabled; STATE.last_run=j.last_run; updateStatusCard();
+    const el=document.getElementById('advState'); if(!el) return;
     const live=(pm==='glide'&&as);
-    el.innerHTML="Status — pricing model: <b>"+pm+"</b> &nbsp;·&nbsp; auto-sync: <b>"+(as?'ON':'OFF')+"</b> &nbsp;·&nbsp; learning: <b>"+(le?'on':'wiped / off')+"</b>"+(live?" &nbsp;·&nbsp; <b style='color:#4ade80'>🟢 LIVE</b>":" &nbsp;·&nbsp; <span class='muted'>not live yet</span>");
+    el.innerHTML="Pricing model: <b>"+pm+"</b> &nbsp;·&nbsp; auto-sync: <b>"+(as?'ON':'OFF')+"</b> &nbsp;·&nbsp; learning: <b>"+(le?'on':'wiped / off')+"</b> &nbsp;·&nbsp; gaps: <b>"+(j.gap_enabled?'on':'off')+"</b>"+(live?" &nbsp;·&nbsp; <b style='color:#4ade80'>🟢 LIVE</b>":" &nbsp;·&nbsp; <span class='muted'>not live yet</span>");
   }catch(e){}
 }
 async function wipeLearning(){
@@ -394,21 +453,69 @@ async function syncNow(){
   document.getElementById('syncNow').textContent="Syncing…";
   const r=await fetch(api('run'),{headers:{'x-app-password':PW}}); const j=await r.json();
   document.getElementById('syncNow').textContent="Sync now";
-  alert(j.mode==='LIVE_SYNC'?`Pushed ${j.sent} rates to OwnerRez (status ${j.ownerrezStatus}). ${j.overrides} pinned.`:JSON.stringify(j));
+  alert(j.mode==='LIVE_SYNC'?`Pushed ${j.sent} rates to OwnerRez (HTTP ${j.status}). ${j.overrides} pinned${j.gapNights?(', '+j.gapNights+' gap nights'):''}.`:(j.note||JSON.stringify(j)));
+  if(STATE){ try{ const s=await (await fetch(api('state'))).json(); STATE.last_run=s.last_run; updateStatusCard(); }catch(e){} }
 }
 function isBooked(unit,ds){ return !!(OCC&&OCC.byUnit&&OCC.byUnit[unit]&&OCC.byUnit[unit].booked&&OCC.byUnit[unit].booked.includes(ds)); }
+let BD={unit:null,date:null};
 async function onCell(ds){
   if(isBooked(view.unit,ds)){ alert("This night is already booked on a channel — not for sale."); return; }
-  const unit=view.unit, cur=(RATES[unit]&&RATES[unit][ds])||{};
-  const uname=UNITS.find(u=>u[0]===unit)[1];
-  const val=prompt(`${uname} — ${ds}\nCurrent: $${cur.a}${cur.o?' (pinned)':''}\n\nEnter a fixed price to pin (engine won't change it).\nLeave blank + OK to CLEAR a pin and return to engine pricing.`, cur.o?cur.a:"");
-  if(val===null) return;
-  let body;
-  if(val.trim()==="") body={overrideClear:{property_id:Number(unit),date:ds}};
-  else { const n=Math.round(Number(val)); if(!(n>=50&&n<=1000)){ alert("Enter a number between 50 and 1000."); return; } body={overrideSet:{property_id:Number(unit),date:ds,amount:n}}; }
-  const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(body)});
-  if(!r.ok){ alert("Save failed (auth?)."); return; }
-  await applyPreview();
+  BD={unit:view.unit,date:ds};
+  const uname=UNITS.find(u=>u[0]===view.unit)[1];
+  document.getElementById('bdTitle').textContent=uname+' — '+ds;
+  document.getElementById('bdBody').innerHTML='Loading…';
+  document.getElementById('bdPinStatus').textContent='';
+  const cur=(RATES[view.unit]&&RATES[view.unit][ds])||{};
+  document.getElementById('bdPrice').value=cur.o?cur.a:'';
+  document.getElementById('bdModal').style.display='flex';
+  try{
+    const j=await (await fetch(api('breakdown')+'&unit='+view.unit+'&date='+ds)).json();
+    document.getElementById('bdBody').innerHTML = j.error ? ('Error: '+j.error) : renderBreakdown(j);
+  }catch(e){ document.getElementById('bdBody').innerHTML='Error: '+e.message; }
+}
+function closeBd(){ document.getElementById('bdModal').style.display='none'; }
+function bdRow(label,val,strong){ return "<div style='display:flex;justify-content:space-between;gap:12px;padding:3px 0'><span class='muted'>"+label+"</span><span"+(strong?" style='font-weight:700;color:var(--ink)'":"")+">"+val+"</span></div>"; }
+function bdHead(t,color){ return "<div style='font-weight:700;color:"+(color||'var(--ink)')+";margin:9px 0 3px'>"+t+"</div>"; }
+function renderBreakdown(j){
+  const m=j.glide||{},lm=j.lastMinute||{},g=j.gapNight||{},c=j.clamp||{},o=j.override||{},f=j.final||{},s=j.signal||{};
+  if(j.booked) return "<div class='muted'>This night is booked — not for sale.</div>";
+  let h=""; let step=1;
+  h+=bdHead(step+++" · Base price");
+  h+=bdRow('Signal ('+(s.source||'PriceLabs')+')','$'+s.value);
+  h+=bdRow('Unit premium','×'+j.premium);
+  h+=bdRow('Seasonal base','$'+j.base,true);
+  h+=bdHead(step+++" · Glide (pace)");
+  h+=bdRow('Resort occupancy', m.poolOcc==null?'—':Math.round(m.poolOcc*100)+'%');
+  h+=bdRow('Pace reference', m.refTarget==null?'—':Math.round(m.refTarget*100)+'%');
+  h+=bdRow('Gap vs pace', m.gapVsPace==null?'—':((m.gapVsPace>0?'+':'')+Math.round(m.gapVsPace*100)+'% '+(m.gapVsPace>0?'behind→soften':'ahead→lift')));
+  h+=bdRow('Applied multiplier', m.appliedMult==null?'—':'×'+m.appliedMult);
+  if(lm.lm>0){ h+=bdHead(step+++" · Last-minute"); h+=bdRow('Lead time',lm.lead+' days'); h+=bdRow('Discount','−'+Math.round(lm.lm*100)+'%'); }
+  if(g.tier>0){ h+=bdHead(step+++" · Gap night",'#e6b85c');
+    h+=bdRow('Gap size',g.tier+'-night'+(g.hasWeekend?' (incl. weekend)':' (mid-week)'));
+    h+=bdRow('Gap discount','−'+g.discPct+'%');
+    h+=bdRow('Reconcile',(g.deeperOf||'—')+' (deeper-of)');
+    h+=bdRow('Status', g.live?(g.appliedNow?"<span style='color:#4ade80'>ACTIVE</span>":"live (last-minute deeper)"):"<span style='color:var(--warn)'>preview only — not enabled</span>");
+    h+=bdRow('If enabled','$'+g.ifEnabledPrice+' · min-stay '+g.ifEnabledMinNights); }
+  h+=bdHead(step+++" · Clamp & guard");
+  h+=bdRow('Floor / ceiling','$'+c.floor+' – $'+c.ceil+(j.peak?' (peak)':''));
+  h+=bdRow('Sanity min','$'+c.saneMin+(g.tier>0?' · gap exempt':''));
+  if(o.pinned){ h+=bdHead('Manual override','var(--pin)'); h+=bdRow('Pinned at','$'+o.amount,true); }
+  h+="<div style='border-top:1px solid var(--line);margin-top:10px;padding-top:8px'>"+bdRow('FINAL PUSHED PRICE','$'+f.price+(f.minNights?(' · min-stay '+f.minNights):''),true)+"</div>";
+  return h;
+}
+async function bdSavePin(){
+  const n=Math.round(Number(document.getElementById('bdPrice').value));
+  if(!(n>=50&&n<=1000)){ document.getElementById('bdPinStatus').textContent='Enter 50–1000'; return; }
+  document.getElementById('bdPinStatus').textContent='Saving…';
+  const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({overrideSet:{property_id:Number(BD.unit),date:BD.date,amount:n}})});
+  if(!r.ok){ document.getElementById('bdPinStatus').textContent='Save failed (auth?)'; return; }
+  document.getElementById('bdPinStatus').textContent='Pinned ✓'; await applyPreview(); closeBd();
+}
+async function bdClearPin(){
+  document.getElementById('bdPinStatus').textContent='Clearing…';
+  const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({overrideClear:{property_id:Number(BD.unit),date:BD.date}})});
+  if(!r.ok){ document.getElementById('bdPinStatus').textContent='Clear failed (auth?)'; return; }
+  document.getElementById('bdPinStatus').textContent='Cleared ✓'; await applyPreview(); closeBd();
 }
 function moveMonth(d){ let idx=view.y*12+view.m+d; idx=Math.max(HMIN,Math.min(HMAX,idx)); view.y=Math.floor(idx/12); view.m=idx%12; render(); }
 function render(){
@@ -423,8 +530,9 @@ function render(){
     const dow=new Date(Date.UTC(view.y,view.m,d)).getUTCDay(); const we=(dow===5||dow===6);
     const c=map[ds]; const p=c&&c.a; const o=c&&c.o; const booked=isBooked(view.unit,ds);
     if(!c){ cells+=`<div class='day out'><div class='d'>${d}</div><div class='p'>·</div></div>`; continue; }
-    const gp=c&&c.g&&!booked; if(p&&!booked){sum+=p;n++;mn=Math.min(mn,p);mx=Math.max(mx,p); if(o)pins++;} if(booked)bk++;
-    cells+=`<div class='day${we?' we':''}${o?' pin':''}${booked?' booked':''}${gp?' gap':''}' onclick="onCell('${ds}')">${booked?"<span class='bk'>booked</span>":""}${gp&&!o?"<span class='gapmark' title='orphan/short gap — discounted to fill'>gap↓</span>":""}${o&&!booked?"<span class='pinmark'>📌</span>":""}<div class='d'>${d}</div><div class='p'>${p?'$'+p:'—'}</div></div>`;
+    const gpInfo=c&&c.gp&&!booked; const softDisc=c&&c.g&&!booked; if(p&&!booked){sum+=p;n++;mn=Math.min(mn,p);mx=Math.max(mx,p); if(o)pins++;} if(booked)bk++;
+    const gapBadge = gpInfo&&!o ? `<span class='gapmark' title='orphan ${c.gp.t}-night gap — discounted to fill'>GAP −${c.gp.d}%·${c.gp.t}n</span>` : (softDisc&&!o&&!gpInfo ? "" : "");
+    cells+=`<div class='day${we?' we':''}${o?' pin':''}${booked?' booked':''}${gpInfo?' gap':''}' onclick="onCell('${ds}')">${booked?"<span class='bk'>booked</span>":""}${gapBadge}${o&&!booked?"<span class='pinmark'>📌</span>":""}<div class='d'>${d}</div><div class='p'>${p?'$'+p:'—'}</div></div>`;
   }
   document.getElementById('grid').innerHTML=cells;
   document.getElementById('calStats').textContent=(n?`avg $${Math.round(sum/n)} · $${mn}–$${mx}`:"no preview")+(pins?` · ${pins} pinned`:"")+(bk?` · ${bk} booked`:"");

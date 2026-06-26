@@ -682,6 +682,7 @@ async function decideApproval(id, decision, overrideAnswer){
 
 module.exports=async(req,res)=>{
   try{
+    res.setHeader("Cache-Control","no-store, max-age=0, must-revalidate"); res.setHeader("CDN-Cache-Control","no-store"); res.setHeader("Vercel-CDN-Cache-Control","no-store");
     const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
     if(action==="state"){
       if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=OWNERREZ_ICAL[u.orp]?1:0;
