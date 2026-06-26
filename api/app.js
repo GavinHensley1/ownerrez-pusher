@@ -33,6 +33,12 @@ const GS={GAIN:0.50, STEP:0.06, BAND_NEAR:0.15, USE_PACE_REF:true};
 // LAST-MINUTE discount: nights within WINDOW days of check-in get an extra discount that scales with proximity AND
 // how far BEHIND pace the month is (empty+imminent -> full MAX; full month -> ~0). Capped -> a nudge, not a fire-sale.
 const LM={WINDOW:14, MAX:0.18};
+// GLIDE-MODE orphan-gap discounting (separate from legacy GAP_SEED). Depth by run length (weekday);
+// gaps that include a weekend night discount HALF as deep (easier to fill). 4+ nights: no gap discount.
+// Application is gated behind redis flag parkside:gap_enabled so a deploy never auto-pushes gap prices.
+const GAP_DISC={1:0.30, 2:0.18, 3:0.08};
+const GAP_WEEKEND_FACTOR=0.5;
+const GAP_RESET_MIN=Number(process.env.GAP_RESET_MIN||2); // min-stay restored to a night once it stops being a gap
 function median(a){a=a.slice().sort((x,y)=>x-y);const n=a.length;return n?(n%2?a[(n-1)/2]:(a[n/2-1]+a[n/2])/2):0;}
 // Seed booking-pace curve = fraction of FINAL bookings on the books by `lead` days out (leisure STR).
 const PACE_SEED={ // expected fraction of FINAL bookings already on the books by `lead` days out.
@@ -179,7 +185,7 @@ function compute(signalMap,targets,today,startDate,days,occ,overrides,learned){
 function glideRef(target,lead,dtN){ return GS.USE_PACE_REF ? target*paceFrac(lead,dtN,null) : target; }
 function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsState,opts){
   const start=new Date(startDate+"T00:00:00Z"); const t0=new Date(today+"T00:00:00Z"); const out=[]; overrides=overrides||{}; gsState=gsState||{}; opts=opts||{};
-  const mode=opts.mode||"steady"; const gsNext={...gsState};
+  const mode=opts.mode||"steady"; const gsNext={...gsState}; const applyGap=opts.applyGap===true;
   const sv=Object.values(signalMap).filter(v=>v>0); const peakThr=(sv.length?median(sv):FLOOR)*MODEL.PEAK_MULT;
   const poolCache={};
   for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const mo=d.getUTCMonth()+1; const we=isWe(d); const dt=we?1:0; const dtN=we?"weekend":"weekday";
@@ -189,30 +195,53 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     const ck=mk+"|"+dt; if(poolCache[ck]===undefined){ const pa=occ.agg&&occ.agg.poolAgg[mk]&&occ.agg.poolAgg[mk][dt]; poolCache[ck]=pa&&pa.t?pa.b/pa.t:0; }
     const poolOcc=occ.hasData?poolCache[ck]:null;
     const target=we?targets[mo].we:targets[mo].wd; const ref=glideRef(target,lead,dtN);
-    let gap=null,desired=1,lm=0;
-    if(occ.hasData){ gap=Math.max(-1,Math.min(1,ref-poolOcc)); desired=1-GS.GAIN*gap;
-      if(lead<=LM.WINDOW){ const prox=(LM.WINDOW-lead)/LM.WINDOW; const empt=Math.max(0,Math.min(1,ref-poolOcc)); lm=LM.MAX*prox*empt; desired=desired*(1-lm); }
-      if(peak) desired=Math.max(1,desired); } // never discount a peak (top-of-year) night below seasonal base
+    // desiredBase = pace-only multiplier (NO last-minute, NO gap). lm computed at night level; gap is per-unit.
+    let gap=null,desiredBase=1,lm=0;
+    if(occ.hasData){ gap=Math.max(-1,Math.min(1,ref-poolOcc)); desiredBase=1-GS.GAIN*gap;
+      if(lead<=LM.WINDOW){ const prox=(LM.WINDOW-lead)/LM.WINDOW; const empt=Math.max(0,Math.min(1,ref-poolOcc)); lm=LM.MAX*prox*empt; } }
     for(const u of UNITS){ const key=u.orp+"|"+ds; const gkey=u.orp+"|"+mk+"|"+dt;
       const prem=UNIT_PREM[u.orp]||1.0; const base=Math.round(sig*prem); const floorMult=FLOOR/base, ceilMult=ceil/base;
-      let amount,overridden=false,applied=null,desiredC=null;
+      let amount,overridden=false,applied=null,desiredC=null,minNights=null;
+      // per-unit orphan-gap lookup (forward-only detection from buildAgg): {runLen,hasWeekend}
+      const gi=(occ.agg&&occ.agg.gaps&&occ.agg.gaps[u.orp])?occ.agg.gaps[u.orp][ds]:null;
+      let gapTier=0,gapHasWe=false,gapDisc=0;
+      if(gi){ gapTier=gi.runLen; gapHasWe=!!gi.hasWeekend; gapDisc=(GAP_DISC[gapTier]||0)*(gapHasWe?GAP_WEEKEND_FACTOR:1); }
+      const gapApplied=applyGap && gapDisc>0 && occ.hasData;
+      // deeper-of: gap vs last-minute, never stacked
+      const effDisc=Math.max(gapApplied?gapDisc:0, lm);
+      const discSource=(effDisc<=0)?null:((gapApplied&&gapDisc>=lm)?"gap":"last-minute");
       if(overrides[key]!=null){ amount=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(overrides[key])))); overridden=true; }
       else if(!occ.hasData){ amount=Math.max(FLOOR,Math.min(ceil,base)); } // cold start: seasonal base only
-      else { desiredC=Math.max(floorMult,Math.min(ceilMult,desired));
+      else {
+        // NORMAL eased glide (feeds the monthly glide state) — last-minute only, unchanged from before
+        let desiredNorm=desiredBase*(1-lm); if(peak) desiredNorm=Math.max(1,desiredNorm);
+        desiredC=Math.max(floorMult,Math.min(ceilMult,desiredNorm));
         const prev=(gsState[gkey]!=null)?gsState[gkey]:1.0;
         const step=Math.max(-GS.STEP,Math.min(GS.STEP,desiredC-prev)); const stepped=Math.max(floorMult,Math.min(ceilMult,prev+step));
-        gsNext[gkey]=stepped; applied=(mode==="step")?stepped:desiredC;
-        amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*applied))); }
-      out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,
+        gsNext[gkey]=stepped; // gap discounts NEVER corrupt the eased monthly state
+        if(gapApplied){ // gap night: deeper-of discount, applied immediately (no STEP easing — short window to fill)
+          let desiredGap=desiredBase*(1-effDisc); if(peak) desiredGap=Math.max(1,desiredGap);
+          applied=Math.max(floorMult,Math.min(ceilMult,desiredGap)); minNights=gapTier;
+        } else { applied=(mode==="step")?stepped:desiredC; }
+        amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*applied)));
+      }
+      out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,minNights,gapApplied,
+        gapTier,gapHasWeekend:gapHasWe,gapDisc:Number(gapDisc.toFixed(3)),effDisc:Number(effDisc.toFixed(3)),discSource,
         poolOcc:poolOcc==null?null:Number(poolOcc.toFixed(3)),ref:Number(ref.toFixed(3)),gap:gap==null?null:Number(gap.toFixed(3)),
         lead,lm:Number(lm.toFixed(3)),desiredMult:desiredC==null?null:Number(desiredC.toFixed(3)),appliedMult:applied==null?null:Number(applied.toFixed(3))}); } }
   return {rates:out,gsNext};
 }
 function validate(es){ const ok=[]; for(const e of es){ const pid=Number(e.property_id), amt=Number(e.amount);
-  if(Number.isInteger(pid)&&/^\d{4}-\d{2}-\d{2}$/.test(e.date)&&amt>=OV_MIN&&amt<=OV_MAX&&e.currency==="USD") ok.push({property_id:pid,date:e.date,amount:Math.round(amt),currency:"USD"}); } return ok; }
+  if(Number.isInteger(pid)&&/^\d{4}-\d{2}-\d{2}$/.test(e.date)&&amt>=OV_MIN&&amt<=OV_MAX&&e.currency==="USD"){
+    const o={property_id:pid,date:e.date,amount:Math.round(amt),currency:"USD"};
+    const mn=Number(e.minNights); if(Number.isInteger(mn)&&mn>=1&&mn<=30) o.min_nights=mn; // only sent on gap nights / gap-resets; omitted elsewhere so OwnerRez keeps its own min-stay
+    ok.push(o); } } return ok; }
 async function pushOwnerRez(es){ const user=process.env.OWNERREZ_API_USER,token=process.env.OWNERREZ_API_TOKEN; if(!user||!token) throw new Error("missing OWNERREZ creds");
   const SANE_MIN=Number(process.env.SANE_MIN_PUSH||110); const _flagged=[];
-  for(const _e of es){ const _amt=Math.round(Number(_e.amount)); const _base=Number(_e.base)||_amt; const _sane=Math.max(SANE_MIN,Math.round(_base*0.60)); if(_amt<_sane){ _flagged.push({property_id:_e.property_id,date:_e.date,was:_amt,base:Math.round(_base),raisedTo:_sane}); _e.amount=_sane; } }
+  for(const _e of es){ const _amt=Math.round(Number(_e.amount)); const _base=Number(_e.base)||_amt;
+    // gap nights are EXEMPT from the $110 sane-min (deliberate orphan discount) but keep the hard $99 FLOOR
+    const _sane = _e.gapApplied ? FLOOR : Math.max(SANE_MIN,Math.round(_base*0.60));
+    if(_amt<_sane){ _flagged.push({property_id:_e.property_id,date:_e.date,was:_amt,base:Math.round(_base),raisedTo:_sane}); _e.amount=_sane; } }
   if(_flagged.length){ console.warn("[price-sanity] raised "+_flagged.length+" sub-min push prices to >=$"+SANE_MIN,JSON.stringify(_flagged.slice(0,40))); if(redis){ try{ await redis.set("parkside:sanity_flags",{ts:Date.now(),count:_flagged.length,sane_min:SANE_MIN,items:_flagged.slice(0,200)}); }catch(_x){} } }
   const ok=validate(es); if(!ok.length) throw new Error("no valid entries"); const auth="Basic "+Buffer.from(`${user}:${token}`).toString("base64");
   const r=await fetch(ENDPOINT,{method:"PATCH",headers:{Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},body:JSON.stringify(ok)});
@@ -656,7 +685,9 @@ module.exports=async(req,res)=>{
     const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
     if(action==="state"){
       if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=OWNERREZ_ICAL[u.orp]?1:0;
-        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,pricing_model:s.pricing_model||'legacy',learning_enabled:s.learning_enabled!==false,overrides:s.overrides||{},icalCount,occupancySource:'ownerrez',kb:s.kb||KB_SEED,messaging_enabled:!!s.messaging_enabled}); }
+        const gapEnabled=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
+        const lastRun=redis?(await redis.get("parkside:last_run")):null;
+        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,pricing_model:s.pricing_model||'legacy',learning_enabled:s.learning_enabled!==false,overrides:s.overrides||{},icalCount,occupancySource:'ownerrez',kb:s.kb||KB_SEED,messaging_enabled:!!s.messaging_enabled,gap_enabled:gapEnabled,last_run:lastRun}); }
       if(req.method==="POST"){ if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
         let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{return res.status(400).json({error:"bad json"});}}
         const cur=await getState(); const p={};
@@ -690,7 +721,8 @@ module.exports=async(req,res)=>{
       const st=await getState(); const targets=(b&&b.targets)||st.targets; const sig=await getSignal(); const learned=await getLearned();
       let occ; if(b&&typeof b.mockOcc==="number") occ={hasData:true,mock:b.mockOcc};
       else { const od=await getOccData(st,today,days,true); occ={hasData:od.booked.total>0, agg:od.agg}; }
-      const model=(st.pricing_model==="glide")?"glide":"legacy";let rates;if(model==="glide"){const gsState=(redis&&await redis.get("parkside:gs"))||{};rates=computeGlide(sig,targets,today,today,days,occ,st.overrides,gsState,{mode:"step"}).rates;}else{rates=compute(sig,targets,today,today,days,occ,st.overrides,learned);} const amts=rates.map(r=>r.amount);
+      const gapOn=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
+      const model=(st.pricing_model==="glide")?"glide":"legacy";let rates;if(model==="glide"){const gsState=(redis&&await redis.get("parkside:gs"))||{};rates=computeGlide(sig,targets,today,today,days,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn}).rates;}else{rates=compute(sig,targets,today,today,days,occ,st.overrides,learned);} const amts=rates.map(r=>r.amount);
       const pace = occ.agg ? computePace(occ.agg.poolAgg, targets, learned, today, monthList(today,days)) : null;
       const paceLearn={weekend:learned.weekend.n||0,weekday:learned.weekday.n||0,blendWeight:Math.min(0.8,((learned.weekend.n||0)+(learned.weekday.n||0))/600).toFixed(2)};
       return res.status(200).json({mode:"PREVIEW",wrote:false,count:rates.length,coldStart:!occ.hasData,min:Math.min(...amts),max:Math.max(...amts),avg:Math.round(amts.reduce((a,c)=>a+c,0)/amts.length),overrideCount:rates.filter(r=>r.overridden).length,pace,paceLearn,rates});
@@ -739,16 +771,83 @@ module.exports=async(req,res)=>{
       const occ={hasData:booked.total>0, agg:od.agg};
       let rates, logged=0;
       if(model==="glide"){
+        const gapOn=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
         const gsState=(redis&&await redis.get("parkside:gs"))||{};
-        const g=computeGlide(sig,st.targets,today,today,days,occ,st.overrides,gsState,{mode:"step"});
+        const g=computeGlide(sig,st.targets,today,today,days,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn});
         rates=g.rates; if(redis) await redis.set("parkside:gs",g.gsNext); // ease the applied multiplier toward target; NO demand/elasticity learning
+        if(redis){ // min-stay bookkeeping: set min on active gap nights; restore default on nights that stopped being gaps
+          const prevSet=(await redis.get("parkside:gapmin"))||[]; const nowSet=[]; const rIx={};
+          for(const r of rates) rIx[r.property_id+"|"+r.date]=r;
+          for(const r of rates){ if(r.gapApplied && r.minNights!=null) nowSet.push(r.property_id+"|"+r.date); }
+          const nowKeys=new Set(nowSet);
+          for(const k of prevSet){ if(!nowKeys.has(k)){ const r=rIx[k]; if(r && !r.overridden){ r.minNights=GAP_RESET_MIN; r._gapReset=true; } } }
+          await redis.set("parkside:gapmin",nowSet);
+        }
       } else {
         const learned=await getLearned();
         rates=compute(sig,st.targets,today,today,days,occ,st.overrides,learned);
         if(st.learning_enabled!==false) logged=await logPhase1(rates,booked,today);
       }
       if(!st.auto_sync) return res.status(200).json({mode:"COMPUTED_NO_SYNC",pricing_model:model,auto_sync:false,computed:rates.length,wrote:false,bookedNights:booked.total,logged,note:"auto-sync OFF — nothing written to OwnerRez"});
-      const r=await pushOwnerRez(rates); return res.status(r.ownerrezOk?200:502).json({mode:"LIVE_SYNC",pricing_model:model,auto_sync:true,bookedNights:booked.total,logged,overrides:rates.filter(x=>x.overridden).length,...r});
+      const r=await pushOwnerRez(rates);
+      if(redis&&r.ownerrezOk){ const _gn=rates.filter(x=>x.gapApplied).length; try{ await redis.set("parkside:last_run",{ts:Date.now(),at:new Date().toISOString(),sent:r.sent,gapNights:_gn}); }catch(_x){} }
+      return res.status(r.ownerrezOk?200:502).json({mode:"LIVE_SYNC",pricing_model:model,auto_sync:true,bookedNights:booked.total,logged,overrides:rates.filter(x=>x.overridden).length,gapNights:rates.filter(x=>x.gapApplied).length,...r});
+    }
+    if(action==="gap_preview"){
+      // READ-ONLY sign-off report: orphan-gap nights over next N days, normal price vs gap-discounted price + min-stay.
+      const N=Math.max(7,Math.min(120, parseInt((req.query&&req.query.days)||60,10)||60));
+      const st=await getState(); const sig=await getSignal();
+      const od=await getOccData(st,today,days,true); const occ={hasData:od.booked.total>0, agg:od.agg};
+      const gsState=(redis&&await redis.get("parkside:gs"))||{};
+      const normal=computeGlide(sig,st.targets,today,today,N,occ,st.overrides,gsState,{mode:"step",applyGap:false}).rates;
+      const gapped=computeGlide(sig,st.targets,today,today,N,occ,st.overrides,gsState,{mode:"step",applyGap:true}).rates;
+      const nIx={}; for(const r of normal) nIx[r.property_id+"|"+r.date]=r.amount;
+      const gapOn=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
+      const perUnit={}; const totals={1:0,2:0,3:0}; let count=0;
+      for(const u of UNITS) perUnit[u.orp]={unit:u.name,gaps:[]};
+      for(const r of gapped){ if(r.gapApplied){ const before=nIx[r.property_id+"|"+r.date];
+        const dow=new Date(r.date+"T00:00:00Z").getUTCDay();
+        perUnit[r.property_id].gaps.push({date:r.date,dow,tier:r.gapTier,weekend:r.gapHasWeekend,discPct:Math.round(r.gapDisc*100),before,after:r.amount,minNights:r.minNights,deeperOf:r.discSource});
+        totals[r.gapTier]=(totals[r.gapTier]||0)+1; count++; } }
+      return res.status(200).json({mode:"GAP_PREVIEW",writes:false,pushedToOwnerRez:false,gapsLive:gapOn,days:N,coldStart:!occ.hasData,
+        knobs:{GAP_DISC,weekendFactor:GAP_WEEKEND_FACTOR,resetMin:GAP_RESET_MIN,saneMin:Number(process.env.SANE_MIN_PUSH||110),floor:FLOOR},
+        totalsByTier:totals, gapNightCount:count, perUnit});
+    }
+    if(action==="gap_toggle"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
+      const on=!!(b&&b.enabled); if(redis) await redis.set("parkside:gap_enabled",on?1:0);
+      return res.status(200).json({ok:true,gap_enabled:on,note:on?"Gap discounting ON — applies on next run/preview/push":"Gap discounting OFF — gap nights price at the normal glide rate"});
+    }
+    if(action==="breakdown"){
+      // READ-ONLY full computation chain for ONE unit+date (per-day inspector).
+      const ds=(req.query&&req.query.date)||""; const unitId=(req.query&&req.query.unit)||"";
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(ds)) return res.status(400).json({error:"need date=YYYY-MM-DD"});
+      const u=UNITS.find(x=>String(x.orp)===String(unitId))||UNITS[0];
+      const st=await getState(); const sig=await getSignal();
+      const od=await getOccData(st,today,days,true); const occ={hasData:od.booked.total>0, agg:od.agg};
+      const gsState=(redis&&await redis.get("parkside:gs"))||{};
+      const gapOn=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
+      const span=Math.max(1, daysBetween(today,ds)+1);
+      const liveRates=computeGlide(sig,st.targets,today,today,span,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn}).rates;
+      const gapRates=computeGlide(sig,st.targets,today,today,span,occ,st.overrides,gsState,{mode:"step",applyGap:true}).rates;
+      const find=arr=>arr.find(r=>String(r.property_id)===String(u.orp)&&r.date===ds);
+      const live=find(liveRates), withGap=find(gapRates);
+      if(!live) return res.status(200).json({error:"date out of horizon"});
+      const signalOverride=redis?(await redis.get("parkside:signal_override")):null; const ovOn=(signalOverride!=null&&Number(signalOverride)>0);
+      const sigRaw=sig[ds];
+      const booked=!!(occ.agg&&od.booked&&od.booked.byUnit&&od.booked.byUnit[u.orp]&&od.booked.byUnit[u.orp][ds]);
+      return res.status(200).json({
+        unit:u.name, property_id:u.orp, date:ds, daytype:(isWe(new Date(ds+"T00:00:00Z"))?"weekend":"weekday"), booked,
+        signal:{ value:(sigRaw!=null?sigRaw:Math.round(live.base/(UNIT_PREM[u.orp]||1.0))), priceLabsRaw:(sigRaw==null?null:sigRaw), override:ovOn?Number(signalOverride):null, source:ovOn?"flat override ($"+Number(signalOverride)+")":"PriceLabs" },
+        premium:UNIT_PREM[u.orp]||1.0, base:live.base, peak:live.peak,
+        glide:{ poolOcc:live.poolOcc, refTarget:live.ref, gapVsPace:live.gap, gain:GS.GAIN, step:GS.STEP, desiredMult:live.desiredMult, appliedMult:live.appliedMult },
+        lastMinute:{ window:LM.WINDOW, lead:live.lead, max:LM.MAX, lm:live.lm },
+        gapNight:{ tier:withGap.gapTier||0, hasWeekend:withGap.gapHasWeekend||false, discPct:Math.round((withGap.gapDisc||0)*100), deeperOf:withGap.discSource, live:gapOn, appliedNow:gapOn&&!!live.gapApplied, ifEnabledPrice:withGap.amount, ifEnabledMinNights:withGap.minNights },
+        clamp:{ floor:FLOOR, ceil:live.peak?MODEL.PEAK_CEIL:CEIL, saneMin:Number(process.env.SANE_MIN_PUSH||110), gapExemptFromSaneMin:true },
+        override:{ pinned:!!live.overridden, amount:live.overridden?live.amount:null },
+        final:{ price:live.amount, minNights:(gapOn?live.minNights:null) }
+      });
     }
         if(action==="ai_draft"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
