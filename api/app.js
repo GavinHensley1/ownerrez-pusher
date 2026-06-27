@@ -232,7 +232,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
       if(occ.hasData){ const ua=occ.agg.unitAgg&&occ.agg.unitAgg[u.orp]&&occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt];
         unitOcc=ua&&ua.t?ua.b/ua.t:0; unitGap=Math.max(-1,Math.min(1,ref-unitOcc));
         blendedGap=K.wResort*resortGap + K.wUnit*unitGap; desiredBase=1-K.GAIN*blendedGap; }
-      let amount,overridden=false,applied=null,desiredC=null,minNights=null;
+      let amount,overridden=false,applied=null,desiredC=null,minNights=null,easedDemand=null;
       // per-unit orphan-gap lookup (forward-only detection from buildAgg): {runLen,hasWeekend}
       const gi=(occ.agg&&occ.agg.gaps&&occ.agg.gaps[u.orp])?occ.agg.gaps[u.orp][ds]:null;
       let gapTier=0,gapHasWe=false,gapDisc=0;
@@ -244,16 +244,17 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
       if(overrides[key]!=null){ amount=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(overrides[key])))); overridden=true; }
       else if(!occ.hasData){ amount=Math.max(K.floor,Math.min(ceil,base)); } // cold start: seasonal base only
       else {
-        // NORMAL eased glide (feeds the monthly glide state) — last-minute only, unchanged from before
-        let desiredNorm=desiredBase*(1-lm); if(peak) desiredNorm=Math.max(1,desiredNorm);
-        desiredC=Math.max(floorMult,Math.min(ceilMult,desiredNorm));
+        // Ease ONLY the slow-moving DEMAND multiplier (pace-based). Perishable discounts (last-minute, gap) apply
+        // IMMEDIATELY on top — no step-easing — so a near-in still-open night actually gets the discount now.
+        let demandTarget=desiredBase; if(peak) demandTarget=Math.max(1,demandTarget);
+        desiredC=Math.max(floorMult,Math.min(ceilMult,demandTarget)); // demand target (pre-easing)
         const prev=(gsState[gkey]!=null)?gsState[gkey]:1.0;
-        const step=Math.max(-K.STEP,Math.min(K.STEP,desiredC-prev)); const stepped=Math.max(floorMult,Math.min(ceilMult,prev+step));
-        gsNext[gkey]=stepped; // gap discounts NEVER corrupt the eased monthly state
-        if(gapApplied){ // gap night: gap AND last-minute STACK (×(1−lm)×(1−gap)), applied immediately (no STEP easing)
-          let desiredGap=desiredBase*(1-lm)*(1-gapDisc); if(peak) desiredGap=Math.max(1,desiredGap);
-          applied=Math.max(floorMult,Math.min(ceilMult,desiredGap)); minNights=gapTier;
-        } else { applied=(mode==="step")?stepped:desiredC; }
+        const step=Math.max(-K.STEP,Math.min(K.STEP,desiredC-prev)); const steppedDemand=Math.max(floorMult,Math.min(ceilMult,prev+step));
+        gsNext[gkey]=steppedDemand; // gsState tracks the eased DEMAND mult only (perishable discounts never corrupt it)
+        easedDemand=(mode==="step")?steppedDemand:desiredC;
+        let mult=easedDemand*(1-lm); // last-minute — immediate
+        if(gapApplied){ mult=mult*(1-gapDisc); minNights=gapTier; } // gap STACKS on top — also immediate
+        applied=Math.max(floorMult,Math.min(ceilMult,mult));
         amount=Math.max(K.floor,Math.min(ceil,Math.round(base*applied)));
       }
       out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,minNights,gapApplied,
@@ -261,7 +262,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
         poolOcc:poolOcc==null?null:Number(poolOcc.toFixed(3)),unitOcc:unitOcc==null?null:Number(unitOcc.toFixed(3)),ref:Number(ref.toFixed(3)),
         savedTarget:Number(target.toFixed(3)),paceFrac:Number(pf.toFixed(3)),
         resortGap:resortGap==null?null:Number(resortGap.toFixed(3)),unitGap:unitGap==null?null:Number(unitGap.toFixed(3)),gap:blendedGap==null?null:Number(blendedGap.toFixed(3)),
-        desiredBaseMult:occ.hasData?Number(desiredBase.toFixed(3)):null, prem,
+        desiredBaseMult:occ.hasData?Number(desiredBase.toFixed(3)):null, easedDemandMult:easedDemand==null?null:Number(easedDemand.toFixed(3)), prem,
         lead,lm:Number(lm.toFixed(3)),desiredMult:desiredC==null?null:Number(desiredC.toFixed(3)),appliedMult:applied==null?null:Number(applied.toFixed(3))}); } }
   return {rates:out,gsNext};
 }
@@ -899,15 +900,16 @@ module.exports=async(req,res)=>{
         const multResort=1 - K.GAIN*K.wResort*(live.resortGap||0);
         steps.push({label:'Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind→raise)':live.resortGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wResort, ...eff(base*multResort)});
         steps.push({label:'Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind→raise)':live.unitGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wUnit+(K.wUnit===0?'  (0 = off)':''), ...eff(base*live.desiredBaseMult)});
-        // Last-minute — ALWAYS shown (stacks). $0 if outside the window.
+        // Glide easing — smooths only the slow DEMAND multiplier toward target (≤ STEP/run). Perishable discounts below apply on top of this.
+        steps.push({label:'Glide easing', math:'demand ×'+live.desiredBaseMult+' eased toward by ≤ STEP '+K.STEP+'/run (+ floor/ceil)  →  ×'+live.easedDemandMult, ...eff(base*(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult))});
+        // Last-minute — ALWAYS shown; applied IMMEDIATELY on top of the eased demand. $0 if outside the window.
         const lmTxt=live.lm>0?('lead '+live.lead+'d → proximity ('+K.lmWindow+'−'+live.lead+')/'+K.lmWindow+'^'+K.lmSteep+' × max '+Math.round(K.lmMax*100)+'%  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'% (perishable, still open)'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');
-        steps.push({label:'Last-minute', math:lmTxt, ...eff(base*live.desiredBaseMult*(1-(live.lm||0)))});
-        // Gap night — ALWAYS shown; STACKS on top of last-minute. $0 if not a gap.
         if(isGapActive){
-          steps.push({label:'Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (wknd × '+K.gapWeekend+')':' (mid-week)')+'  →  ×(1 − '+withGap.gapDisc.toFixed(3)+') = −'+Math.round(withGap.gapDisc*100)+'%  (stacks with last-minute)  ·  min-stay '+withGap.minNights, ...eff(live.amount)});
+          steps.push({label:'Last-minute', math:lmTxt, ...eff(base*(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult)*(1-(live.lm||0)))});
+          steps.push({label:'Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (wknd × '+K.gapWeekend+')':' (mid-week)')+'  →  ×(1 − '+withGap.gapDisc.toFixed(3)+') = −'+Math.round(withGap.gapDisc*100)+'%  (STACKS with last-minute)  ·  min-stay '+withGap.minNights, ...eff(live.amount)});
         } else {
+          steps.push({label:'Last-minute', math:lmTxt, ...eff(live.amount)});
           steps.push({label:'Gap night', math:(gapOn?'no orphan gap on this night':'gap discounting OFF')+(withGap.gapTier>0?('  — if active: '+withGap.gapTier+'-night −'+Math.round(withGap.gapDisc*100)+'%'):'')+'  →  ×1.00 (none)', ...eff(run)});
-          steps.push({label:'Glide easing', math:'eased toward target by ≤ STEP '+K.STEP+'/run (+ floor/ceil clamp)  →  applied ×'+activeMult, ...eff(live.amount)});
         }
       }
       steps.push({label:'Push sanity (min)', math:(isGapActive?('gap night — exempt; hard floor $'+K.floor):('non-gap minimum $'+saneThresh))+(live.peak?' · peak ceiling':''), ...eff(pushedPrice)});
