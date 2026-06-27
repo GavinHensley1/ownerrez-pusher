@@ -237,9 +237,9 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
       let gapTier=0,gapHasWe=false,gapDisc=0;
       if(gi){ gapTier=gi.runLen; gapHasWe=!!gi.hasWeekend; gapDisc=((K.gap&&K.gap[gapTier])||0)*(gapHasWe?K.gapWeekend:1); }
       const gapApplied=applyGap && gapDisc>0 && occ.hasData;
-      // deeper-of: gap vs last-minute, never stacked
-      const effDisc=Math.max(gapApplied?gapDisc:0, lm);
-      const discSource=(effDisc<=0)?null:((gapApplied&&gapDisc>=lm)?"gap":"last-minute");
+      // STACK: gap AND last-minute both apply, multiplicatively (the hard floor still bounds the result).
+      const effDisc=gapApplied ? (1-(1-gapDisc)*(1-lm)) : lm; // total fractional discount, for reference
+      const discSource=(effDisc<=0)?null:(gapApplied?(lm>0?"gap+last-minute (stacked)":"gap"):"last-minute");
       if(overrides[key]!=null){ amount=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(overrides[key])))); overridden=true; }
       else if(!occ.hasData){ amount=Math.max(K.floor,Math.min(ceil,base)); } // cold start: seasonal base only
       else {
@@ -249,8 +249,8 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
         const prev=(gsState[gkey]!=null)?gsState[gkey]:1.0;
         const step=Math.max(-K.STEP,Math.min(K.STEP,desiredC-prev)); const stepped=Math.max(floorMult,Math.min(ceilMult,prev+step));
         gsNext[gkey]=stepped; // gap discounts NEVER corrupt the eased monthly state
-        if(gapApplied){ // gap night: deeper-of discount, applied immediately (no STEP easing — short window to fill)
-          let desiredGap=desiredBase*(1-effDisc); if(peak) desiredGap=Math.max(1,desiredGap);
+        if(gapApplied){ // gap night: gap AND last-minute STACK (×(1−lm)×(1−gap)), applied immediately (no STEP easing)
+          let desiredGap=desiredBase*(1-lm)*(1-gapDisc); if(peak) desiredGap=Math.max(1,desiredGap);
           applied=Math.max(floorMult,Math.min(ceilMult,desiredGap)); minNights=gapTier;
         } else { applied=(mode==="step")?stepped:desiredC; }
         amount=Math.max(K.floor,Math.min(ceil,Math.round(base*applied)));
@@ -885,30 +885,33 @@ module.exports=async(req,res)=>{
       const pct=x=>x==null?'—':Math.round(x*100)+'%'; const sgn=x=>x==null?'—':(x>0?'+':'')+x.toFixed(2);
       const fP=p=>(p>=0?'+':'−')+Math.abs(p).toFixed(1)+'%'; const fD=d=>{d=Math.round(d);return (d>=0?'+$':'−$')+Math.abs(d);};
       const dirw=d=>d>0?'↑ raises':d<0?'↓ lowers':'→ no change';
-      // ===== per-filter MATH: each section shows its signed % and $ effect + the running price =====
+      // ===== ACCOUNTING LEDGER: start at base, each row adds/subtracts to the running total; base + Σ(±) = final push.
       const steps=[]; let run=base;
       const eff=newRun=>{ newRun=Math.round(newRun); const d=newRun-run; const p=run?d/run*100:0; const o={effect:fP(p)+'  /  '+fD(d)+'   '+dirw(d), running:'$'+newRun}; run=newRun; return o; };
-      steps.push({label:'1 · Base price', math:'PriceLabs $'+sigShown+(ovOn?' (flat override)':'')+'  ×  '+u.name+' premium '+prem+'  =  $'+base, value:'$'+base, running:'$'+base});
-      if(!occ.hasData){ steps.push({label:'2 · Demand', math:'no occupancy data yet → priced at seasonal base', ...eff(live.amount)}); }
+      steps.push({label:'Base price', math:'PriceLabs $'+sigShown+(ovOn?' (flat override)':'')+'  ×  '+u.name+' premium '+prem+'  =  $'+base, value:'$'+base, running:'$'+base});
+      if(!occ.hasData){ steps.push({label:'Demand', math:'no occupancy data yet → priced at seasonal base', ...eff(live.amount)}); }
       else {
         const monNm=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][new Date(ds+'T00:00:00Z').getUTCMonth()];
         const dtName=isWe(new Date(ds+'T00:00:00Z'))?'weekend':'weekday';
-        steps.push({label:'2 · Pace reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+dtName+')  ×  pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d)  =  pace-ref '+pct(live.ref)+'  (no $ change — sets the bar demand is measured against)', value:pct(live.ref), running:'$'+run});
+        steps.push({label:'Pace reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+dtName+')  ×  pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d)  =  pace-ref '+pct(live.ref)+'  — the bar demand is measured against (no $ change)', value:pct(live.ref), running:'$'+run});
+        // Demand splits into two real ledger steps that each move the running total (scaled by their weight); they reconcile to base × demand-multiplier.
         const multResort=1 - K.GAIN*K.wResort*(live.resortGap||0);
-        steps.push({label:'2a · Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind→raise)':live.resortGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wResort+'  →  ×'+multResort.toFixed(3), ...eff(base*multResort)});
-        steps.push({label:'2b · Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind→raise)':live.unitGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wUnit, ...eff(base*live.desiredBaseMult)});
-        steps.push({label:'2c · Combined demand', math:'blended gap '+sgn(live.gap)+'  →  total demand multiplier ×'+live.desiredBaseMult+' (= 2a + 2b above)', value:'×'+live.desiredBaseMult, running:'$'+run});
+        steps.push({label:'Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind→raise)':live.resortGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wResort, ...eff(base*multResort)});
+        steps.push({label:'Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind→raise)':live.unitGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wUnit+(K.wUnit===0?'  (0 = off)':''), ...eff(base*live.desiredBaseMult)});
+        // Last-minute — ALWAYS shown (stacks). $0 if outside the window.
+        const lmTxt=live.lm>0?('lead '+live.lead+'d in '+K.lmWindow+'d window  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'%'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');
+        steps.push({label:'Last-minute', math:lmTxt, ...eff(base*live.desiredBaseMult*(1-(live.lm||0)))});
+        // Gap night — ALWAYS shown; STACKS on top of last-minute. $0 if not a gap.
         if(isGapActive){
-          steps.push({label:'3 · Last-minute', math:(live.lm>0?('lead '+live.lead+'d in '+K.lmWindow+'d window (−'+Math.round(live.lm*100)+'%) — '):'')+'gap discount is deeper → last-minute not stacked', value:'no change', running:'$'+run});
-          steps.push({label:'4 · Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (wknd × '+K.gapWeekend+')':' (mid-week)')+'  →  −'+Math.round(withGap.gapDisc*100)+'%  ·  applied ×'+activeMult+' (bypasses easing)  ·  min-stay '+withGap.minNights, ...eff(live.amount)});
+          steps.push({label:'Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (wknd × '+K.gapWeekend+')':' (mid-week)')+'  →  ×(1 − '+withGap.gapDisc.toFixed(3)+') = −'+Math.round(withGap.gapDisc*100)+'%  (stacks with last-minute)  ·  min-stay '+withGap.minNights, ...eff(live.amount)});
         } else {
-          steps.push({label:'3 · Last-minute', math:(live.lm>0?('lead '+live.lead+'d within '+K.lmWindow+'d window  →  ×(1 − '+live.lm.toFixed(3)+')  = −'+Math.round(live.lm*100)+'%'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  none')), ...eff(run*(1-(live.lm||0)))});
-          steps.push({label:'4 · Glide easing', math:'eased toward target by ≤ STEP '+K.STEP+'/run (+ floor/ceil clamp)  →  applied ×'+activeMult, ...eff(live.amount)});
-          if(withGap.gapTier>0) steps.push({label:'·  Gap (inactive)', math:(gapOn?'no gap on this night':'gaps OFF')+' — if enabled: '+withGap.gapTier+'-night −'+Math.round(withGap.gapDisc*100)+'% → $'+withGap.amount+' · min '+withGap.minNights, value:'—', running:'$'+run});
+          steps.push({label:'Gap night', math:(gapOn?'no orphan gap on this night':'gap discounting OFF')+(withGap.gapTier>0?('  — if active: '+withGap.gapTier+'-night −'+Math.round(withGap.gapDisc*100)+'%'):'')+'  →  ×1.00 (none)', ...eff(run)});
+          steps.push({label:'Glide easing', math:'eased toward target by ≤ STEP '+K.STEP+'/run (+ floor/ceil clamp)  →  applied ×'+activeMult, ...eff(live.amount)});
         }
       }
-      steps.push({label:'5 · Push sanity (min)', math:(isGapActive?('gap night — exempt; hard floor $'+K.floor):('non-gap floor $'+saneThresh+(pushedPrice!==run?'':' — already above')))+(live.peak?' · peak ceiling':''), ...eff(pushedPrice)});
-      steps.push({label:'6 · FINAL pushed price', math:'after all filters'+((isGapActive&&live.minNights)?('  ·  min-stay '+live.minNights):''), value:'$'+pushedPrice, running:'$'+pushedPrice, final:true});
+      steps.push({label:'Push sanity (min)', math:(isGapActive?('gap night — exempt; hard floor $'+K.floor):('non-gap minimum $'+saneThresh))+(live.peak?' · peak ceiling':''), ...eff(pushedPrice)});
+      steps.push({label:'FINAL pushed price', math:'base $'+base+'  +  every ± above  =  the final pushed price'+((isGapActive&&live.minNights)?('  ·  min-stay '+live.minNights):''), value:'$'+pushedPrice, running:'$'+pushedPrice, final:true});
+      steps.forEach((s,i)=>{ s.label=(i+1)+' · '+s.label; }); // sequential ledger numbering
       return res.status(200).json({
         unit:u.name, property_id:u.orp, date:ds, daytype:(isWe(new Date(ds+"T00:00:00Z"))?"weekend":"weekday"), booked,
         knobs:{GAIN:K.GAIN,STEP:K.STEP,wResort:K.wResort,wUnit:K.wUnit,lmMax:K.lmMax,lmWindow:K.lmWindow,gap1:K.gap1,gap2:K.gap2,gap3:K.gap3,gapWeekend:K.gapWeekend,floor:K.floor,ceil:K.ceil,saneMin:K.saneMin},
