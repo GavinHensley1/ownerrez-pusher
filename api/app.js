@@ -41,8 +41,10 @@ const GAP_WEEKEND_FACTOR=0.5;
 const GAP_RESET_MIN=Number(process.env.GAP_RESET_MIN||2); // min-stay restored to a night once it stops being a gap
 // ===== Editable filter-strength knobs (manual tuning now; the learning system will drive these later).
 // Defaults below == the current hardcoded behavior. Overrides persist in redis parkside:knobs and apply immediately.
+const PACE_LEN_DEFAULT=365; // native horizon (days) the PACE_SEED ramp is authored over — the effective pacing-window length today
 const DEFAULT_KNOBS={
   GAIN:GS.GAIN, STEP:GS.STEP, BAND_NEAR:GS.BAND_NEAR,           // demand / glide controller (overall strength)
+  paceLength:PACE_LEN_DEFAULT, // pacing-window horizon in DAYS — how far out the booking-pace ramp is defined; default = native PACE_SEED span (365d) so behavior is unchanged
   wResort:1.0, wUnit:0.0,   // demand split: blendedGap = wResort*resortGap + wUnit*unitGap (default = resort-only = today's behavior)
   gap1:GAP_DISC[1], gap2:GAP_DISC[2], gap3:GAP_DISC[3], gapWeekend:GAP_WEEKEND_FACTOR, // orphan-gap discounts
   lmMax:0.30, lmWindow:LM.WINDOW, lmSteep:1.5,                   // last-minute: PROXIMITY-driven, lm = lmMax × ((window−lead)/window)^lmSteep (perishable: still-open near check-in = real discount)
@@ -50,6 +52,7 @@ const DEFAULT_KNOBS={
 };
 const KNOB_RANGES={ // [min,max,isInt] for validation
   GAIN:[0,2,false], STEP:[0.01,0.5,false], BAND_NEAR:[0.01,0.6,false],
+  paceLength:[30,720,true],
   wResort:[0,2,false], wUnit:[0,2,false],
   gap1:[0,0.6,false], gap2:[0,0.6,false], gap3:[0,0.6,false], gapWeekend:[0,1,false],
   lmMax:[0,0.5,false], lmWindow:[0,60,true], lmSteep:[0.3,4,false],
@@ -100,9 +103,15 @@ async function getOccData(st, today, days, useCache){
   return { booked, agg, monthStart:ms, daysMS };
 }
 function interp(pts,x){ if(x<=pts[0][0])return pts[0][1]; for(let i=1;i<pts.length;i++){ if(x<=pts[i][0]){ const a=pts[i-1],b=pts[i]; return a[1]+(b[1]-a[1])*(x-a[0])/(b[0]-a[0]); } } return pts[pts.length-1][1]; }
-function paceFrac(lead,dt,learned){ const seed=interp(PACE_SEED[dt],lead);
+// paceLen = pacing-window length in days. The PACE_SEED ramp is authored over PACE_LEN_DEFAULT days; we rescale the
+// lead axis by (PACE_LEN_DEFAULT/paceLen) so a LONGER paceLen stretches the ramp further out (pace builds earlier),
+// a SHORTER one compresses it toward check-in. paceLen = PACE_LEN_DEFAULT (default) → eff==lead → identical to today.
+function paceFrac(lead,dt,learned,paceLen){
+  const L=(paceLen&&isFinite(paceLen)&&paceLen>0)?paceLen:PACE_LEN_DEFAULT;
+  const eff=lead*(PACE_LEN_DEFAULT/L);
+  const seed=interp(PACE_SEED[dt],eff);
   if(!learned||!learned[dt]||!learned[dt].n) return seed;
-  const w=Math.min(0.8, learned[dt].n/300); return (1-w)*seed + w*interp(learned[dt].curve,lead); }
+  const w=Math.min(0.8, learned[dt].n/300); return (1-w)*seed + w*interp(learned[dt].curve,eff); }
 // Learn the pace curve from logged booking events: fraction of bookings made at lead >= X.
 function buildLearnedPace(events){ const out={weekend:{n:0},weekday:{n:0}};
   for(const dt of ["weekend","weekday"]){ const leads=(events||[]).filter(e=>e.daytype===dt&&e.lead>=0).map(e=>e.lead); const n=leads.length;
@@ -218,7 +227,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     // SAVED monthly occupancy targets are the single source of truth for the pace reference.
     const tRow=(targets&&targets[mo])||SEED_TARGETS[mo]; let target=we?tRow.we:tRow.wd;
     if(target==null||!isFinite(target)){ const sd=SEED_TARGETS[mo]; target=we?sd.we:sd.wd; } // fallback: never silently use a flat/zero target
-    const pf=GS.USE_PACE_REF?paceFrac(lead,dtN,null):1; const ref=target*pf; // pace-ref = saved target x deterministic booking-pace ramp (1.0 at lead 0 -> reaches the FULL saved target at check-in)
+    const pf=GS.USE_PACE_REF?paceFrac(lead,dtN,null,K.paceLength):1; const ref=target*pf; // pace-ref = saved target x deterministic booking-pace ramp (1.0 at lead 0 -> reaches the FULL saved target at check-in); ramp horizon = K.paceLength days
     // DEMAND is split: RESORT (whole-resort occ vs pace-ref) at night level; UNIT (this unit's own occ) inside the loop.
     // blendedGap = wResort*resortGap + wUnit*unitGap ; default wResort=1,wUnit=0 -> blendedGap == resortGap == today's behavior.
     let resortGap=null,lm=0;
@@ -325,7 +334,7 @@ function deriveLearned(events,L){
 async function getLearned(){ const ev=(redis&&await redis.get("parkside:events"))||[]; const L=(redis&&await redis.get("parkside:learn"))||{}; return deriveLearned(ev,L); }
 
 function monthList(today,days){ const start=new Date(today+"T00:00:00Z"); const set={}; for(let i=0;i<days;i++){const d=new Date(start);d.setUTCDate(d.getUTCDate()+i); set[d.toISOString().slice(0,7)]=1;} return Object.keys(set).sort(); }
-function computePace(poolAgg,targets,learned,today,months){ const pace={}; const t0=new Date(today+"T00:00:00Z");
+function computePace(poolAgg,targets,learned,today,months,paceLen){ const pace={}; const t0=new Date(today+"T00:00:00Z");
   for(const mk of months){ const tgt=targets[parseInt(mk.slice(5))]; const pa=poolAgg[mk]||[{b:0,t:0},{b:0,t:0}];
     // ACCURATE expected = average of each night's OWN pace-ref (target × deterministic pacing at that date's lead),
     // not the whole month evaluated at the month-start lead. Split by daytype + a combined ALL-days figure that
@@ -333,7 +342,7 @@ function computePace(poolAgg,targets,learned,today,months){ const pace={}; const
     const y=parseInt(mk.slice(0,4)), mo=parseInt(mk.slice(5,7)); const ndays=new Date(Date.UTC(y,mo,0)).getUTCDate();
     const expSum=[0,0], expCnt=[0,0];
     for(let dd=1; dd<=ndays; dd++){ const d=new Date(Date.UTC(y,mo-1,dd)); const dt=isWe(d)?1:0; const dtN=dt?"weekend":"weekday";
-      const lead=Math.max(0,Math.round((d-t0)/86400000)); const tv=dt?tgt.we:tgt.wd; expSum[dt]+=tv*paceFrac(lead,dtN,null); expCnt[dt]++; }
+      const lead=Math.max(0,Math.round((d-t0)/86400000)); const tv=dt?tgt.we:tgt.wd; expSum[dt]+=tv*paceFrac(lead,dtN,null,paceLen); expCnt[dt]++; }
     const f=(dt)=>{ const act=pa[dt].t?Math.round(100*pa[dt].b/pa[dt].t):0; const exp=expCnt[dt]?Math.round(100*expSum[dt]/expCnt[dt]):0; return {act,exp,status:act>=exp?"ahead":"behind"}; };
     const ball=pa[0].b+pa[1].b, tall=pa[0].t+pa[1].t; const actAll=tall?Math.round(100*ball/tall):0;
     const expAll=(expCnt[0]+expCnt[1])?Math.round(100*(expSum[0]+expSum[1])/(expCnt[0]+expCnt[1])):0;
@@ -343,11 +352,11 @@ function computePace(poolAgg,targets,learned,today,months){ const pace={}; const
 // Heuristics from occupancy-vs-target pace trend; each suggestion is clearly labelled with its basis + confidence.
 function clampKnob(key,v){ const r=KNOB_RANGES[key]; if(!r) return v; v=Math.max(r[0],Math.min(r[1],Number(v))); return r[2]?Math.round(v):Number(v.toFixed(3)); }
 // RECOMMENDED SETTINGS: for EVERY knob, a learning-recommended value + one-line basis. Suggest-only; adopting is Gavin's explicit per-knob choice.
-const KNOB_ORDER=["GAIN","STEP","BAND_NEAR","wResort","wUnit","gap1","gap2","gap3","gapWeekend","lmMax","lmWindow","lmSteep","floor","ceil","saneMin"];
+const KNOB_ORDER=["GAIN","paceLength","STEP","BAND_NEAR","wResort","wUnit","gap1","gap2","gap3","gapWeekend","lmMax","lmWindow","lmSteep","floor","ceil","saneMin"];
 async function genRecommendations(today){
   const st=await getState(); const K=await getKnobs(); const learned=await getLearned();
   const od=await getOccData(st,today,365,true);
-  const months=monthList(today,150); const pace=computePace(od.agg.poolAgg, st.targets, learned, today, months);
+  const months=monthList(today,150); const pace=computePace(od.agg.poolAgg, st.targets, learned, today, months, K.paceLength);
   const upcoming=months.slice(0,4); let behindSum=0,cnt=0; const detail=[];
   for(const mk of upcoming){ const a=pace[mk]&&pace[mk].all; if(a&&a.exp>0){ behindSum+=(a.exp-a.act); cnt++; detail.push(mk.slice(5)+' '+a.act+'/'+a.exp); } }
   const avgBehind=cnt?Math.round(behindSum/cnt):0; // + = behind pace, − = ahead
@@ -778,7 +787,7 @@ module.exports=async(req,res)=>{
       const months=Object.keys(monthTotal).sort(); const byUnit={};
       for(const u of UNITS){ const dates=Object.keys(booked.byUnit[u.orp]); const mc={}; for(const ds of dates){const mk=ds.slice(0,7); mc[mk]=(mc[mk]||0)+1;}
         const monthly={}; for(const mk of months) monthly[mk]=Math.round(100*((mc[mk]||0)/monthTotal[mk])); byUnit[u.orp]={booked:dates,monthly}; }
-      const pace=computePace(od.agg.poolAgg, st.targets, learned, today, months);
+      const _kPace=await getKnobs(); const pace=computePace(od.agg.poolAgg, st.targets, learned, today, months, _kPace.paceLength);
       return res.status(200).json({units:UNITS.map(u=>({orp:u.orp,name:u.name})),months,byUnit,pace,paceLearn:{weekend:learned.weekend.n||0,weekday:learned.weekday.n||0,blendWeight:Math.min(0.8,((learned.weekend.n||0)+(learned.weekday.n||0))/600).toFixed(2)},totalBooked:booked.total,channels:booked.channels});
     }
     if(action==="logs"){
@@ -795,7 +804,7 @@ module.exports=async(req,res)=>{
       else { const od=await getOccData(st,today,days,true); occ={hasData:od.booked.total>0, agg:od.agg}; }
       const gapOn=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false; const K=await getKnobs();
       const model=(st.pricing_model==="glide")?"glide":"legacy";let rates;if(model==="glide"){const gsState=(redis&&await redis.get("parkside:gs"))||{};rates=computeGlide(sig,targets,today,today,days,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn,knobs:K,learned}).rates;}else{rates=compute(sig,targets,today,today,days,occ,st.overrides,learned);} const amts=rates.map(r=>r.amount);
-      const pace = occ.agg ? computePace(occ.agg.poolAgg, targets, learned, today, monthList(today,days)) : null;
+      const pace = occ.agg ? computePace(occ.agg.poolAgg, targets, learned, today, monthList(today,days), K.paceLength) : null;
       const paceLearn={weekend:learned.weekend.n||0,weekday:learned.weekday.n||0,blendWeight:Math.min(0.8,((learned.weekend.n||0)+(learned.weekday.n||0))/600).toFixed(2)};
       return res.status(200).json({mode:"PREVIEW",wrote:false,count:rates.length,coldStart:!occ.hasData,min:Math.min(...amts),max:Math.max(...amts),avg:Math.round(amts.reduce((a,c)=>a+c,0)/amts.length),overrideCount:rates.filter(r=>r.overridden).length,pace,paceLearn,rates});
     }
@@ -931,7 +940,7 @@ module.exports=async(req,res)=>{
       else {
         const monNm=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][new Date(ds+'T00:00:00Z').getUTCMonth()];
         const dtName=isWe(new Date(ds+'T00:00:00Z'))?'weekend':'weekday';
-        steps.push({label:'Pace reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+dtName+')  ×  pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d)  =  pace-ref '+pct(live.ref)+'  — the bar demand is measured against (no $ change)', value:pct(live.ref), running:'$'+run});
+        steps.push({label:'Pace reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+dtName+')  ×  pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d on a '+K.paceLength+'-day pacing window'+(K.paceLength!==PACE_LEN_DEFAULT?', vs '+PACE_LEN_DEFAULT+'-day default → ramp '+(K.paceLength>PACE_LEN_DEFAULT?'stretched further out':'compressed toward check-in'):'')+')  =  pace-ref '+pct(live.ref)+'  — the bar demand is measured against (no $ change)', value:pct(live.ref), running:'$'+run});
         // Demand = the ACTUALLY-APPLIED (eased) effect — where the price is today on its glide toward target. Split into
         // resort + unit by their gap contribution; NO separate "glide easing" row.
         const easedMult=(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult);
@@ -970,7 +979,7 @@ module.exports=async(req,res)=>{
     }
     if(action==="get_knobs"){
       const k=await getKnobs();
-      const pick=x=>({GAIN:x.GAIN,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,wResort:x.wResort,wUnit:x.wUnit,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,lmSteep:x.lmSteep,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
+      const pick=x=>({GAIN:x.GAIN,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,paceLength:x.paceLength,wResort:x.wResort,wUnit:x.wUnit,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,lmSteep:x.lmSteep,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
       return res.status(200).json({knobs:pick(k), defaults:pick(DEFAULT_KNOBS), ranges:KNOB_RANGES, unitPremiums:UNIT_PREM});
     }
     if(action==="set_knobs"){
