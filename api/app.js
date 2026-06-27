@@ -45,14 +45,14 @@ const DEFAULT_KNOBS={
   GAIN:GS.GAIN, STEP:GS.STEP, BAND_NEAR:GS.BAND_NEAR,           // demand / glide controller (overall strength)
   wResort:1.0, wUnit:0.0,   // demand split: blendedGap = wResort*resortGap + wUnit*unitGap (default = resort-only = today's behavior)
   gap1:GAP_DISC[1], gap2:GAP_DISC[2], gap3:GAP_DISC[3], gapWeekend:GAP_WEEKEND_FACTOR, // orphan-gap discounts
-  lmMax:LM.MAX, lmWindow:LM.WINDOW,                              // last-minute
+  lmMax:0.30, lmWindow:LM.WINDOW, lmSteep:1.5,                   // last-minute: PROXIMITY-driven, lm = lmMax × ((window−lead)/window)^lmSteep (perishable: still-open near check-in = real discount)
   floor:FLOOR, ceil:CEIL, saneMin:Number(process.env.SANE_MIN_PUSH||110) // clamp + push sanity
 };
 const KNOB_RANGES={ // [min,max,isInt] for validation
   GAIN:[0,2,false], STEP:[0.01,0.5,false], BAND_NEAR:[0.01,0.6,false],
   wResort:[0,2,false], wUnit:[0,2,false],
   gap1:[0,0.6,false], gap2:[0,0.6,false], gap3:[0,0.6,false], gapWeekend:[0,1,false],
-  lmMax:[0,0.5,false], lmWindow:[0,60,true],
+  lmMax:[0,0.5,false], lmWindow:[0,60,true], lmSteep:[0.3,4,false],
   floor:[50,400,true], ceil:[100,1000,true], saneMin:[50,1000,true]
 };
 async function getKnobs(){ const o=(redis&&await redis.get("parkside:knobs"))||{}; const k={...DEFAULT_KNOBS};
@@ -223,7 +223,8 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     // blendedGap = wResort*resortGap + wUnit*unitGap ; default wResort=1,wUnit=0 -> blendedGap == resortGap == today's behavior.
     let resortGap=null,lm=0;
     if(occ.hasData){ resortGap=Math.max(-1,Math.min(1,ref-poolOcc));
-      if(lead<=K.lmWindow && K.lmWindow>0){ const prox=(K.lmWindow-lead)/K.lmWindow; const empt=Math.max(0,Math.min(1,ref-poolOcc)); lm=K.lmMax*prox*empt; } }
+      // PROXIMITY-driven last-minute: a still-open night near check-in is perishable → real discount, independent of how far behind pace.
+      if(lead<=K.lmWindow && K.lmWindow>0){ const prox=Math.pow(Math.max(0,(K.lmWindow-lead))/K.lmWindow, K.lmSteep!=null?K.lmSteep:1.5); lm=K.lmMax*prox; } }
     for(const u of UNITS){ const key=u.orp+"|"+ds; const gkey=u.orp+"|"+mk+"|"+dt;
       const prem=UNIT_PREM[u.orp]||1.0; const base=Math.round(sig*prem); const floorMult=K.floor/base, ceilMult=ceil/base;
       // UNIT demand: this unit's own occupancy vs the same pace-ref, then blend with resort demand.
@@ -899,7 +900,7 @@ module.exports=async(req,res)=>{
         steps.push({label:'Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind→raise)':live.resortGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wResort, ...eff(base*multResort)});
         steps.push({label:'Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind→raise)':live.unitGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wUnit+(K.wUnit===0?'  (0 = off)':''), ...eff(base*live.desiredBaseMult)});
         // Last-minute — ALWAYS shown (stacks). $0 if outside the window.
-        const lmTxt=live.lm>0?('lead '+live.lead+'d in '+K.lmWindow+'d window  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'%'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');
+        const lmTxt=live.lm>0?('lead '+live.lead+'d → proximity ('+K.lmWindow+'−'+live.lead+')/'+K.lmWindow+'^'+K.lmSteep+' × max '+Math.round(K.lmMax*100)+'%  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'% (perishable, still open)'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');
         steps.push({label:'Last-minute', math:lmTxt, ...eff(base*live.desiredBaseMult*(1-(live.lm||0)))});
         // Gap night — ALWAYS shown; STACKS on top of last-minute. $0 if not a gap.
         if(isGapActive){
@@ -914,11 +915,11 @@ module.exports=async(req,res)=>{
       steps.forEach((s,i)=>{ s.label=(i+1)+' · '+s.label; }); // sequential ledger numbering
       return res.status(200).json({
         unit:u.name, property_id:u.orp, date:ds, daytype:(isWe(new Date(ds+"T00:00:00Z"))?"weekend":"weekday"), booked,
-        knobs:{GAIN:K.GAIN,STEP:K.STEP,wResort:K.wResort,wUnit:K.wUnit,lmMax:K.lmMax,lmWindow:K.lmWindow,gap1:K.gap1,gap2:K.gap2,gap3:K.gap3,gapWeekend:K.gapWeekend,floor:K.floor,ceil:K.ceil,saneMin:K.saneMin},
+        knobs:{GAIN:K.GAIN,STEP:K.STEP,wResort:K.wResort,wUnit:K.wUnit,lmMax:K.lmMax,lmWindow:K.lmWindow,lmSteep:K.lmSteep,gap1:K.gap1,gap2:K.gap2,gap3:K.gap3,gapWeekend:K.gapWeekend,floor:K.floor,ceil:K.ceil,saneMin:K.saneMin},
         signal:{ value:sigShown, priceLabsRaw:(sigRaw==null?null:sigRaw), override:ovOn?Number(signalOverride):null, source:ovOn?"flat override ($"+Number(signalOverride)+")":"PriceLabs" },
         premium:prem, base:base, peak:live.peak,
         glide:{ savedTarget:live.savedTarget, paceFrac:live.paceFrac, paceRef:live.ref, poolOcc:live.poolOcc, unitOcc:live.unitOcc, refTarget:live.ref, resortGap:live.resortGap, unitGap:live.unitGap, blendedGap:live.gap, wResort:K.wResort, wUnit:K.wUnit, desiredBaseMult:live.desiredBaseMult, gain:K.GAIN, step:K.STEP, desiredMult:live.desiredMult, appliedMult:live.appliedMult },
-        lastMinute:{ window:K.lmWindow, lead:live.lead, max:K.lmMax, lm:live.lm },
+        lastMinute:{ window:K.lmWindow, lead:live.lead, max:K.lmMax, steep:K.lmSteep, lm:live.lm },
         gapNight:{ tier:withGap.gapTier||0, hasWeekend:withGap.gapHasWeekend||false, discPct:Math.round((withGap.gapDisc||0)*100), deeperOf:withGap.discSource, live:gapOn, appliedNow:isGapActive, ifEnabledPrice:withGap.amount, ifEnabledMinNights:withGap.minNights },
         clamp:{ floor:K.floor, ceil:ceil, saneMin:K.saneMin, gapExemptFromSaneMin:true },
         override:{ pinned:!!live.overridden, amount:live.overridden?live.amount:null },
@@ -928,13 +929,13 @@ module.exports=async(req,res)=>{
     }
     if(action==="get_knobs"){
       const k=await getKnobs();
-      const pick=x=>({GAIN:x.GAIN,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,wResort:x.wResort,wUnit:x.wUnit,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
+      const pick=x=>({GAIN:x.GAIN,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,wResort:x.wResort,wUnit:x.wUnit,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,lmSteep:x.lmSteep,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
       return res.status(200).json({knobs:pick(k), defaults:pick(DEFAULT_KNOBS), ranges:KNOB_RANGES, unitPremiums:UNIT_PREM});
     }
     if(action==="set_knobs"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{return res.status(400).json({error:"bad json"});}}
-      if(b&&b.reset){ if(redis) await redis.del("parkside:knobs"); const k=await getKnobs(); return res.status(200).json({ok:true,reset:true,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}}); }
+      if(b&&b.reset){ if(redis) await redis.del("parkside:knobs"); const k=await getKnobs(); return res.status(200).json({ok:true,reset:true,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,lmSteep:k.lmSteep,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}}); }
       const cur=(redis&&await redis.get("parkside:knobs"))||{}; const next={...cur}; const errors=[]; const applied={};
       for(const key in KNOB_RANGES){ if(b&&b[key]!=null&&b[key]!==""){ let v=Number(b[key]); const rng=KNOB_RANGES[key];
         if(!isFinite(v)){ errors.push(key+": not a number"); continue; }
@@ -947,7 +948,7 @@ module.exports=async(req,res)=>{
       if(errors.length) return res.status(400).json({ok:false,errors});
       if(redis) await redis.set("parkside:knobs",next);
       const k=await getKnobs();
-      return res.status(200).json({ok:true,applied,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}});
+      return res.status(200).json({ok:true,applied,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,lmSteep:k.lmSteep,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}});
     }
         if(action==="ai_draft"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
