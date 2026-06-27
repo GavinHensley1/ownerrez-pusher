@@ -142,18 +142,6 @@
     <div class="legend">Click any day → full price breakdown + pin/override. 📌 purple = manual override (engine + cron never change it). Grey dashed = already booked. <span style="color:#e6b85c">GAP</span> = orphan-night discount.</div>
   </div>
 
-  <div class="card" id="recCard">
-    <h2>📊 Recommended settings <span class="muted" style="font-weight:400;text-transform:none">— what the learning data recommends for each knob; adopt any you like, whenever you like (nothing changes on its own)</span></h2>
-    <div class="legend" id="recNote" style="margin-bottom:8px">Loading…</div>
-    <div class="scroll"><table class="occ" id="recTable" style="width:100%"></table></div>
-    <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;align-items:center">
-      <button onclick="adoptSelectedRecs()">Adopt selected</button>
-      <button class="ghost" onclick="adoptAllRecs()">Adopt all changed</button>
-      <button class="ghost" onclick="loadRecommendations(true)">↻ Refresh</button>
-      <span id="recStatus" class="muted" style="align-self:center"></span>
-    </div>
-  </div>
-
   <div class="card" id="tuneCard">
     <h2>🎚 Filter tuning <span class="muted" style="font-weight:400;text-transform:none">— manual strength knobs now; the learning system will drive these automatically later</span></h2>
     <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then Save. Applies immediately to the calendar &amp; breakdown (does not push to OwnerRez).</div>
@@ -552,13 +540,15 @@ async function loadKnobs(){
     for(const [title,items] of KNOB_GROUPS){
       h+="<div style='font-weight:700;color:var(--ink);margin:12px 0 4px'>"+title+"</div>";
       for(const [key,label,hint] of items){ const r=rng[key]||[0,9999,false]; const stp=r[2]?1:0.01; const changed=(Number(cur[key])!==Number(def[key]));
-        h+="<div style='display:flex;align-items:center;gap:10px;padding:4px 0;flex-wrap:wrap'>"
+        h+="<div style='display:flex;align-items:center;gap:8px;padding:4px 0;flex-wrap:wrap'>"
           +"<label style='flex:0 0 145px;font-size:13px'>"+label+"</label>"
           +"<input id='knob_"+key+"' type='number' step='"+stp+"' min='"+r[0]+"' max='"+r[1]+"' value='"+cur[key]+"' style='width:84px'>"
+          +"<span class='recInd' id='rec_"+key+"' style='min-width:120px'></span>"
           +"<span class='muted' style='font-size:11px'>"+(hint?hint+" · ":"")+"range "+r[0]+"–"+r[1]+(changed?(" · <span style='color:var(--warn)'>default "+def[key]+"</span>"):"")+"</span></div>";
       }
     }
     grid.innerHTML=h;
+    renderRecIndicators();
   }catch(e){ grid.innerHTML="<span class='muted'>Could not load knobs: "+e.message+"</span>"; }
 }
 async function saveKnobs(){
@@ -569,7 +559,7 @@ async function saveKnobs(){
   const j=await r.json().catch(()=>({}));
   if(!r.ok||!j.ok){ document.getElementById('tuneStatus').textContent='Failed: '+((j.errors&&j.errors.join('; '))||j.error||('HTTP '+r.status)); return; }
   document.getElementById('tuneStatus').textContent='Saved ✓ — recomputing…';
-  await loadKnobs(); await applyPreview(); await refreshBreakdownIfOpen();
+  await loadKnobs(); await loadRecommendations(); await applyPreview(); await refreshBreakdownIfOpen();
   document.getElementById('tuneStatus').textContent='Saved ✓ — calendar + breakdown updated';
 }
 async function resetKnobs(){
@@ -577,42 +567,27 @@ async function resetKnobs(){
   document.getElementById('tuneStatus').textContent='Resetting…';
   const r=await fetch(api('set_knobs'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({reset:true})});
   if(!r.ok){ document.getElementById('tuneStatus').textContent='Reset failed (auth?)'; return; }
-  await loadKnobs(); await applyPreview(); await refreshBreakdownIfOpen();
+  await loadKnobs(); await loadRecommendations(); await applyPreview(); await refreshBreakdownIfOpen();
   document.getElementById('tuneStatus').textContent='Reset to defaults ✓';
 }
-// ===== Recommended settings (learning recommends per knob; Gavin adopts) =====
-let RECS=[];
-async function loadRecommendations(regen){
-  const el=document.getElementById('recTable'); if(!el) return;
-  if(regen){ el.innerHTML="<tr><td class='muted'>Generating…</td></tr>"; document.getElementById('recStatus').textContent='Refreshing…'; }
-  try{ const j=await (await fetch(api('recommendations')+'&_cb='+Date.now())).json(); RECS=j.items||[];
-    document.getElementById('recNote').textContent='Learning recommendation per knob — basis: '+(j.paceBasis||'pace trend')+' ('+(j.learnEvents||0)+' booking events learned). Adopt any subset, anytime.';
-    let h="<tr><th></th><th style='text-align:left'>Setting</th><th>Current</th><th>Recommended</th><th style='text-align:left'>Basis</th></tr>";
-    for(const r of RECS){ const diff=!!r.changed;
-      h+="<tr"+(diff?" style='background:rgba(74,222,128,0.07)'":"")+">"
-        +"<td>"+(diff?"<input type='checkbox' class='recChk' value='"+esc(r.knob)+"'>":"")+"</td>"
-        +"<td style='text-align:left'>"+esc(r.knob)+"</td>"
-        +"<td>"+r.current+"</td>"
-        +"<td"+(diff?" style='color:#4ade80;font-weight:700'":" class='muted'")+">"+r.recommended+(diff?" &nbsp;<button class='seg-x' style='padding:1px 7px' onclick=\"adoptRec('"+esc(r.knob)+"')\">adopt</button>":"")+"</td>"
-        +"<td style='text-align:left' class='muted' style='font-size:12px'>"+esc(r.basis)+"</td></tr>";
+// ===== Learning recommendations — shown INLINE next to each Filter-tuning knob (read-only; Gavin edits the input himself) =====
+let RECMAP={};
+function escAttr(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function renderRecIndicators(){
+  for(const key in RECMAP){ const el=document.getElementById('rec_'+key); if(!el) continue; const r=RECMAP[key];
+    if(r.changed){ el.innerHTML="<span title='"+escAttr(r.basis)+"' style='background:rgba(74,222,128,0.14);border:1px solid #4ade80;color:#4ade80;font-weight:700;border-radius:5px;padding:1px 7px;font-size:12px;cursor:help'>"+r.recommended+" (recommended)</span>"; }
+    else { el.innerHTML="<span title='"+escAttr(r.basis)+"' class='muted' style='font-size:11px;cursor:help'>rec "+r.recommended+" — matches</span>"; }
+  }
+}
+async function loadRecommendations(){
+  try{ const j=await (await fetch(api('recommendations')+'&_cb='+Date.now())).json();
+    RECMAP={}; for(const it of (j.items||[])) RECMAP[it.knob]={recommended:it.recommended, basis:it.basis, changed:!!it.changed};
+    renderRecIndicators();
+    const n=document.getElementById('tuneNote'); if(n){ const nC=(j.items||[]).filter(i=>i.changed).length;
+      n.innerHTML='Adjust how hard each filter pushes price, then Save. Applies immediately to the calendar &amp; breakdown (does not push to OwnerRez).<br><span class="muted" style="font-size:12px">Each knob shows the learning-<b style="color:#4ade80">recommended</b> value next to it (green = differs from your current — hover for why; based on '+escAttr(j.paceBasis||'pace trend')+'). It never changes the knob — type the new value in yourself to adopt it.'+(nC?(' <b>'+nC+'</b> knob'+(nC>1?'s':'')+' currently recommended to change.'):'')+'</span>';
     }
-    el.innerHTML=h;
-    const nChanged=RECS.filter(r=>r.changed).length;
-    document.getElementById('recStatus').textContent=nChanged?(nChanged+' knob'+(nChanged>1?'s':'')+' recommended to change'):'all knobs already at their recommended value';
-  }catch(e){ el.innerHTML="<tr><td class='muted'>Could not load: "+e.message+"</td></tr>"; }
+  }catch(e){}
 }
-async function adoptKnobs(opts){
-  document.getElementById('recStatus').textContent='Adopting…';
-  const r=await fetch(api('adopt_recommendation'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(opts)});
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok||!j.ok){ document.getElementById('recStatus').textContent='Failed: '+(j.error||('HTTP '+r.status))+' (logged in?)'; return; }
-  const ap=(j.applied||[]).map(a=>a.knob+'='+a.value).join(', ');
-  await loadKnobs(); await loadRecommendations(); await applyPreview(); await refreshBreakdownIfOpen();
-  document.getElementById('recStatus').textContent=ap?('Adopted '+ap+' ✓ — only those knobs changed.'):'No changes to adopt.';
-}
-async function adoptRec(knob){ await adoptKnobs({knobs:[knob]}); }
-async function adoptSelectedRecs(){ const ks=[...document.querySelectorAll('.recChk:checked')].map(c=>c.value); if(!ks.length){ document.getElementById('recStatus').textContent='Tick some rows first.'; return; } await adoptKnobs({knobs:ks}); }
-async function adoptAllRecs(){ const n=RECS.filter(r=>r.changed).length; if(!n) return; if(!confirm('Adopt all '+n+' recommended changes?')) return; await adoptKnobs({all:true}); }
 async function refreshBreakdownIfOpen(){
   const m=document.getElementById('bdModal'); if(m && m.style.display!=='none' && BD && BD.unit && BD.date){
     try{ const j=await (await fetch(api('breakdown')+'&unit='+BD.unit+'&date='+BD.date)).json(); document.getElementById('bdBody').innerHTML=j.error?('Error: '+j.error):renderBreakdown(j); }catch(e){}
