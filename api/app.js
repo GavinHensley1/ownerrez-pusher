@@ -202,11 +202,12 @@ function compute(signalMap,targets,today,startDate,days,occ,overrides,learned){
 //   last-minute (lead<=WINDOW): extra discount scaling with proximity x how-far-behind (empty+imminent only)
 //   hard clamp to [FLOOR/base, ceil/base] so the rate nears the TRUE floor/ceiling only when occupancy is FAR off.
 //   per RUN the APPLIED mult eases toward desired by at most STEP (glideslope). mode:"steady" returns the destination.
-function glideRef(target,lead,dtN){ return GS.USE_PACE_REF ? target*paceFrac(lead,dtN,null) : target; }
+function glideRef(target,lead,dtN,learned){ return GS.USE_PACE_REF ? target*paceFrac(lead,dtN,learned) : target; }
 function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsState,opts){
   const start=new Date(startDate+"T00:00:00Z"); const t0=new Date(today+"T00:00:00Z"); const out=[]; overrides=overrides||{}; gsState=gsState||{}; opts=opts||{};
   const mode=opts.mode||"steady"; const gsNext={...gsState}; const applyGap=opts.applyGap===true;
   const K=opts.knobs||DEFAULT_KNOBS; // editable filter-strength knobs (defaults == prior hardcoded behavior)
+  const glLearned=opts.learned||null; // pace-curve learning blend (same curve as the "Resort pace vs target" table)
   const sv=Object.values(signalMap).filter(v=>v>0); const peakThr=(sv.length?median(sv):K.floor)*MODEL.PEAK_MULT;
   const poolCache={};
   for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const mo=d.getUTCMonth()+1; const we=isWe(d); const dt=we?1:0; const dtN=we?"weekend":"weekday";
@@ -215,7 +216,10 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     // resort-level occupancy for this month + daytype (whole-month measurement)
     const ck=mk+"|"+dt; if(poolCache[ck]===undefined){ const pa=occ.agg&&occ.agg.poolAgg[mk]&&occ.agg.poolAgg[mk][dt]; poolCache[ck]=pa&&pa.t?pa.b/pa.t:0; }
     const poolOcc=occ.hasData?poolCache[ck]:null;
-    const target=we?targets[mo].we:targets[mo].wd; const ref=glideRef(target,lead,dtN);
+    // SAVED monthly occupancy targets are the single source of truth for the pace reference.
+    const tRow=(targets&&targets[mo])||SEED_TARGETS[mo]; let target=we?tRow.we:tRow.wd;
+    if(target==null||!isFinite(target)){ const sd=SEED_TARGETS[mo]; target=we?sd.we:sd.wd; } // fallback: never silently use a flat/zero target
+    const pf=GS.USE_PACE_REF?paceFrac(lead,dtN,glLearned):1; const ref=target*pf; // pace-ref = saved target x booking-pace ramp (same curve as the pace table)
     // DEMAND is split: RESORT (whole-resort occ vs pace-ref) at night level; UNIT (this unit's own occ) inside the loop.
     // blendedGap = wResort*resortGap + wUnit*unitGap ; default wResort=1,wUnit=0 -> blendedGap == resortGap == today's behavior.
     let resortGap=null,lm=0;
@@ -255,6 +259,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
       out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,minNights,gapApplied,
         gapTier,gapHasWeekend:gapHasWe,gapDisc:Number(gapDisc.toFixed(3)),effDisc:Number(effDisc.toFixed(3)),discSource,
         poolOcc:poolOcc==null?null:Number(poolOcc.toFixed(3)),unitOcc:unitOcc==null?null:Number(unitOcc.toFixed(3)),ref:Number(ref.toFixed(3)),
+        savedTarget:Number(target.toFixed(3)),paceFrac:Number(pf.toFixed(3)),
         resortGap:resortGap==null?null:Number(resortGap.toFixed(3)),unitGap:unitGap==null?null:Number(unitGap.toFixed(3)),gap:blendedGap==null?null:Number(blendedGap.toFixed(3)),
         desiredBaseMult:occ.hasData?Number(desiredBase.toFixed(3)):null, prem,
         lead,lm:Number(lm.toFixed(3)),desiredMult:desiredC==null?null:Number(desiredC.toFixed(3)),appliedMult:applied==null?null:Number(applied.toFixed(3))}); } }
@@ -752,7 +757,7 @@ module.exports=async(req,res)=>{
       let occ; if(b&&typeof b.mockOcc==="number") occ={hasData:true,mock:b.mockOcc};
       else { const od=await getOccData(st,today,days,true); occ={hasData:od.booked.total>0, agg:od.agg}; }
       const gapOn=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false; const K=await getKnobs();
-      const model=(st.pricing_model==="glide")?"glide":"legacy";let rates;if(model==="glide"){const gsState=(redis&&await redis.get("parkside:gs"))||{};rates=computeGlide(sig,targets,today,today,days,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn,knobs:K}).rates;}else{rates=compute(sig,targets,today,today,days,occ,st.overrides,learned);} const amts=rates.map(r=>r.amount);
+      const model=(st.pricing_model==="glide")?"glide":"legacy";let rates;if(model==="glide"){const gsState=(redis&&await redis.get("parkside:gs"))||{};rates=computeGlide(sig,targets,today,today,days,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn,knobs:K,learned}).rates;}else{rates=compute(sig,targets,today,today,days,occ,st.overrides,learned);} const amts=rates.map(r=>r.amount);
       const pace = occ.agg ? computePace(occ.agg.poolAgg, targets, learned, today, monthList(today,days)) : null;
       const paceLearn={weekend:learned.weekend.n||0,weekday:learned.weekday.n||0,blendWeight:Math.min(0.8,((learned.weekend.n||0)+(learned.weekday.n||0))/600).toFixed(2)};
       return res.status(200).json({mode:"PREVIEW",wrote:false,count:rates.length,coldStart:!occ.hasData,min:Math.min(...amts),max:Math.max(...amts),avg:Math.round(amts.reduce((a,c)=>a+c,0)/amts.length),overrideCount:rates.filter(r=>r.overridden).length,pace,paceLearn,rates});
@@ -764,7 +769,7 @@ module.exports=async(req,res)=>{
       const st=await getState(); const targets=st.targets; const sig=await getSignal(); const learned=await getLearned();
       const od=await getOccData(st,today,days,true); const occ={hasData:od.booked.total>0, agg:od.agg};
       const before=compute(sig,targets,today,today,N,occ,st.overrides,learned);            // legacy = what is live today
-      const after=computeGlide(sig,targets,today,today,N,occ,st.overrides,{},{mode:"steady",knobs:await getKnobs()}).rates; // glide steady-state destination
+      const after=computeGlide(sig,targets,today,today,N,occ,st.overrides,{},{mode:"steady",knobs:await getKnobs(),learned}).rates; // glide steady-state destination
       const bIx={}; for(const r of before) bIx[r.property_id+"|"+r.date]=r.amount;
       const perUnit={}; let gBefore=[],gAfter=[];
       for(const u of UNITS) perUnit[u.orp]={unit:u.name,nights:[]};
@@ -804,7 +809,7 @@ module.exports=async(req,res)=>{
       if(model==="glide"){
         const gapOn=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
         const gsState=(redis&&await redis.get("parkside:gs"))||{};
-        const g=computeGlide(sig,st.targets,today,today,days,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn,knobs:K});
+        const g=computeGlide(sig,st.targets,today,today,days,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn,knobs:K,learned:await getLearned()});
         rates=g.rates; if(redis) await redis.set("parkside:gs",g.gsNext); // ease the applied multiplier toward target; NO demand/elasticity learning
         if(redis){ // min-stay bookkeeping: set min on active gap nights; restore default on nights that stopped being gaps
           const prevSet=(await redis.get("parkside:gapmin"))||[]; const nowSet=[]; const rIx={};
@@ -830,8 +835,9 @@ module.exports=async(req,res)=>{
       const st=await getState(); const sig=await getSignal();
       const od=await getOccData(st,today,days,true); const occ={hasData:od.booked.total>0, agg:od.agg};
       const gsState=(redis&&await redis.get("parkside:gs"))||{}; const K=await getKnobs();
-      const normal=computeGlide(sig,st.targets,today,today,N,occ,st.overrides,gsState,{mode:"step",applyGap:false,knobs:K}).rates;
-      const gapped=computeGlide(sig,st.targets,today,today,N,occ,st.overrides,gsState,{mode:"step",applyGap:true,knobs:K}).rates;
+      const lrn=await getLearned();
+      const normal=computeGlide(sig,st.targets,today,today,N,occ,st.overrides,gsState,{mode:"step",applyGap:false,knobs:K,learned:lrn}).rates;
+      const gapped=computeGlide(sig,st.targets,today,today,N,occ,st.overrides,gsState,{mode:"step",applyGap:true,knobs:K,learned:lrn}).rates;
       const nIx={}; for(const r of normal) nIx[r.property_id+"|"+r.date]=r.amount;
       const gapOn=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
       const perUnit={}; const totals={1:0,2:0,3:0}; let count=0;
@@ -860,9 +866,10 @@ module.exports=async(req,res)=>{
       const gsState=(redis&&await redis.get("parkside:gs"))||{}; const K=await getKnobs();
       const gapOn=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
       const span=Math.max(1, daysBetween(today,ds)+1);
-      const liveRates=computeGlide(sig,st.targets,today,today,span,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn,knobs:K}).rates;
-      const gapRates=computeGlide(sig,st.targets,today,today,span,occ,st.overrides,gsState,{mode:"step",applyGap:true,knobs:K}).rates;
-      const normRates=computeGlide(sig,st.targets,today,today,span,occ,st.overrides,gsState,{mode:"step",applyGap:false,knobs:K}).rates;
+      const lrn=await getLearned();
+      const liveRates=computeGlide(sig,st.targets,today,today,span,occ,st.overrides,gsState,{mode:"step",applyGap:gapOn,knobs:K,learned:lrn}).rates;
+      const gapRates=computeGlide(sig,st.targets,today,today,span,occ,st.overrides,gsState,{mode:"step",applyGap:true,knobs:K,learned:lrn}).rates;
+      const normRates=computeGlide(sig,st.targets,today,today,span,occ,st.overrides,gsState,{mode:"step",applyGap:false,knobs:K,learned:lrn}).rates;
       const find=arr=>arr.find(r=>String(r.property_id)===String(u.orp)&&r.date===ds);
       const live=find(liveRates), withGap=find(gapRates), norm=find(normRates);
       if(!live) return res.status(200).json({error:"date out of horizon"});
@@ -882,6 +889,8 @@ module.exports=async(req,res)=>{
       steps.push({label:'1 · Base price', math:'PriceLabs base $'+sigShown+(ovOn?' (flat override)':'')+'  ×  '+u.name+' premium '+prem+'  =  $'+base, value:'$'+base});
       if(!occ.hasData){ steps.push({label:'2 · Demand', math:'no occupancy data yet → priced at seasonal base', value:'$'+live.amount}); }
       else {
+        const monNm=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][new Date(ds+'T00:00:00Z').getUTCMonth()];
+        steps.push({label:'2 · Pace reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+(isWe(new Date(ds+'T00:00:00Z'))?'weekend':'weekday')+') × pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d) = pace-ref '+pct(live.ref), value:pct(live.ref)});
         steps.push({label:'2a · Resort demand', math:'whole-resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  resort gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind)':live.resortGap<0?' (ahead)':'')+'  ·  weight ×'+K.wResort, value:'gap '+sgn(live.resortGap)});
         steps.push({label:'2b · Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  unit gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind)':live.unitGap<0?' (ahead)':'')+'  ·  weight ×'+K.wUnit, value:'gap '+sgn(live.unitGap)});
         steps.push({label:'2c · Combined demand', math:'blended gap = wResort '+K.wResort+'×'+sgn(live.resortGap)+' + wUnit '+K.wUnit+'×'+sgn(live.unitGap)+' = '+sgn(live.gap)+'  →  desired ×(1 − GAIN '+K.GAIN+' × gap) = ×'+live.desiredBaseMult, value:'×'+live.desiredBaseMult});
@@ -903,7 +912,7 @@ module.exports=async(req,res)=>{
         knobs:{GAIN:K.GAIN,STEP:K.STEP,wResort:K.wResort,wUnit:K.wUnit,lmMax:K.lmMax,lmWindow:K.lmWindow,gap1:K.gap1,gap2:K.gap2,gap3:K.gap3,gapWeekend:K.gapWeekend,floor:K.floor,ceil:K.ceil,saneMin:K.saneMin},
         signal:{ value:sigShown, priceLabsRaw:(sigRaw==null?null:sigRaw), override:ovOn?Number(signalOverride):null, source:ovOn?"flat override ($"+Number(signalOverride)+")":"PriceLabs" },
         premium:prem, base:base, peak:live.peak,
-        glide:{ poolOcc:live.poolOcc, unitOcc:live.unitOcc, refTarget:live.ref, resortGap:live.resortGap, unitGap:live.unitGap, blendedGap:live.gap, wResort:K.wResort, wUnit:K.wUnit, desiredBaseMult:live.desiredBaseMult, gain:K.GAIN, step:K.STEP, desiredMult:live.desiredMult, appliedMult:live.appliedMult },
+        glide:{ savedTarget:live.savedTarget, paceFrac:live.paceFrac, paceRef:live.ref, poolOcc:live.poolOcc, unitOcc:live.unitOcc, refTarget:live.ref, resortGap:live.resortGap, unitGap:live.unitGap, blendedGap:live.gap, wResort:K.wResort, wUnit:K.wUnit, desiredBaseMult:live.desiredBaseMult, gain:K.GAIN, step:K.STEP, desiredMult:live.desiredMult, appliedMult:live.appliedMult },
         lastMinute:{ window:K.lmWindow, lead:live.lead, max:K.lmMax, lm:live.lm },
         gapNight:{ tier:withGap.gapTier||0, hasWeekend:withGap.gapHasWeekend||false, discPct:Math.round((withGap.gapDisc||0)*100), deeperOf:withGap.discSource, live:gapOn, appliedNow:isGapActive, ifEnabledPrice:withGap.amount, ifEnabledMinNights:withGap.minNights },
         clamp:{ floor:K.floor, ceil:ceil, saneMin:K.saneMin, gapExemptFromSaneMin:true },
