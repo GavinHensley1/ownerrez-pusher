@@ -325,11 +325,44 @@ function deriveLearned(events,L){
 async function getLearned(){ const ev=(redis&&await redis.get("parkside:events"))||[]; const L=(redis&&await redis.get("parkside:learn"))||{}; return deriveLearned(ev,L); }
 
 function monthList(today,days){ const start=new Date(today+"T00:00:00Z"); const set={}; for(let i=0;i<days;i++){const d=new Date(start);d.setUTCDate(d.getUTCDate()+i); set[d.toISOString().slice(0,7)]=1;} return Object.keys(set).sort(); }
-function computePace(poolAgg,targets,learned,today,months){ const pace={};
-  for(const mk of months){ const lead=monthLead(mk+"-15",today); const tgt=targets[parseInt(mk.slice(5))]; const pa=poolAgg[mk]||[{b:0,t:0},{b:0,t:0}];
-    const f=(dt,dn,tv)=>{const act=pa[dt].t?Math.round(100*pa[dt].b/pa[dt].t):0; const exp=Math.round(100*tv*paceFrac(lead,dn,learned)); return {act,exp,status:act>=exp?"ahead":"behind"};};
-    pace[mk]={wknd:f(1,"weekend",tgt.we),wkdy:f(0,"weekday",tgt.wd)}; }
+function computePace(poolAgg,targets,learned,today,months){ const pace={}; const t0=new Date(today+"T00:00:00Z");
+  for(const mk of months){ const tgt=targets[parseInt(mk.slice(5))]; const pa=poolAgg[mk]||[{b:0,t:0},{b:0,t:0}];
+    // ACCURATE expected = average of each night's OWN pace-ref (target × deterministic pacing at that date's lead),
+    // not the whole month evaluated at the month-start lead. Split by daytype + a combined ALL-days figure that
+    // reconciles exactly with the averaged "Current occupancy %" panel.
+    const y=parseInt(mk.slice(0,4)), mo=parseInt(mk.slice(5,7)); const ndays=new Date(Date.UTC(y,mo,0)).getUTCDate();
+    const expSum=[0,0], expCnt=[0,0];
+    for(let dd=1; dd<=ndays; dd++){ const d=new Date(Date.UTC(y,mo-1,dd)); const dt=isWe(d)?1:0; const dtN=dt?"weekend":"weekday";
+      const lead=Math.max(0,Math.round((d-t0)/86400000)); const tv=dt?tgt.we:tgt.wd; expSum[dt]+=tv*paceFrac(lead,dtN,null); expCnt[dt]++; }
+    const f=(dt)=>{ const act=pa[dt].t?Math.round(100*pa[dt].b/pa[dt].t):0; const exp=expCnt[dt]?Math.round(100*expSum[dt]/expCnt[dt]):0; return {act,exp,status:act>=exp?"ahead":"behind"}; };
+    const ball=pa[0].b+pa[1].b, tall=pa[0].t+pa[1].t; const actAll=tall?Math.round(100*ball/tall):0;
+    const expAll=(expCnt[0]+expCnt[1])?Math.round(100*(expSum[0]+expSum[1])/(expCnt[0]+expCnt[1])):0;
+    pace[mk]={wknd:f(1),wkdy:f(0),all:{act:actAll,exp:expAll,status:actAll>=expAll?"ahead":"behind"}}; }
   return pace; }
+// ===== SUGGESTIONS: the learning component PROPOSES knob changes. SUGGEST-ONLY — never auto-applies.
+// Heuristics from occupancy-vs-target pace trend; each suggestion is clearly labelled with its basis + confidence.
+function clampKnob(key,v){ const r=KNOB_RANGES[key]; if(!r) return v; v=Math.max(r[0],Math.min(r[1],Number(v))); return r[2]?Math.round(v):Number(v.toFixed(3)); }
+async function genSuggestions(today){
+  const st=await getState(); const K=await getKnobs(); const learned=await getLearned();
+  const od=await getOccData(st,today,365,true);
+  const months=monthList(today,150); const pace=computePace(od.agg.poolAgg, st.targets, learned, today, months);
+  const upcoming=months.slice(0,4); let behindSum=0,cnt=0; const detail=[];
+  for(const mk of upcoming){ const a=pace[mk]&&pace[mk].all; if(a&&a.exp>0){ behindSum+=(a.exp-a.act); cnt++; detail.push(mk.slice(5)+' '+a.act+'/'+a.exp); } }
+  const avgBehind=cnt?Math.round(behindSum/cnt):0; // + = behind pace, − = ahead
+  const basis='pace trend over next '+cnt+' months (act/exp: '+detail.join(', ')+')';
+  const raw=[];
+  if(avgBehind>=8){ const conf=avgBehind>=18?'high':avgBehind>=12?'medium':'low';
+    raw.push({knob:'gap1', suggested:clampKnob('gap1',K.gap1+0.05), reason:'Resort is ~'+avgBehind+' pts BEHIND pace — deepen the 1-night orphan discount to fill harder-to-sell gap nights.', confidence:conf});
+    raw.push({knob:'lmMax', suggested:clampKnob('lmMax',K.lmMax+0.05), reason:'Behind pace — a stronger last-minute discount helps move still-open near-in nights.', confidence:conf});
+    raw.push({knob:'GAIN', suggested:clampKnob('GAIN',K.GAIN+0.1), reason:'Behind pace — more demand reactivity so prices soften faster when occupancy lags.', confidence:'low'});
+  } else if(avgBehind<=-8){ const conf=avgBehind<=-18?'high':avgBehind<=-12?'medium':'low';
+    raw.push({knob:'gap1', suggested:clampKnob('gap1',K.gap1-0.05), reason:'Resort is ~'+(-avgBehind)+' pts AHEAD of pace — shrink the 1-night gap discount and hold more price.', confidence:conf});
+    raw.push({knob:'GAIN', suggested:clampKnob('GAIN',K.GAIN-0.1), reason:'Ahead of pace — reduce reactivity so strong demand holds price.', confidence:'low'});
+    raw.push({knob:'floor', suggested:clampKnob('floor',K.floor+10), reason:'Ahead of pace — a higher floor protects revenue on the cheapest nights.', confidence:'low'});
+  }
+  const items=raw.filter(s=>Number(s.suggested)!==Number(K[s.knob])).map((s,i)=>({ id:'sg'+Date.now().toString(36)+i, knob:s.knob, current:K[s.knob], suggested:s.suggested, reason:s.reason, confidence:s.confidence, basis, ts:Date.now() }));
+  const out={ ts:Date.now(), avgBehind, basis, items }; if(redis) await redis.set("parkside:suggestions",out); return out;
+}
 // ===== Guest-messaging send path (added) =====
 const APOLOGY="I'm sorry, I don't know the answer to that. Let me check with a manager and I'll get back to you soon.";
 let _memLastSend=null;
@@ -951,6 +984,32 @@ module.exports=async(req,res)=>{
       if(redis) await redis.set("parkside:knobs",next);
       const k=await getKnobs();
       return res.status(200).json({ok:true,applied,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,lmSteep:k.lmSteep,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}});
+    }
+    if(action==="suggestions"){ // READ-ONLY: returns stored suggestions; regenerates if empty or ?regen=1. NEVER applies anything.
+      const stored=redis?(await redis.get("parkside:suggestions")):null;
+      if((req.query&&req.query.regen==="1") || !stored || !stored.items){ const g=await genSuggestions(today); return res.status(200).json({...g,suggestOnly:true}); }
+      return res.status(200).json({...stored,suggestOnly:true});
+    }
+    if(action==="apply_suggestion"){ // AUTH: applies ONLY the chosen suggestion's knob(s) — explicit Gavin action.
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
+      const stored=(redis&&await redis.get("parkside:suggestions"))||{items:[]}; const items=stored.items||[];
+      const ids = (b&&b.all) ? items.map(s=>s.id) : (Array.isArray(b&&b.ids)?b.ids : (b&&b.id?[b.id]:[]));
+      const toApply=items.filter(s=>ids.includes(s.id));
+      const cur=(redis&&await redis.get("parkside:knobs"))||{}; const applied=[]; const errs=[];
+      for(const s of toApply){ const r=KNOB_RANGES[s.knob]; if(!r){ errs.push(s.knob+": unknown knob"); continue; } let v=Number(s.suggested); if(!isFinite(v)){ errs.push(s.knob+": bad value"); continue; } if(r[2])v=Math.round(v); v=Math.max(r[0],Math.min(r[1],v)); cur[s.knob]=v; applied.push({knob:s.knob,value:v}); }
+      if(applied.length && redis) await redis.set("parkside:knobs",cur); // writes ONLY the applied knob(s)
+      const remain=items.filter(s=>!ids.includes(s.id)); if(redis) await redis.set("parkside:suggestions",{...stored,items:remain});
+      const k=await getKnobs();
+      return res.status(200).json({ok:true, applied, errors:errs, remaining:remain.length, knobs:{GAIN:k.GAIN,STEP:k.STEP,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,lmSteep:k.lmSteep,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}});
+    }
+    if(action==="dismiss_suggestion"){ // AUTH: removes suggestion(s); changes no settings.
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
+      const stored=(redis&&await redis.get("parkside:suggestions"))||{items:[]}; const items=stored.items||[];
+      const ids = (b&&b.all) ? items.map(s=>s.id) : (Array.isArray(b&&b.ids)?b.ids : (b&&b.id?[b.id]:[]));
+      const remain=items.filter(s=>!ids.includes(s.id)); if(redis) await redis.set("parkside:suggestions",{...stored,items:remain});
+      return res.status(200).json({ok:true, dismissed:ids.length, remaining:remain.length});
     }
         if(action==="ai_draft"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});

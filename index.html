@@ -142,6 +142,19 @@
     <div class="legend">Click any day → full price breakdown + pin/override. 📌 purple = manual override (engine + cron never change it). Grey dashed = already booked. <span style="color:#e6b85c">GAP</span> = orphan-night discount.</div>
   </div>
 
+  <div class="card" id="suggestCard">
+    <h2>💡 Suggestions <span class="muted" style="font-weight:400;text-transform:none">— the learning system PROPOSES changes; you apply what you want, when you want (it never changes anything on its own)</span></h2>
+    <div class="legend" id="suggestNote" style="margin-bottom:8px">Loading…</div>
+    <div id="suggestList"></div>
+    <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;align-items:center">
+      <button onclick="applySelectedSuggestions()">Apply selected</button>
+      <button class="ghost" onclick="applyAllSuggestions()">Apply all</button>
+      <button class="ghost" onclick="dismissAllSuggestions()">Dismiss all</button>
+      <button class="ghost" onclick="refreshSuggestions()">↻ Refresh</button>
+      <span id="suggestStatus" class="muted" style="align-self:center"></span>
+    </div>
+  </div>
+
   <div class="card" id="tuneCard">
     <h2>🎚 Filter tuning <span class="muted" style="font-weight:400;text-transform:none">— manual strength knobs now; the learning system will drive these automatically later</span></h2>
     <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then Save. Applies immediately to the calendar &amp; breakdown (does not push to OwnerRez).</div>
@@ -392,12 +405,13 @@ async function loadOccupancy(){
 function renderPaceTable(months,pace,paceLearn){
   const pt=document.getElementById('paceTable'); if(!pt||!pace||!months||!months.length) return;
   let h="<tr><th>Day-type</th>"+months.map(mk=>{const a=mk.split('-');return `<th>${MON[+a[1]-1]} '${a[0].slice(2)}</th>`;}).join("")+"</tr>";
-  for(const pair of [["Weekend","wknd"],["Weekday","wkdy"]]){
-    h+=`<tr><td>${pair[0]}</td>`+months.map(mk=>{const c=pace[mk]&&pace[mk][pair[1]];if(!c)return "<td>—</td>";const ah=c.status==='ahead';return `<td class='${ah?'hot':'cold'}'>${c.act}/${c.exp}% ${ah?'▲':'▼'}</td>`;}).join("")+"</tr>";
+  for(const pair of [["Resort (avg)","all"],["Weekend","wknd"],["Weekday","wkdy"]]){
+    const strong=pair[1]==='all';
+    h+=`<tr><td${strong?" style='font-weight:700'":""}>${pair[0]}</td>`+months.map(mk=>{const c=pace[mk]&&pace[mk][pair[1]];if(!c)return "<td>—</td>";const ah=c.status==='ahead';return `<td class='${ah?'hot':'cold'}'${strong?" style='font-weight:700'":""}>${c.act}/${c.exp}% ${ah?'▲':'▼'}</td>`;}).join("")+"</tr>";
   }
   pt.innerHTML=h; pt.classList.remove('flash'); void pt.offsetWidth; pt.classList.add('flash');
   const pl=paceLearn||{weekend:0,weekday:0,blendWeight:'0.00'};
-  document.getElementById('paceNote').textContent=`Cells show actual / pace-target occupancy for each month at today's lead time. ▲ ahead of pace → prices lift; ▼ behind → prices soften. Pace curve = seeded default booking-pace, blended with learning from real bookings (learned weight ${pl.blendWeight}; ${((pl.weekend||0)+(pl.weekday||0))} booking events logged so far).`;
+  document.getElementById('paceNote').textContent=`Each cell = actual / pace-target occupancy. "Resort (avg)" is the all-days resort occupancy — it equals the average of the "Current occupancy %" panel above. Expected = the average of each night's own pace-target at its real lead (deterministic curve), not a single month-start estimate. ▲ ahead → prices lift; ▼ behind → soften.`;
 }
 let _pvTimer=null;
 function schedulePreview(){ document.getElementById('tStatus').textContent="Editing… (auto-updating)"; clearTimeout(_pvTimer); _pvTimer=setTimeout(applyPreview,300); }
@@ -567,6 +581,41 @@ async function resetKnobs(){
   await loadKnobs(); await applyPreview(); await refreshBreakdownIfOpen();
   document.getElementById('tuneStatus').textContent='Reset to defaults ✓';
 }
+// ===== Suggestions (learning proposes; Gavin applies selectively) =====
+let SUGGESTIONS=[];
+async function loadSuggestions(regen){
+  const el=document.getElementById('suggestList'); if(!el) return;
+  if(regen) el.innerHTML="<span class='muted'>Generating…</span>";
+  try{ const j=await (await fetch(api('suggestions')+(regen?'&regen=1':'')+'&_cb='+Date.now())).json(); SUGGESTIONS=j.items||[];
+    const note=document.getElementById('suggestNote');
+    if(!SUGGESTIONS.length){ note.textContent='No changes suggested right now'+(j.basis?(' — '+j.basis):'')+'. Refresh as bookings evolve.'; el.innerHTML="<span class='muted'>Nothing to apply.</span>"; return; }
+    note.textContent='Based on '+(j.basis||'pace trends')+'. Apply any subset, on your schedule.';
+    el.innerHTML=SUGGESTIONS.map(s=>{ const cc=s.confidence==='high'?'#2f7d4f':s.confidence==='medium'?'#7a6a2f':'#3a4759';
+      return "<div style='border:1px solid var(--line);border-radius:8px;padding:10px;margin:8px 0'>"
+      +"<div style='display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap'>"
+        +"<label style='font-weight:700'><input type='checkbox' class='sgChk' value='"+s.id+"' style='margin-right:8px;vertical-align:middle'>"+esc(s.knob)+": <span class='muted'>"+s.current+"</span> → <span style='color:#4ade80'>"+s.suggested+"</span></label>"
+        +"<span class='pill' style='background:"+cc+"'>"+esc(s.confidence)+" confidence</span></div>"
+      +"<div class='legend' style='margin-top:5px'>"+esc(s.reason)+"</div>"
+      +"<div style='margin-top:7px;display:flex;gap:8px'><button onclick=\"applySuggestion('"+s.id+"')\">Apply</button><button class='seg-x' onclick=\"dismissSuggestion('"+s.id+"')\">Dismiss</button></div>"
+      +"</div>"; }).join("");
+  }catch(e){ el.innerHTML="<span class='muted'>Could not load suggestions: "+e.message+"</span>"; }
+}
+async function applyIds(opts){
+  document.getElementById('suggestStatus').textContent='Applying…';
+  const r=await fetch(api('apply_suggestion'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(opts)});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok||!j.ok){ document.getElementById('suggestStatus').textContent='Failed: '+(j.error||(j.errors&&j.errors.join('; '))||('HTTP '+r.status)); return; }
+  const ap=(j.applied||[]).map(a=>a.knob+'='+a.value).join(', ');
+  document.getElementById('suggestStatus').textContent=ap?('Applied '+ap+' ✓ (only those knobs) — recomputing…'):'Nothing applied';
+  await loadKnobs(); await loadSuggestions(); await applyPreview(); await refreshBreakdownIfOpen();
+  if(ap) document.getElementById('suggestStatus').textContent='Applied '+ap+' ✓ — only those knobs changed.';
+}
+async function applySuggestion(id){ await applyIds({ids:[id]}); }
+async function applySelectedSuggestions(){ const ids=[...document.querySelectorAll('.sgChk:checked')].map(c=>c.value); if(!ids.length){ document.getElementById('suggestStatus').textContent='Tick some suggestions first.'; return; } await applyIds({ids}); }
+async function applyAllSuggestions(){ if(!SUGGESTIONS.length) return; if(!confirm('Apply ALL '+SUGGESTIONS.length+' suggestions now?')) return; await applyIds({all:true}); }
+async function dismissSuggestion(id){ const r=await fetch(api('dismiss_suggestion'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({id})}); if(r.ok) await loadSuggestions(); }
+async function dismissAllSuggestions(){ if(!SUGGESTIONS.length) return; if(!confirm('Dismiss all suggestions?')) return; const r=await fetch(api('dismiss_suggestion'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({all:true})}); if(r.ok) await loadSuggestions(); }
+async function refreshSuggestions(){ await loadSuggestions(true); document.getElementById('suggestStatus').textContent='Refreshed ✓'; }
 async function refreshBreakdownIfOpen(){
   const m=document.getElementById('bdModal'); if(m && m.style.display!=='none' && BD && BD.unit && BD.date){
     try{ const j=await (await fetch(api('breakdown')+'&unit='+BD.unit+'&date='+BD.date)).json(); document.getElementById('bdBody').innerHTML=j.error?('Error: '+j.error):renderBreakdown(j); }catch(e){}
@@ -668,7 +717,7 @@ function boot(){
   HMIN=sY*12+sM; HMAX=eY*12+eM;
   document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611c`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
-  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning(); loadGoLiveStatus(); loadKnobs();
+  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning(); loadGoLiveStatus(); loadKnobs(); loadSuggestions();
 }
 
 // ===== Public inquiry + Victor's gate toggles =====
