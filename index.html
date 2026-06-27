@@ -522,7 +522,7 @@ async function bdClearPin(){
 // ===== Filter tuning knobs (manual now; learning later) =====
 let KNOBS_META=null;
 const KNOB_GROUPS=[
-  ['Demand / glide controller',[['GAIN','Glide strength','higher = price reacts harder to pace'],['STEP','Max change / run','easing speed'],['BAND_NEAR','Normal band','informational']]],
+  ['Demand / glide controller',[['GAIN','Glide strength','overall demand reactivity'],['wResort','Resort-demand weight','whole-resort occupancy (default 1)'],['wUnit','Unit-demand weight','this individual unit (default 0)'],['STEP','Max change / run','easing speed'],['BAND_NEAR','Normal band','informational']]],
   ['Orphan-gap discounts',[['gap1','1-night gap','0.30 = −30%'],['gap2','2-night gap','0.18 = −18%'],['gap3','3-night gap','0.08 = −8%'],['gapWeekend','Weekend factor','×0.5 = half depth on weekends']]],
   ['Last-minute',[['lmMax','Max discount','0.18 = −18%'],['lmWindow','Window (days)','within N days of check-in']]],
   ['Clamp & push sanity',[['floor','Floor $',''],['ceil','Ceiling $',''],['saneMin','Push min $','non-gap nights raised to this']]],

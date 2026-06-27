@@ -42,13 +42,15 @@ const GAP_RESET_MIN=Number(process.env.GAP_RESET_MIN||2); // min-stay restored t
 // ===== Editable filter-strength knobs (manual tuning now; the learning system will drive these later).
 // Defaults below == the current hardcoded behavior. Overrides persist in redis parkside:knobs and apply immediately.
 const DEFAULT_KNOBS={
-  GAIN:GS.GAIN, STEP:GS.STEP, BAND_NEAR:GS.BAND_NEAR,           // demand / glide controller
+  GAIN:GS.GAIN, STEP:GS.STEP, BAND_NEAR:GS.BAND_NEAR,           // demand / glide controller (overall strength)
+  wResort:1.0, wUnit:0.0,   // demand split: blendedGap = wResort*resortGap + wUnit*unitGap (default = resort-only = today's behavior)
   gap1:GAP_DISC[1], gap2:GAP_DISC[2], gap3:GAP_DISC[3], gapWeekend:GAP_WEEKEND_FACTOR, // orphan-gap discounts
   lmMax:LM.MAX, lmWindow:LM.WINDOW,                              // last-minute
   floor:FLOOR, ceil:CEIL, saneMin:Number(process.env.SANE_MIN_PUSH||110) // clamp + push sanity
 };
 const KNOB_RANGES={ // [min,max,isInt] for validation
   GAIN:[0,2,false], STEP:[0.01,0.5,false], BAND_NEAR:[0.01,0.6,false],
+  wResort:[0,2,false], wUnit:[0,2,false],
   gap1:[0,0.6,false], gap2:[0,0.6,false], gap3:[0,0.6,false], gapWeekend:[0,1,false],
   lmMax:[0,0.5,false], lmWindow:[0,60,true],
   floor:[50,400,true], ceil:[100,1000,true], saneMin:[50,1000,true]
@@ -214,12 +216,18 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     const ck=mk+"|"+dt; if(poolCache[ck]===undefined){ const pa=occ.agg&&occ.agg.poolAgg[mk]&&occ.agg.poolAgg[mk][dt]; poolCache[ck]=pa&&pa.t?pa.b/pa.t:0; }
     const poolOcc=occ.hasData?poolCache[ck]:null;
     const target=we?targets[mo].we:targets[mo].wd; const ref=glideRef(target,lead,dtN);
-    // desiredBase = pace-only multiplier (NO last-minute, NO gap). lm computed at night level; gap is per-unit.
-    let gap=null,desiredBase=1,lm=0;
-    if(occ.hasData){ gap=Math.max(-1,Math.min(1,ref-poolOcc)); desiredBase=1-K.GAIN*gap;
+    // DEMAND is split: RESORT (whole-resort occ vs pace-ref) at night level; UNIT (this unit's own occ) inside the loop.
+    // blendedGap = wResort*resortGap + wUnit*unitGap ; default wResort=1,wUnit=0 -> blendedGap == resortGap == today's behavior.
+    let resortGap=null,lm=0;
+    if(occ.hasData){ resortGap=Math.max(-1,Math.min(1,ref-poolOcc));
       if(lead<=K.lmWindow && K.lmWindow>0){ const prox=(K.lmWindow-lead)/K.lmWindow; const empt=Math.max(0,Math.min(1,ref-poolOcc)); lm=K.lmMax*prox*empt; } }
     for(const u of UNITS){ const key=u.orp+"|"+ds; const gkey=u.orp+"|"+mk+"|"+dt;
       const prem=UNIT_PREM[u.orp]||1.0; const base=Math.round(sig*prem); const floorMult=K.floor/base, ceilMult=ceil/base;
+      // UNIT demand: this unit's own occupancy vs the same pace-ref, then blend with resort demand.
+      let unitOcc=null,unitGap=null,blendedGap=null,desiredBase=1;
+      if(occ.hasData){ const ua=occ.agg.unitAgg&&occ.agg.unitAgg[u.orp]&&occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt];
+        unitOcc=ua&&ua.t?ua.b/ua.t:0; unitGap=Math.max(-1,Math.min(1,ref-unitOcc));
+        blendedGap=K.wResort*resortGap + K.wUnit*unitGap; desiredBase=1-K.GAIN*blendedGap; }
       let amount,overridden=false,applied=null,desiredC=null,minNights=null;
       // per-unit orphan-gap lookup (forward-only detection from buildAgg): {runLen,hasWeekend}
       const gi=(occ.agg&&occ.agg.gaps&&occ.agg.gaps[u.orp])?occ.agg.gaps[u.orp][ds]:null;
@@ -246,7 +254,8 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
       }
       out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,minNights,gapApplied,
         gapTier,gapHasWeekend:gapHasWe,gapDisc:Number(gapDisc.toFixed(3)),effDisc:Number(effDisc.toFixed(3)),discSource,
-        poolOcc:poolOcc==null?null:Number(poolOcc.toFixed(3)),ref:Number(ref.toFixed(3)),gap:gap==null?null:Number(gap.toFixed(3)),
+        poolOcc:poolOcc==null?null:Number(poolOcc.toFixed(3)),unitOcc:unitOcc==null?null:Number(unitOcc.toFixed(3)),ref:Number(ref.toFixed(3)),
+        resortGap:resortGap==null?null:Number(resortGap.toFixed(3)),unitGap:unitGap==null?null:Number(unitGap.toFixed(3)),gap:blendedGap==null?null:Number(blendedGap.toFixed(3)),
         desiredBaseMult:occ.hasData?Number(desiredBase.toFixed(3)):null, prem,
         lead,lm:Number(lm.toFixed(3)),desiredMult:desiredC==null?null:Number(desiredC.toFixed(3)),appliedMult:applied==null?null:Number(applied.toFixed(3))}); } }
   return {rates:out,gsNext};
@@ -873,7 +882,9 @@ module.exports=async(req,res)=>{
       steps.push({label:'1 · Base price', math:'PriceLabs base $'+sigShown+(ovOn?' (flat override)':'')+'  ×  '+u.name+' premium '+prem+'  =  $'+base, value:'$'+base});
       if(!occ.hasData){ steps.push({label:'2 · Demand', math:'no occupancy data yet → priced at seasonal base', value:'$'+live.amount}); }
       else {
-        steps.push({label:'2 · Demand (glide)', math:'occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.gap)+(live.gap>0?' (behind → soften)':live.gap<0?' (ahead → lift)':'')+'  →  desired ×(1 − GAIN '+K.GAIN+' × gap) = ×'+live.desiredBaseMult, value:'×'+live.desiredBaseMult});
+        steps.push({label:'2a · Resort demand', math:'whole-resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  resort gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind)':live.resortGap<0?' (ahead)':'')+'  ·  weight ×'+K.wResort, value:'gap '+sgn(live.resortGap)});
+        steps.push({label:'2b · Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  unit gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind)':live.unitGap<0?' (ahead)':'')+'  ·  weight ×'+K.wUnit, value:'gap '+sgn(live.unitGap)});
+        steps.push({label:'2c · Combined demand', math:'blended gap = wResort '+K.wResort+'×'+sgn(live.resortGap)+' + wUnit '+K.wUnit+'×'+sgn(live.unitGap)+' = '+sgn(live.gap)+'  →  desired ×(1 − GAIN '+K.GAIN+' × gap) = ×'+live.desiredBaseMult, value:'×'+live.desiredBaseMult});
         if(isGapActive){
           steps.push({label:'3 · Last-minute', math:(live.lm>0?('lead '+live.lead+'d in '+K.lmWindow+'d window, −'+Math.round(live.lm*100)+'% — but '):'')+'gap discount is deeper → last-minute not stacked', value:'—'});
           steps.push({label:'4 · Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (incl. weekend × '+K.gapWeekend+')':' (mid-week)')+'  →  −'+Math.round(withGap.gapDisc*100)+'%  →  applied ×'+activeMult+'  (bypasses step-easing)  ·  min-stay '+withGap.minNights, value:'×'+activeMult});
@@ -889,10 +900,10 @@ module.exports=async(req,res)=>{
       steps.push({label:'7 · Final pushed', math:'$'+pushedPrice+((isGapActive&&live.minNights)?('  ·  min-stay '+live.minNights):''), value:'$'+pushedPrice});
       return res.status(200).json({
         unit:u.name, property_id:u.orp, date:ds, daytype:(isWe(new Date(ds+"T00:00:00Z"))?"weekend":"weekday"), booked,
-        knobs:{GAIN:K.GAIN,STEP:K.STEP,lmMax:K.lmMax,lmWindow:K.lmWindow,gap1:K.gap1,gap2:K.gap2,gap3:K.gap3,gapWeekend:K.gapWeekend,floor:K.floor,ceil:K.ceil,saneMin:K.saneMin},
+        knobs:{GAIN:K.GAIN,STEP:K.STEP,wResort:K.wResort,wUnit:K.wUnit,lmMax:K.lmMax,lmWindow:K.lmWindow,gap1:K.gap1,gap2:K.gap2,gap3:K.gap3,gapWeekend:K.gapWeekend,floor:K.floor,ceil:K.ceil,saneMin:K.saneMin},
         signal:{ value:sigShown, priceLabsRaw:(sigRaw==null?null:sigRaw), override:ovOn?Number(signalOverride):null, source:ovOn?"flat override ($"+Number(signalOverride)+")":"PriceLabs" },
         premium:prem, base:base, peak:live.peak,
-        glide:{ poolOcc:live.poolOcc, refTarget:live.ref, gapVsPace:live.gap, desiredBaseMult:live.desiredBaseMult, gain:K.GAIN, step:K.STEP, desiredMult:live.desiredMult, appliedMult:live.appliedMult },
+        glide:{ poolOcc:live.poolOcc, unitOcc:live.unitOcc, refTarget:live.ref, resortGap:live.resortGap, unitGap:live.unitGap, blendedGap:live.gap, wResort:K.wResort, wUnit:K.wUnit, desiredBaseMult:live.desiredBaseMult, gain:K.GAIN, step:K.STEP, desiredMult:live.desiredMult, appliedMult:live.appliedMult },
         lastMinute:{ window:K.lmWindow, lead:live.lead, max:K.lmMax, lm:live.lm },
         gapNight:{ tier:withGap.gapTier||0, hasWeekend:withGap.gapHasWeekend||false, discPct:Math.round((withGap.gapDisc||0)*100), deeperOf:withGap.discSource, live:gapOn, appliedNow:isGapActive, ifEnabledPrice:withGap.amount, ifEnabledMinNights:withGap.minNights },
         clamp:{ floor:K.floor, ceil:ceil, saneMin:K.saneMin, gapExemptFromSaneMin:true },
@@ -903,13 +914,13 @@ module.exports=async(req,res)=>{
     }
     if(action==="get_knobs"){
       const k=await getKnobs();
-      const pick=x=>({GAIN:x.GAIN,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
+      const pick=x=>({GAIN:x.GAIN,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,wResort:x.wResort,wUnit:x.wUnit,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
       return res.status(200).json({knobs:pick(k), defaults:pick(DEFAULT_KNOBS), ranges:KNOB_RANGES, unitPremiums:UNIT_PREM});
     }
     if(action==="set_knobs"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{return res.status(400).json({error:"bad json"});}}
-      if(b&&b.reset){ if(redis) await redis.del("parkside:knobs"); const k=await getKnobs(); return res.status(200).json({ok:true,reset:true,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}}); }
+      if(b&&b.reset){ if(redis) await redis.del("parkside:knobs"); const k=await getKnobs(); return res.status(200).json({ok:true,reset:true,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}}); }
       const cur=(redis&&await redis.get("parkside:knobs"))||{}; const next={...cur}; const errors=[]; const applied={};
       for(const key in KNOB_RANGES){ if(b&&b[key]!=null&&b[key]!==""){ let v=Number(b[key]); const rng=KNOB_RANGES[key];
         if(!isFinite(v)){ errors.push(key+": not a number"); continue; }
@@ -922,7 +933,7 @@ module.exports=async(req,res)=>{
       if(errors.length) return res.status(400).json({ok:false,errors});
       if(redis) await redis.set("parkside:knobs",next);
       const k=await getKnobs();
-      return res.status(200).json({ok:true,applied,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}});
+      return res.status(200).json({ok:true,applied,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}});
     }
         if(action==="ai_draft"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
