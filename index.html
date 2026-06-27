@@ -142,6 +142,17 @@
     <div class="legend">Click any day → full price breakdown + pin/override. 📌 purple = manual override (engine + cron never change it). Grey dashed = already booked. <span style="color:#e6b85c">GAP</span> = orphan-night discount.</div>
   </div>
 
+  <div class="card" id="tuneCard">
+    <h2>🎚 Filter tuning <span class="muted" style="font-weight:400;text-transform:none">— manual strength knobs now; the learning system will drive these automatically later</span></h2>
+    <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then Save. Applies immediately to the calendar &amp; breakdown (does not push to OwnerRez).</div>
+    <div id="tuneGrid"></div>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center">
+      <button onclick="saveKnobs()">Save knobs</button>
+      <button class="ghost" onclick="resetKnobs()">Reset to defaults</button>
+      <span id="tuneStatus" class="muted" style="align-self:center"></span>
+    </div>
+  </div>
+
   <div class="card" id="advCard">
     <h2 style="cursor:pointer;user-select:none" onclick="toggleAdv()">⚙ Advanced / setup <span id="advCaret" style="color:var(--mut)">▸</span></h2>
     <div id="advBody" style="display:none">
@@ -477,30 +488,21 @@ function closeBd(){ document.getElementById('bdModal').style.display='none'; }
 function bdRow(label,val,strong){ return "<div style='display:flex;justify-content:space-between;gap:12px;padding:3px 0'><span class='muted'>"+label+"</span><span"+(strong?" style='font-weight:700;color:var(--ink)'":"")+">"+val+"</span></div>"; }
 function bdHead(t,color){ return "<div style='font-weight:700;color:"+(color||'var(--ink)')+";margin:9px 0 3px'>"+t+"</div>"; }
 function renderBreakdown(j){
-  const m=j.glide||{},lm=j.lastMinute||{},g=j.gapNight||{},c=j.clamp||{},o=j.override||{},f=j.final||{},s=j.signal||{};
+  const o=j.override||{}, f=j.final||{}, g=j.gapNight||{};
   if(j.booked) return "<div class='muted'>This night is booked — not for sale.</div>";
-  let h=""; let step=1;
-  h+=bdHead(step+++" · Base price");
-  h+=bdRow('Signal ('+(s.source||'PriceLabs')+')','$'+s.value);
-  h+=bdRow('Unit premium','×'+j.premium);
-  h+=bdRow('Seasonal base','$'+j.base,true);
-  h+=bdHead(step+++" · Glide (pace)");
-  h+=bdRow('Resort occupancy', m.poolOcc==null?'—':Math.round(m.poolOcc*100)+'%');
-  h+=bdRow('Pace reference', m.refTarget==null?'—':Math.round(m.refTarget*100)+'%');
-  h+=bdRow('Gap vs pace', m.gapVsPace==null?'—':((m.gapVsPace>0?'+':'')+Math.round(m.gapVsPace*100)+'% '+(m.gapVsPace>0?'behind→soften':'ahead→lift')));
-  h+=bdRow('Applied multiplier', m.appliedMult==null?'—':'×'+m.appliedMult);
-  if(lm.lm>0){ h+=bdHead(step+++" · Last-minute"); h+=bdRow('Lead time',lm.lead+' days'); h+=bdRow('Discount','−'+Math.round(lm.lm*100)+'%'); }
-  if(g.tier>0){ h+=bdHead(step+++" · Gap night",'#e6b85c');
-    h+=bdRow('Gap size',g.tier+'-night'+(g.hasWeekend?' (incl. weekend)':' (mid-week)'));
-    h+=bdRow('Gap discount','−'+g.discPct+'%');
-    h+=bdRow('Reconcile',(g.deeperOf||'—')+' (deeper-of)');
-    h+=bdRow('Status', g.live?(g.appliedNow?"<span style='color:#4ade80'>ACTIVE</span>":"live (last-minute deeper)"):"<span style='color:var(--warn)'>preview only — not enabled</span>");
-    h+=bdRow('If enabled','$'+g.ifEnabledPrice+' · min-stay '+g.ifEnabledMinNights); }
-  h+=bdHead(step+++" · Clamp & guard");
-  h+=bdRow('Floor / ceiling','$'+c.floor+' – $'+c.ceil+(j.peak?' (peak)':''));
-  h+=bdRow('Sanity min','$'+c.saneMin+(g.tier>0?' · gap exempt':''));
-  if(o.pinned){ h+=bdHead('Manual override','var(--pin)'); h+=bdRow('Pinned at','$'+o.amount,true); }
-  h+="<div style='border-top:1px solid var(--line);margin-top:10px;padding-top:8px'>"+bdRow('FINAL PUSHED PRICE','$'+f.price+(f.minNights?(' · min-stay '+f.minNights):''),true)+"</div>";
+  const steps=j.steps||[];
+  let h="<div class='muted' style='font-size:12px;margin-bottom:8px'>"+esc(j.unit)+" · "+esc(j.date)+" · "+esc(j.daytype)+" — the math of each filter, with this night's numbers:</div>";
+  for(const st of steps){
+    const isFinal=/Final/.test(st.label||''); const isGap=/Gap/.test(st.label||'');
+    h+="<div style='padding:7px 1px;"+(isFinal?'border-top:1px solid var(--line);margin-top:4px;':'border-bottom:1px solid rgba(255,255,255,.05);')+"'>"
+      +"<div style='display:flex;justify-content:space-between;gap:10px;align-items:baseline'>"
+        +"<span style='font-weight:700;color:"+(isGap?'#e6b85c':'var(--ink)')+"'>"+esc(st.label)+"</span>"
+        +"<span style='font-weight:700;color:"+(isFinal?'#4ade80':'var(--ink)')+"'>"+esc(st.value||'')+"</span></div>"
+      +"<div class='muted' style='font-size:12px;margin-top:3px;line-height:1.45'>"+esc(st.math||'')+"</div></div>";
+  }
+  if(g.tier>0 && !g.appliedNow){ h+="<div class='legend' style='margin-top:6px;color:var(--warn)'>This night is an orphan "+g.tier+"-night gap. "+(g.live?'(active discount shown above)':'Gap discounting is OFF — if enabled it would price $'+g.ifEnabledPrice+' · min-stay '+g.ifEnabledMinNights+'.')+"</div>"; }
+  if(o.pinned){ h+="<div style='margin-top:8px;color:var(--pin);font-weight:700'>📌 Pinned at $"+o.amount+" — engine &amp; cron never change it.</div>"; }
+  if(!steps.length){ h+="<div class='muted'>Final: $"+(f.price||'?')+(f.minNights?(' · min-stay '+f.minNights):'')+"</div>"; }
   return h;
 }
 async function bdSavePin(){
@@ -516,6 +518,54 @@ async function bdClearPin(){
   const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({overrideClear:{property_id:Number(BD.unit),date:BD.date}})});
   if(!r.ok){ document.getElementById('bdPinStatus').textContent='Clear failed (auth?)'; return; }
   document.getElementById('bdPinStatus').textContent='Cleared ✓'; await applyPreview(); closeBd();
+}
+// ===== Filter tuning knobs (manual now; learning later) =====
+let KNOBS_META=null;
+const KNOB_GROUPS=[
+  ['Demand / glide controller',[['GAIN','Glide strength','higher = price reacts harder to pace'],['STEP','Max change / run','easing speed'],['BAND_NEAR','Normal band','informational']]],
+  ['Orphan-gap discounts',[['gap1','1-night gap','0.30 = −30%'],['gap2','2-night gap','0.18 = −18%'],['gap3','3-night gap','0.08 = −8%'],['gapWeekend','Weekend factor','×0.5 = half depth on weekends']]],
+  ['Last-minute',[['lmMax','Max discount','0.18 = −18%'],['lmWindow','Window (days)','within N days of check-in']]],
+  ['Clamp & push sanity',[['floor','Floor $',''],['ceil','Ceiling $',''],['saneMin','Push min $','non-gap nights raised to this']]],
+];
+async function loadKnobs(){
+  const grid=document.getElementById('tuneGrid'); if(!grid) return;
+  try{ const j=await (await fetch(api('get_knobs'))).json(); KNOBS_META=j;
+    const rng=j.ranges||{}, cur=j.knobs||{}, def=j.defaults||{}; let h='';
+    for(const [title,items] of KNOB_GROUPS){
+      h+="<div style='font-weight:700;color:var(--ink);margin:12px 0 4px'>"+title+"</div>";
+      for(const [key,label,hint] of items){ const r=rng[key]||[0,9999,false]; const stp=r[2]?1:0.01; const changed=(Number(cur[key])!==Number(def[key]));
+        h+="<div style='display:flex;align-items:center;gap:10px;padding:4px 0;flex-wrap:wrap'>"
+          +"<label style='flex:0 0 145px;font-size:13px'>"+label+"</label>"
+          +"<input id='knob_"+key+"' type='number' step='"+stp+"' min='"+r[0]+"' max='"+r[1]+"' value='"+cur[key]+"' style='width:84px'>"
+          +"<span class='muted' style='font-size:11px'>"+(hint?hint+" · ":"")+"range "+r[0]+"–"+r[1]+(changed?(" · <span style='color:var(--warn)'>default "+def[key]+"</span>"):"")+"</span></div>";
+      }
+    }
+    grid.innerHTML=h;
+  }catch(e){ grid.innerHTML="<span class='muted'>Could not load knobs: "+e.message+"</span>"; }
+}
+async function saveKnobs(){
+  if(!KNOBS_META){ await loadKnobs(); if(!KNOBS_META) return; }
+  const body={}; for(const key in (KNOBS_META.ranges||{})){ const el=document.getElementById('knob_'+key); if(el&&el.value!=='') body[key]=Number(el.value); }
+  document.getElementById('tuneStatus').textContent='Saving…';
+  const r=await fetch(api('set_knobs'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(body)});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok||!j.ok){ document.getElementById('tuneStatus').textContent='Failed: '+((j.errors&&j.errors.join('; '))||j.error||('HTTP '+r.status)); return; }
+  document.getElementById('tuneStatus').textContent='Saved ✓ — recomputing…';
+  await loadKnobs(); await applyPreview(); await refreshBreakdownIfOpen();
+  document.getElementById('tuneStatus').textContent='Saved ✓ — calendar + breakdown updated';
+}
+async function resetKnobs(){
+  if(!confirm('Reset all filter knobs to their defaults?')) return;
+  document.getElementById('tuneStatus').textContent='Resetting…';
+  const r=await fetch(api('set_knobs'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({reset:true})});
+  if(!r.ok){ document.getElementById('tuneStatus').textContent='Reset failed (auth?)'; return; }
+  await loadKnobs(); await applyPreview(); await refreshBreakdownIfOpen();
+  document.getElementById('tuneStatus').textContent='Reset to defaults ✓';
+}
+async function refreshBreakdownIfOpen(){
+  const m=document.getElementById('bdModal'); if(m && m.style.display!=='none' && BD && BD.unit && BD.date){
+    try{ const j=await (await fetch(api('breakdown')+'&unit='+BD.unit+'&date='+BD.date)).json(); document.getElementById('bdBody').innerHTML=j.error?('Error: '+j.error):renderBreakdown(j); }catch(e){}
+  }
 }
 function moveMonth(d){ let idx=view.y*12+view.m+d; idx=Math.max(HMIN,Math.min(HMAX,idx)); view.y=Math.floor(idx/12); view.m=idx%12; render(); }
 function render(){
@@ -613,7 +663,7 @@ function boot(){
   HMIN=sY*12+sM; HMAX=eY*12+eM;
   document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611c`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
-  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning(); loadGoLiveStatus();
+  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning(); loadGoLiveStatus(); loadKnobs();
 }
 
 // ===== Public inquiry + Victor's gate toggles =====
