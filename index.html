@@ -491,14 +491,19 @@ function renderBreakdown(j){
   const o=j.override||{}, f=j.final||{}, g=j.gapNight||{};
   if(j.booked) return "<div class='muted'>This night is booked — not for sale.</div>";
   const steps=j.steps||[];
-  let h="<div class='muted' style='font-size:12px;margin-bottom:8px'>"+esc(j.unit)+" · "+esc(j.date)+" · "+esc(j.daytype)+" — the math of each filter, with this night's numbers:</div>";
+  let h="<div class='muted' style='font-size:12px;margin-bottom:8px'>"+esc(j.unit)+" · "+esc(j.date)+" · "+esc(j.daytype)+" — each filter's signed ± effect on the price, with a running total:</div>";
   for(const st of steps){
-    const isFinal=/Final/.test(st.label||''); const isGap=/Gap/.test(st.label||'');
+    const isFinal=st.final||/FINAL/i.test(st.label||''); const isGap=/Gap/.test(st.label||'');
+    const rightVal=st.running||st.value||'';
+    let effHtml='';
+    if(st.effect){ const col=/raises/.test(st.effect)?'#4ade80':/lowers/.test(st.effect)?'#ff8f6b':'var(--mut)';
+      effHtml="<div style='font-size:12px;margin-top:2px;font-weight:600;color:"+col+"'>"+esc(st.effect)+"</div>"; }
     h+="<div style='padding:7px 1px;"+(isFinal?'border-top:1px solid var(--line);margin-top:4px;':'border-bottom:1px solid rgba(255,255,255,.05);')+"'>"
       +"<div style='display:flex;justify-content:space-between;gap:10px;align-items:baseline'>"
         +"<span style='font-weight:700;color:"+(isGap?'#e6b85c':'var(--ink)')+"'>"+esc(st.label)+"</span>"
-        +"<span style='font-weight:700;color:"+(isFinal?'#4ade80':'var(--ink)')+"'>"+esc(st.value||'')+"</span></div>"
-      +"<div class='muted' style='font-size:12px;margin-top:3px;line-height:1.45'>"+esc(st.math||'')+"</div></div>";
+        +"<span style='font-weight:700;color:"+(isFinal?'#4ade80':'var(--ink)')+"'>"+esc(rightVal)+"</span></div>"
+      +"<div class='muted' style='font-size:12px;margin-top:3px;line-height:1.45'>"+esc(st.math||'')+"</div>"
+      +effHtml+"</div>";
   }
   if(g.tier>0 && !g.appliedNow){ h+="<div class='legend' style='margin-top:6px;color:var(--warn)'>This night is an orphan "+g.tier+"-night gap. "+(g.live?'(active discount shown above)':'Gap discounting is OFF — if enabled it would price $'+g.ifEnabledPrice+' · min-stay '+g.ifEnabledMinNights+'.')+"</div>"; }
   if(o.pinned){ h+="<div style='margin-top:8px;color:var(--pin);font-weight:700'>📌 Pinned at $"+o.amount+" — engine &amp; cron never change it.</div>"; }

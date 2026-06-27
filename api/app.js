@@ -62,10 +62,10 @@ async function getKnobs(){ const o=(redis&&await redis.get("parkside:knobs"))||{
 function median(a){a=a.slice().sort((x,y)=>x-y);const n=a.length;return n?(n%2?a[(n-1)/2]:(a[n/2-1]+a[n/2])/2):0;}
 // Seed booking-pace curve = fraction of FINAL bookings on the books by `lead` days out (leisure STR).
 const PACE_SEED={ // expected fraction of FINAL bookings already on the books by `lead` days out.
-  // Back-loaded for this drive-to glamping resort: bulk of bookings land inside 45 days; rare beyond 90 (so a
-  // far-out empty night reads as ~ON pace, not behind). Steep ramp inside 45 up to the target by the stay night.
-  weekend:[[0,1],[7,.85],[14,.72],[21,.62],[30,.50],[45,.35],[60,.22],[90,.12],[120,.08],[180,.05],[270,.03],[365,.02]],
-  weekday:[[0,1],[7,.82],[14,.68],[21,.57],[30,.45],[45,.30],[60,.18],[90,.10],[120,.07],[180,.04],[270,.025],[365,.015]]
+  // lead 0 = 1.0 (by check-in you should be AT your saved target); stays ~1.0 the last few days, then ramps DOWN.
+  // Back-loaded for this drive-to glamping resort: bulk of bookings inside ~45 days; far-out empty reads ~on pace.
+  weekend:[[0,1],[4,.99],[10,.96],[14,.87],[21,.74],[30,.61],[45,.42],[60,.27],[90,.14],[120,.09],[180,.05],[270,.03],[365,.02]],
+  weekday:[[0,1],[4,.99],[10,.95],[14,.86],[21,.71],[30,.57],[45,.38],[60,.24],[90,.13],[120,.08],[180,.04],[270,.025],[365,.015]]
 };
 const KB_SEED={format:"",items:[
   {topic:"Check-in time",a:"4:00 PM"},{topic:"Checkout time",a:"11:00 AM"},
@@ -207,7 +207,6 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
   const start=new Date(startDate+"T00:00:00Z"); const t0=new Date(today+"T00:00:00Z"); const out=[]; overrides=overrides||{}; gsState=gsState||{}; opts=opts||{};
   const mode=opts.mode||"steady"; const gsNext={...gsState}; const applyGap=opts.applyGap===true;
   const K=opts.knobs||DEFAULT_KNOBS; // editable filter-strength knobs (defaults == prior hardcoded behavior)
-  const glLearned=opts.learned||null; // pace-curve learning blend (same curve as the "Resort pace vs target" table)
   const sv=Object.values(signalMap).filter(v=>v>0); const peakThr=(sv.length?median(sv):K.floor)*MODEL.PEAK_MULT;
   const poolCache={};
   for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const mo=d.getUTCMonth()+1; const we=isWe(d); const dt=we?1:0; const dtN=we?"weekend":"weekday";
@@ -219,7 +218,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     // SAVED monthly occupancy targets are the single source of truth for the pace reference.
     const tRow=(targets&&targets[mo])||SEED_TARGETS[mo]; let target=we?tRow.we:tRow.wd;
     if(target==null||!isFinite(target)){ const sd=SEED_TARGETS[mo]; target=we?sd.we:sd.wd; } // fallback: never silently use a flat/zero target
-    const pf=GS.USE_PACE_REF?paceFrac(lead,dtN,glLearned):1; const ref=target*pf; // pace-ref = saved target x booking-pace ramp (same curve as the pace table)
+    const pf=GS.USE_PACE_REF?paceFrac(lead,dtN,null):1; const ref=target*pf; // pace-ref = saved target x deterministic booking-pace ramp (1.0 at lead 0 -> reaches the FULL saved target at check-in)
     // DEMAND is split: RESORT (whole-resort occ vs pace-ref) at night level; UNIT (this unit's own occ) inside the loop.
     // blendedGap = wResort*resortGap + wUnit*unitGap ; default wResort=1,wUnit=0 -> blendedGap == resortGap == today's behavior.
     let resortGap=null,lm=0;
@@ -884,29 +883,32 @@ module.exports=async(req,res)=>{
       const saneThresh=isGapActive?K.floor:Math.max(K.saneMin,Math.round(base*0.60));
       const pushedPrice=(live.amount<saneThresh?saneThresh:live.amount);
       const pct=x=>x==null?'—':Math.round(x*100)+'%'; const sgn=x=>x==null?'—':(x>0?'+':'')+x.toFixed(2);
-      // ===== per-filter MATH, with real numbers plugged in =====
-      const steps=[];
-      steps.push({label:'1 · Base price', math:'PriceLabs base $'+sigShown+(ovOn?' (flat override)':'')+'  ×  '+u.name+' premium '+prem+'  =  $'+base, value:'$'+base});
-      if(!occ.hasData){ steps.push({label:'2 · Demand', math:'no occupancy data yet → priced at seasonal base', value:'$'+live.amount}); }
+      const fP=p=>(p>=0?'+':'−')+Math.abs(p).toFixed(1)+'%'; const fD=d=>{d=Math.round(d);return (d>=0?'+$':'−$')+Math.abs(d);};
+      const dirw=d=>d>0?'↑ raises':d<0?'↓ lowers':'→ no change';
+      // ===== per-filter MATH: each section shows its signed % and $ effect + the running price =====
+      const steps=[]; let run=base;
+      const eff=newRun=>{ newRun=Math.round(newRun); const d=newRun-run; const p=run?d/run*100:0; const o={effect:fP(p)+'  /  '+fD(d)+'   '+dirw(d), running:'$'+newRun}; run=newRun; return o; };
+      steps.push({label:'1 · Base price', math:'PriceLabs $'+sigShown+(ovOn?' (flat override)':'')+'  ×  '+u.name+' premium '+prem+'  =  $'+base, value:'$'+base, running:'$'+base});
+      if(!occ.hasData){ steps.push({label:'2 · Demand', math:'no occupancy data yet → priced at seasonal base', ...eff(live.amount)}); }
       else {
         const monNm=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][new Date(ds+'T00:00:00Z').getUTCMonth()];
-        steps.push({label:'2 · Pace reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+(isWe(new Date(ds+'T00:00:00Z'))?'weekend':'weekday')+') × pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d) = pace-ref '+pct(live.ref), value:pct(live.ref)});
-        steps.push({label:'2a · Resort demand', math:'whole-resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  resort gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind)':live.resortGap<0?' (ahead)':'')+'  ·  weight ×'+K.wResort, value:'gap '+sgn(live.resortGap)});
-        steps.push({label:'2b · Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  unit gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind)':live.unitGap<0?' (ahead)':'')+'  ·  weight ×'+K.wUnit, value:'gap '+sgn(live.unitGap)});
-        steps.push({label:'2c · Combined demand', math:'blended gap = wResort '+K.wResort+'×'+sgn(live.resortGap)+' + wUnit '+K.wUnit+'×'+sgn(live.unitGap)+' = '+sgn(live.gap)+'  →  desired ×(1 − GAIN '+K.GAIN+' × gap) = ×'+live.desiredBaseMult, value:'×'+live.desiredBaseMult});
+        const dtName=isWe(new Date(ds+'T00:00:00Z'))?'weekend':'weekday';
+        steps.push({label:'2 · Pace reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+dtName+')  ×  pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d)  =  pace-ref '+pct(live.ref)+'  (no $ change — sets the bar demand is measured against)', value:pct(live.ref), running:'$'+run});
+        const multResort=1 - K.GAIN*K.wResort*(live.resortGap||0);
+        steps.push({label:'2a · Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind→raise)':live.resortGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wResort+'  →  ×'+multResort.toFixed(3), ...eff(base*multResort)});
+        steps.push({label:'2b · Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind→raise)':live.unitGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wUnit, ...eff(base*live.desiredBaseMult)});
+        steps.push({label:'2c · Combined demand', math:'blended gap '+sgn(live.gap)+'  →  total demand multiplier ×'+live.desiredBaseMult+' (= 2a + 2b above)', value:'×'+live.desiredBaseMult, running:'$'+run});
         if(isGapActive){
-          steps.push({label:'3 · Last-minute', math:(live.lm>0?('lead '+live.lead+'d in '+K.lmWindow+'d window, −'+Math.round(live.lm*100)+'% — but '):'')+'gap discount is deeper → last-minute not stacked', value:'—'});
-          steps.push({label:'4 · Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (incl. weekend × '+K.gapWeekend+')':' (mid-week)')+'  →  −'+Math.round(withGap.gapDisc*100)+'%  →  applied ×'+activeMult+'  (bypasses step-easing)  ·  min-stay '+withGap.minNights, value:'×'+activeMult});
+          steps.push({label:'3 · Last-minute', math:(live.lm>0?('lead '+live.lead+'d in '+K.lmWindow+'d window (−'+Math.round(live.lm*100)+'%) — '):'')+'gap discount is deeper → last-minute not stacked', value:'no change', running:'$'+run});
+          steps.push({label:'4 · Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (wknd × '+K.gapWeekend+')':' (mid-week)')+'  →  −'+Math.round(withGap.gapDisc*100)+'%  ·  applied ×'+activeMult+' (bypasses easing)  ·  min-stay '+withGap.minNights, ...eff(live.amount)});
         } else {
-          const lmTxt=live.lm>0?('lead '+live.lead+'d within '+K.lmWindow+'d window  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'%'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  none');
-          steps.push({label:'3 · Last-minute', math:lmTxt, value:(live.lm>0?('−'+Math.round(live.lm*100)+'%'):'none')});
-          steps.push({label:'4 · Glide easing', math:'desired ×'+live.desiredMult+'  →  eased toward it by ≤ STEP '+K.STEP+'/run  →  applied ×'+activeMult, value:'×'+activeMult});
-          if(withGap.gapTier>0) steps.push({label:'·  Gap (inactive)', math:(gapOn?'no gap on this night':'gaps OFF')+' — if enabled: '+withGap.gapTier+'-night −'+Math.round(withGap.gapDisc*100)+'% → $'+withGap.amount+' · min '+withGap.minNights, value:'—'});
+          steps.push({label:'3 · Last-minute', math:(live.lm>0?('lead '+live.lead+'d within '+K.lmWindow+'d window  →  ×(1 − '+live.lm.toFixed(3)+')  = −'+Math.round(live.lm*100)+'%'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  none')), ...eff(run*(1-(live.lm||0)))});
+          steps.push({label:'4 · Glide easing', math:'eased toward target by ≤ STEP '+K.STEP+'/run (+ floor/ceil clamp)  →  applied ×'+activeMult, ...eff(live.amount)});
+          if(withGap.gapTier>0) steps.push({label:'·  Gap (inactive)', math:(gapOn?'no gap on this night':'gaps OFF')+' — if enabled: '+withGap.gapTier+'-night −'+Math.round(withGap.gapDisc*100)+'% → $'+withGap.amount+' · min '+withGap.minNights, value:'—', running:'$'+run});
         }
-        steps.push({label:'5 · Price', math:'$'+base+'  ×  '+activeMult+'  =  $'+rawPrice, value:'$'+rawPrice});
       }
-      steps.push({label:'6 · Clamp & sanity', math:'$'+rawPrice+' clamped to $'+K.floor+'–$'+ceil+(live.peak?' (peak)':'')+'; push min '+(isGapActive?('exempt (gap) — hard floor $'+K.floor):('$'+saneThresh))+(pushedPrice!==rawPrice?('  →  $'+pushedPrice):'  →  unchanged'), value:'$'+pushedPrice});
-      steps.push({label:'7 · Final pushed', math:'$'+pushedPrice+((isGapActive&&live.minNights)?('  ·  min-stay '+live.minNights):''), value:'$'+pushedPrice});
+      steps.push({label:'5 · Push sanity (min)', math:(isGapActive?('gap night — exempt; hard floor $'+K.floor):('non-gap floor $'+saneThresh+(pushedPrice!==run?'':' — already above')))+(live.peak?' · peak ceiling':''), ...eff(pushedPrice)});
+      steps.push({label:'6 · FINAL pushed price', math:'after all filters'+((isGapActive&&live.minNights)?('  ·  min-stay '+live.minNights):''), value:'$'+pushedPrice, running:'$'+pushedPrice, final:true});
       return res.status(200).json({
         unit:u.name, property_id:u.orp, date:ds, daytype:(isWe(new Date(ds+"T00:00:00Z"))?"weekend":"weekday"), booked,
         knobs:{GAIN:K.GAIN,STEP:K.STEP,wResort:K.wResort,wUnit:K.wUnit,lmMax:K.lmMax,lmWindow:K.lmWindow,gap1:K.gap1,gap2:K.gap2,gap3:K.gap3,gapWeekend:K.gapWeekend,floor:K.floor,ceil:K.ceil,saneMin:K.saneMin},
