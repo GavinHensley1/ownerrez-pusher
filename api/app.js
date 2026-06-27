@@ -342,26 +342,29 @@ function computePace(poolAgg,targets,learned,today,months){ const pace={}; const
 // ===== SUGGESTIONS: the learning component PROPOSES knob changes. SUGGEST-ONLY — never auto-applies.
 // Heuristics from occupancy-vs-target pace trend; each suggestion is clearly labelled with its basis + confidence.
 function clampKnob(key,v){ const r=KNOB_RANGES[key]; if(!r) return v; v=Math.max(r[0],Math.min(r[1],Number(v))); return r[2]?Math.round(v):Number(v.toFixed(3)); }
-async function genSuggestions(today){
+// RECOMMENDED SETTINGS: for EVERY knob, a learning-recommended value + one-line basis. Suggest-only; adopting is Gavin's explicit per-knob choice.
+const KNOB_ORDER=["GAIN","STEP","BAND_NEAR","wResort","wUnit","gap1","gap2","gap3","gapWeekend","lmMax","lmWindow","lmSteep","floor","ceil","saneMin"];
+async function genRecommendations(today){
   const st=await getState(); const K=await getKnobs(); const learned=await getLearned();
   const od=await getOccData(st,today,365,true);
   const months=monthList(today,150); const pace=computePace(od.agg.poolAgg, st.targets, learned, today, months);
   const upcoming=months.slice(0,4); let behindSum=0,cnt=0; const detail=[];
   for(const mk of upcoming){ const a=pace[mk]&&pace[mk].all; if(a&&a.exp>0){ behindSum+=(a.exp-a.act); cnt++; detail.push(mk.slice(5)+' '+a.act+'/'+a.exp); } }
   const avgBehind=cnt?Math.round(behindSum/cnt):0; // + = behind pace, − = ahead
-  const basis='pace trend over next '+cnt+' months (act/exp: '+detail.join(', ')+')';
-  const raw=[];
-  if(avgBehind>=8){ const conf=avgBehind>=18?'high':avgBehind>=12?'medium':'low';
-    raw.push({knob:'gap1', suggested:clampKnob('gap1',K.gap1+0.05), reason:'Resort is ~'+avgBehind+' pts BEHIND pace — deepen the 1-night orphan discount to fill harder-to-sell gap nights.', confidence:conf});
-    raw.push({knob:'lmMax', suggested:clampKnob('lmMax',K.lmMax+0.05), reason:'Behind pace — a stronger last-minute discount helps move still-open near-in nights.', confidence:conf});
-    raw.push({knob:'GAIN', suggested:clampKnob('GAIN',K.GAIN+0.1), reason:'Behind pace — more demand reactivity so prices soften faster when occupancy lags.', confidence:'low'});
-  } else if(avgBehind<=-8){ const conf=avgBehind<=-18?'high':avgBehind<=-12?'medium':'low';
-    raw.push({knob:'gap1', suggested:clampKnob('gap1',K.gap1-0.05), reason:'Resort is ~'+(-avgBehind)+' pts AHEAD of pace — shrink the 1-night gap discount and hold more price.', confidence:conf});
-    raw.push({knob:'GAIN', suggested:clampKnob('GAIN',K.GAIN-0.1), reason:'Ahead of pace — reduce reactivity so strong demand holds price.', confidence:'low'});
-    raw.push({knob:'floor', suggested:clampKnob('floor',K.floor+10), reason:'Ahead of pace — a higher floor protects revenue on the cheapest nights.', confidence:'low'});
-  }
-  const items=raw.filter(s=>Number(s.suggested)!==Number(K[s.knob])).map((s,i)=>({ id:'sg'+Date.now().toString(36)+i, knob:s.knob, current:K[s.knob], suggested:s.suggested, reason:s.reason, confidence:s.confidence, basis, ts:Date.now() }));
-  const out={ ts:Date.now(), avgBehind, basis, items }; if(redis) await redis.set("parkside:suggestions",out); return out;
+  const paceWord=avgBehind>0?(avgBehind+' pts behind pace'):avgBehind<0?((-avgBehind)+' pts ahead of pace'):'on pace';
+  const paceBasis='resort '+paceWord+' over next '+cnt+' months';
+  const evN=(learned.weekend.n||0)+(learned.weekday.n||0); const gd=(learned.detail&&learned.detail.gap)||{};
+  const rec={}; const hold=(key,why)=>({recommended:K[key], basis:why||'no change indicated yet'});
+  // gap depths: prefer the LEARNED fill-rate depth when there's data; else nudge by pace
+  for(const [key,len] of [["gap1",1],["gap2",2],["gap3",3]]){ const ld=gd[len];
+    if(ld && ld.open>=40){ rec[key]={recommended:clampKnob(key,ld.eff), basis:'learned fill rate ('+ld.open+' exposure-days, '+ld.book+' booked)'}; }
+    else { const adj=avgBehind>=8?0.05:avgBehind<=-8?-0.05:0; rec[key]= adj? {recommended:clampKnob(key,K[key]+adj), basis:paceBasis+' → '+(adj>0?'deepen':'ease')+' gap discount'} : hold(key,paceBasis+' → hold (gap learning still thin)'); } }
+  { const adj=avgBehind>=8?0.05:avgBehind<=-8?-0.05:0; rec.lmMax= adj?{recommended:clampKnob('lmMax',K.lmMax+adj),basis:paceBasis+' → '+(adj>0?'stronger':'lighter')+' last-minute'}:hold('lmMax',paceBasis+' → hold'); }
+  { const adj=avgBehind>=12?0.1:avgBehind<=-12?-0.1:0; rec.GAIN= adj?{recommended:clampKnob('GAIN',K.GAIN+adj),basis:paceBasis+' → '+(adj>0?'more':'less')+' demand reactivity'}:hold('GAIN',paceBasis+' → hold'); }
+  { const adj=avgBehind<=-12?10:0; rec.floor= adj?{recommended:clampKnob('floor',K.floor+adj),basis:paceBasis+' → raise floor to protect revenue'}:hold('floor','no signal to move the floor'); }
+  for(const key of KNOB_ORDER){ if(!rec[key]) rec[key]=hold(key); }
+  const items=KNOB_ORDER.map(key=>({ knob:key, current:K[key], recommended:rec[key].recommended, basis:rec[key].basis, changed:Number(rec[key].recommended)!==Number(K[key]) }));
+  const out={ ts:Date.now(), avgBehind, paceBasis, learnEvents:evN, items }; if(redis) await redis.set("parkside:recommendations",out); return out;
 }
 // ===== Guest-messaging send path (added) =====
 const APOLOGY="I'm sorry, I don't know the answer to that. Let me check with a manager and I'll get back to you soon.";
@@ -929,12 +932,15 @@ module.exports=async(req,res)=>{
         const monNm=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][new Date(ds+'T00:00:00Z').getUTCMonth()];
         const dtName=isWe(new Date(ds+'T00:00:00Z'))?'weekend':'weekday';
         steps.push({label:'Pace reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+dtName+')  ×  pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d)  =  pace-ref '+pct(live.ref)+'  — the bar demand is measured against (no $ change)', value:pct(live.ref), running:'$'+run});
-        // Demand splits into two real ledger steps that each move the running total (scaled by their weight); they reconcile to base × demand-multiplier.
-        const multResort=1 - K.GAIN*K.wResort*(live.resortGap||0);
-        steps.push({label:'Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind→raise)':live.resortGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wResort, ...eff(base*multResort)});
-        steps.push({label:'Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind→raise)':live.unitGap<0?' (ahead→lower)':'')+'  ×  GAIN '+K.GAIN+'  ×  weight '+K.wUnit+(K.wUnit===0?'  (0 = off)':''), ...eff(base*live.desiredBaseMult)});
-        // Glide easing — smooths only the slow DEMAND multiplier toward target (≤ STEP/run). Perishable discounts below apply on top of this.
-        steps.push({label:'Glide easing', math:'demand ×'+live.desiredBaseMult+' eased toward by ≤ STEP '+K.STEP+'/run (+ floor/ceil)  →  ×'+live.easedDemandMult, ...eff(base*(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult))});
+        // Demand = the ACTUALLY-APPLIED (eased) effect — where the price is today on its glide toward target. Split into
+        // resort + unit by their gap contribution; NO separate "glide easing" row.
+        const easedMult=(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult);
+        const demandDelta=Math.round(base*easedMult)-base; // total $ the demand filter moves the price (already eased toward target)
+        const rc=K.wResort*(live.resortGap||0), uc=K.wUnit*(live.unitGap||0); const blend=rc+uc;
+        const resortDelta=Math.abs(blend)>1e-9?Math.round(demandDelta*(rc/blend)):demandDelta;
+        const glideNote=(live.easedDemandMult!=null && Math.abs(easedMult-live.desiredBaseMult)>0.005)?'  ·  applied is gliding toward its full target ×'+live.desiredBaseMult+' over the next few daily runs (gradual, not instant)':'';
+        steps.push({label:'Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind→raise)':live.resortGap<0?' (ahead→lower)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wResort+glideNote, ...eff(base+resortDelta)});
+        steps.push({label:'Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind→raise)':live.unitGap<0?' (ahead→lower)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wUnit+(K.wUnit===0?'  (0 = off)':''), ...eff(base+demandDelta)});
         // Last-minute — ALWAYS shown; applied IMMEDIATELY on top of the eased demand. $0 if outside the window.
         const lmTxt=live.lm>0?('lead '+live.lead+'d → proximity ('+K.lmWindow+'−'+live.lead+')/'+K.lmWindow+'^'+K.lmSteep+' × max '+Math.round(K.lmMax*100)+'%  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'% (perishable, still open)'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');
         if(isGapActive){
@@ -985,31 +991,19 @@ module.exports=async(req,res)=>{
       const k=await getKnobs();
       return res.status(200).json({ok:true,applied,knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,lmSteep:k.lmSteep,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}});
     }
-    if(action==="suggestions"){ // READ-ONLY: returns stored suggestions; regenerates if empty or ?regen=1. NEVER applies anything.
-      const stored=redis?(await redis.get("parkside:suggestions")):null;
-      if((req.query&&req.query.regen==="1") || !stored || !stored.items){ const g=await genSuggestions(today); return res.status(200).json({...g,suggestOnly:true}); }
-      return res.status(200).json({...stored,suggestOnly:true});
+    if(action==="recommendations"){ // READ-ONLY: per-knob learning-recommended value vs current. NEVER applies anything.
+      const g=await genRecommendations(today); return res.status(200).json({...g, adoptOnly:true});
     }
-    if(action==="apply_suggestion"){ // AUTH: applies ONLY the chosen suggestion's knob(s) — explicit Gavin action.
+    if(action==="adopt_recommendation"){ // AUTH: sets ONLY the chosen knob(s) to their recommended value — explicit Gavin action.
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
-      const stored=(redis&&await redis.get("parkside:suggestions"))||{items:[]}; const items=stored.items||[];
-      const ids = (b&&b.all) ? items.map(s=>s.id) : (Array.isArray(b&&b.ids)?b.ids : (b&&b.id?[b.id]:[]));
-      const toApply=items.filter(s=>ids.includes(s.id));
-      const cur=(redis&&await redis.get("parkside:knobs"))||{}; const applied=[]; const errs=[];
-      for(const s of toApply){ const r=KNOB_RANGES[s.knob]; if(!r){ errs.push(s.knob+": unknown knob"); continue; } let v=Number(s.suggested); if(!isFinite(v)){ errs.push(s.knob+": bad value"); continue; } if(r[2])v=Math.round(v); v=Math.max(r[0],Math.min(r[1],v)); cur[s.knob]=v; applied.push({knob:s.knob,value:v}); }
-      if(applied.length && redis) await redis.set("parkside:knobs",cur); // writes ONLY the applied knob(s)
-      const remain=items.filter(s=>!ids.includes(s.id)); if(redis) await redis.set("parkside:suggestions",{...stored,items:remain});
+      const recs=await genRecommendations(today); const map={}; for(const it of recs.items) map[it.knob]=it.recommended;
+      const names = (b&&b.all) ? Object.keys(map) : (Array.isArray(b&&b.knobs)?b.knobs : (b&&b.knob?[b.knob]:[]));
+      const cur=(redis&&await redis.get("parkside:knobs"))||{}; const applied=[];
+      for(const key of names){ if(map[key]==null) continue; const r=KNOB_RANGES[key]; if(!r) continue; let v=Number(map[key]); if(!isFinite(v)) continue; if(r[2])v=Math.round(v); v=Math.max(r[0],Math.min(r[1],v)); const had=(cur[key]!=null?Number(cur[key]):Number(DEFAULT_KNOBS[key])); if(v!==had){ cur[key]=v; applied.push({knob:key,value:v}); } }
+      if(applied.length && redis) await redis.set("parkside:knobs",cur); // writes ONLY the adopted knob(s)
       const k=await getKnobs();
-      return res.status(200).json({ok:true, applied, errors:errs, remaining:remain.length, knobs:{GAIN:k.GAIN,STEP:k.STEP,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,lmSteep:k.lmSteep,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}});
-    }
-    if(action==="dismiss_suggestion"){ // AUTH: removes suggestion(s); changes no settings.
-      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
-      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
-      const stored=(redis&&await redis.get("parkside:suggestions"))||{items:[]}; const items=stored.items||[];
-      const ids = (b&&b.all) ? items.map(s=>s.id) : (Array.isArray(b&&b.ids)?b.ids : (b&&b.id?[b.id]:[]));
-      const remain=items.filter(s=>!ids.includes(s.id)); if(redis) await redis.set("parkside:suggestions",{...stored,items:remain});
-      return res.status(200).json({ok:true, dismissed:ids.length, remaining:remain.length});
+      return res.status(200).json({ok:true, applied, knobs:{GAIN:k.GAIN,STEP:k.STEP,BAND_NEAR:k.BAND_NEAR,wResort:k.wResort,wUnit:k.wUnit,gap1:k.gap1,gap2:k.gap2,gap3:k.gap3,gapWeekend:k.gapWeekend,lmMax:k.lmMax,lmWindow:k.lmWindow,lmSteep:k.lmSteep,floor:k.floor,ceil:k.ceil,saneMin:k.saneMin}});
     }
         if(action==="ai_draft"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
