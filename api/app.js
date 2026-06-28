@@ -448,6 +448,8 @@ async function getNotifyConfig(){ const c=await getNotifyRaw(); return {
   apiKey: (c.resendApiKey||process.env.RESEND_API_KEY||"").trim(),
   from:   (c.from||process.env.RESEND_FROM||"").trim(),
   to:     (c.victorEmail||process.env.VICTOR_EMAIL||"").trim(),
+  to2:    (c.victorEmail2||process.env.VICTOR_EMAIL_2||"").trim(),
+  escalateMins: (function(){ var m=Number(c.escalateMins||process.env.ESCALATE_MINS||60); return (isFinite(m)&&m>0)?m:60; })(),
   secret: (c.approveSecret||process.env.APPROVE_LINK_SECRET||"").trim(),
   ownerrezOauth: (c.ownerrez_oauth_token||process.env.OWNERREZ_OAUTH_TOKEN||"").trim(),
   webhookUser: (c.webhook_user||process.env.OR_WEBHOOK_USER||"").trim(),
@@ -529,13 +531,15 @@ async function sendVictorApprovalEmail(req, item, ctx){
   const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const unit=ctx.unit||""; const guestName=ctx.guestName||"";
   const proposed=item.proposed||"";
+  const toAddr=(ctx.toOverride||cfg.to); const isEsc=ctx.escalation===true;
   const _approvals=await getApprovals();
   const threadHtml=await renderThread(item,_approvals);
   const esc=item.escalate===true;
-  const subject=(esc?"\u26a0 Unknown — approval needed":"Parkside approval needed")+(unit?(" — "+unit):"");
+  const subject=(isEsc?"⏰ No response — 2nd notice: ":"")+(esc?"\u26a0 Unknown — approval needed":"Parkside approval needed")+(unit?(" — "+unit):"");
   const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#ffffff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
   const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
     +'<h2 style="margin:0 0 4px 0">Guest message — approval needed</h2>'
+    +(isEsc?'<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 14px;margin:0 0 14px 0;color:#991b1b;font-size:14px"><b>⏰ Escalated to you — the primary contact hasn’t responded.</b><br>Same guest request and same suggested reply as the first email. Approve, edit, or reject below.</div>':'')
     +(esc
       ? '<div style="background:#fff7ed;border:1px solid #fdba74;border-radius:8px;padding:12px 14px;margin:0 0 14px 0;color:#9a3412;font-size:14px"><b>\u26a0 Not in your knowledge base — I don\u2019t know this one.</b><br>Tap <b>\u270f\ufe0f Write / edit the reply</b> to give the real answer (it gets saved for next time), or approve the holding message below to send it as-is.</div>'
       : '<p style="color:#475569;margin:0 0 14px 0">This was answered from your knowledge base. Review and decide:</p>')
@@ -551,8 +555,29 @@ async function sendVictorApprovalEmail(req, item, ctx){
     +'<p style="color:#94a3b8;font-size:12px;margin-top:8px">'+(esc?'Approving the holding message sends it as-is and does NOT save it as an answer. Use \u270f\ufe0f to provide the real answer (that gets saved). ':'Approve sends this reply to the guest and saves it so it auto-answers next time. ')+'Reject sends nothing. (Ref '+escHtml(item.id)+')</p>'
     +(secret?'':'<p style="color:#dc2626;font-size:12px">\u26a0 APPROVE_LINK_SECRET is not set on the server, so these links will not work yet.</p>')
     +'</div>';
-  const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:cfg.to, subject, html});
-  return {...result, to:cfg.to||null, from:cfg.from||null, subject, approveUrl:yes, editUrl, rejectUrl:no};
+  const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:toAddr, subject, html});
+  return {...result, to:toAddr||null, from:cfg.from||null, subject, escalation:isEsc, approveUrl:yes, editUrl, rejectUrl:no};
+}
+// Primary->secondary escalation: any approval still pending after escalateMins gets the
+// SAME approval email (same suggested reply) re-sent ONCE to the backup contact.
+async function escalateStaleApprovals(req){
+  try{
+    const cfg=await getNotifyConfig();
+    if(!cfg.to2) return {escalated:0, reason:"no secondary email set"};
+    if(cfg.to2===cfg.to) return {escalated:0, reason:"secondary same as primary"};
+    const cutoff=Date.now()-cfg.escalateMins*60*1000;
+    const list=await getApprovals(); let changed=false; const done=[];
+    for(const it of list){
+      if(!it || it.status!=="pending" || it.escalatedTo2) continue;
+      const t=Date.parse(it.primaryNotifiedAt||it.ts||"");
+      if(!isFinite(t) || t>cutoff) continue;
+      const r=await sendVictorApprovalEmail(req, it, {unit:it.unit||"", guestName:it.guest_name||"", toOverride:cfg.to2, escalation:true});
+      it.escalatedTo2=true; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=!!(r&&r.sent===true);
+      changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:r&&r.to});
+    }
+    if(changed) await setApprovals(list);
+    return {escalated:done.length, mins:cfg.escalateMins, items:done};
+  }catch(e){ return {error:String(e.message||e)}; }
 }
 function htmlPage(title, msg){
   return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+escHtml(title)+'</title></head>'
@@ -741,6 +766,7 @@ async function processGuestQuestion(req, p){
   const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate,
     unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
   await appendThreadLog(threadId, bookingId, "in", question, guestName);
+  item.primaryNotifiedAt=new Date().toISOString();
   const list=await getApprovals(); list.push(item); await setApprovals(list);
   const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
   const sms=await smsVictor(enabled, "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(write one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
@@ -1292,7 +1318,8 @@ module.exports=async(req,res)=>{
         || (!!secret && tok===secret);
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
       const out=await runPollMessages(req);
-      return res.status(200).json(out);
+      const esc=await escalateStaleApprovals(req);
+      return res.status(200).json(Object.assign(out||{}, {escalation:esc}));
     }
     // PUBLIC plan-free heartbeat: hit by an external free cron (cron-job.org/UptimeRobot)
     // or by page loads. Token-gated by the approve-link secret. Drives intake without
@@ -1301,7 +1328,8 @@ module.exports=async(req,res)=>{
       const tok=String((req.query&&req.query.token)||""); const secret=(await getNotifyConfig()).secret;
       if(!secret || tok!==secret) return res.status(403).json({error:"bad or missing token"});
       const out=await maybePollMessages(req);
-      return res.status(200).json(out||{skipped:true, reason:"throttled (<60s since last poll)", lastPoll:await getPollStatus()});
+      const esc=await escalateStaleApprovals(req);
+      return res.status(200).json(Object.assign(out||{skipped:true, reason:"throttled (<60s since last poll)", lastPoll:await getPollStatus()}, {escalation:esc}));
     }
     // Webhook intake: OwnerRez (or any source) POSTs an inbound message here.
     // URL: /api/app?action=or_message_inbound&token=<APPROVE_LINK_SECRET>
@@ -1523,6 +1551,8 @@ module.exports=async(req,res)=>{
       // Only write non-empty values, so a blank field never wipes a saved one.
       const setIf=(k,v)=>{ if(v===undefined||v===null) return; const t=String(v).trim(); if(t==="") return; next[k]=t; };
       setIf("victorEmail", b.victorEmail);
+      if(typeof b.victorEmail2==="string"){ const t=b.victorEmail2.trim(); if(t!=="") next.victorEmail2=t; else delete next.victorEmail2; }
+      if(b.escalateMins!==undefined && b.escalateMins!==null && String(b.escalateMins).trim()!==""){ const m=Number(b.escalateMins); if(isFinite(m)&&m>0) next.escalateMins=Math.round(m); }
       setIf("from", b.from);
       setIf("approveSecret", b.approveSecret);
       // Only overwrite the API key when a non-empty value is provided (so saving other
@@ -1533,7 +1563,7 @@ module.exports=async(req,res)=>{
       else if(b.ownerrez_oauth_token==="") delete next.ownerrez_oauth_token;
       await setNotifyRaw(next);
       const cfg=await getNotifyConfig();
-      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth }});
+      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth }});
     }
     // Send ONE sample approval email to the configured Victor address (password).
     if(action==="send_test_email"){
@@ -1576,13 +1606,14 @@ module.exports=async(req,res)=>{
         if(dec[0]){ const d=dec[0]; lastDecided={status:d.status, source:d.source, decidedAt:d.decidedAt, hasThread:!!d.thread_id, hasBooking:!!d.booking_id, sent:d.sent===true||(d.guestSend&&d.guestSend.sent===true)||undefined}; } }catch(e){}
       // Drive intake on load (throttled) so the pipeline runs without a Vercel cron/paid plan.
       const polledNow=await maybePollMessages(req);
+      const escNow=await escalateStaleApprovals(req);
       const stN=await getState(); const apprN=await getApprovals();
-      const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, approveSecretSet:!!cfg.secret,
+      const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, escalation:escNow, approveSecretSet:!!cfg.secret,
         resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, ownerrezOauthLen:(cfg.ownerrezOauth||"").length, oauthProbe, sendProbe, lastDecided, lastSend, webhook, _diag,
         messaging_enabled:!!stN.messaging_enabled,
         counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
-        from:cfg.from||null, to:cfg.to||null,
+        from:cfg.from||null, to:cfg.to||null, to2:cfg.to2||null,
         source:{ apiKey: raw.resendApiKey?"ui":(process.env.RESEND_API_KEY?"env":null), from: raw.from?"ui":(process.env.RESEND_FROM?"env":null), to: raw.victorEmail?"ui":(process.env.VICTOR_EMAIL?"env":null), secret: raw.approveSecret?"ui":(process.env.APPROVE_LINK_SECRET?"env":null) } };
       if(cfg.apiKey){
         try{ const r=await fetch("https://api.resend.com/domains",{headers:{Authorization:"Bearer "+cfg.apiKey}});

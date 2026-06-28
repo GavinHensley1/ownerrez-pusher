@@ -275,6 +275,8 @@
     <div id="nStatus" class="legend" style="margin:4px 0 12px 0">Loading…</div>
     <div style="display:grid;gap:12px;max-width:560px">
       <label class="muted" style="font-size:12px">Victor&rsquo;s email (To)<br><input id="nTo" type="email" style="width:100%" placeholder="victor@example.com"></label>
+      <label class="muted" style="font-size:12px">Backup email (To #2) <span style="color:#9fb0c0">(escalation if #1 doesn&rsquo;t respond in time)</span><br><input id="nTo2" type="email" style="width:100%" placeholder="backup@example.com"></label>
+      <label class="muted" style="font-size:12px">Escalate to backup after (minutes)<br><input id="nEscMins" type="number" min="5" step="5" style="width:140px" placeholder="60"></label>
       <label class="muted" style="font-size:12px">From address<br><input id="nFrom" style="width:100%" placeholder="Parkside Tepees &lt;notifications@send.parksidetepees.com&gt;"></label>
       <label class="muted" style="font-size:12px">Resend API key <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nKey" type="password" autocomplete="new-password" style="width:100%" placeholder="re_********************"> <span id="nKeyState" style="font-size:12px;font-weight:600"></span></label>
       <label class="muted" style="font-size:12px">OwnerRez OAuth token (messaging) <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nOrToken" type="password" autocomplete="new-password" style="width:100%" placeholder="paste OwnerRez OAuth access token"> <span id="nOrState" style="font-size:12px;font-weight:600"></span></label>
@@ -766,6 +768,8 @@ async function loadNotifyStatus(){
   try{ const r=await fetch(api('notify_status')+'&cb='+Date.now()); const j=await r.json();
     const to=document.getElementById('nTo'), from=document.getElementById('nFrom');
     if(to && !to.value) to.value=j.to||"";
+    const to2=document.getElementById('nTo2'); if(to2 && !to2.value) to2.value=j.to2||"";
+    const em=document.getElementById('nEscMins'); if(em && !em.value && j.escalateMins) em.value=j.escalateMins;
     if(from && !from.value) from.value=j.from||DEFAULT_FROM;
     const yn=b=>b?"\u2705":"\u2014";
     const kS=document.getElementById('nKeyState'), oS=document.getElementById('nOrState'), sS=document.getElementById('nSecState');
@@ -778,7 +782,7 @@ async function loadNotifyStatus(){
       if(wu) wu.value=j.webhook.url||""; if(wus) wus.value=j.webhook.user||""; if(wp) wp.value=j.webhook.password||""; }
     let dom="";
     if(Array.isArray(j.verifiedDomains)) dom=" · domains: "+(j.verifiedDomains.map(d=>d.name+"("+d.status+")").join(", ")||"none");
-    el.innerHTML="Key "+yn(j.resendKey)+" · From "+yn(j.resendFromSet)+" · To "+yn(j.victorEmailSet)+" · Approve-secret "+yn(j.approveSecretSet)+" · OwnerRez token "+yn(j.ownerrez_oauth_set)
+    el.innerHTML="Key "+yn(j.resendKey)+" · From "+yn(j.resendFromSet)+" · To "+yn(j.victorEmailSet)+" · Backup "+yn(j.victorEmail2Set)+(j.escalateMins?(" ("+j.escalateMins+"m)"):"")+" · Approve-secret "+yn(j.approveSecretSet)+" · OwnerRez token "+yn(j.ownerrez_oauth_set)
       +(j.resendConfigured?" — <b style='color:#2ecc71'>ready</b>":" — <b style='color:#f4b942'>incomplete</b>")+dom;
   }catch(e){ el.textContent="Status error: "+e.message; }
 }
@@ -791,7 +795,7 @@ function genSecret(){
 }
 async function saveNotify(){
   const msg=document.getElementById('nMsg'); msg.textContent="Saving…";
-  const body={ victorEmail:document.getElementById('nTo').value.trim(), from:document.getElementById('nFrom').value.trim(), approveSecret:document.getElementById('nSecret').value.trim() };
+  const body={ victorEmail:document.getElementById('nTo').value.trim(), victorEmail2:document.getElementById('nTo2').value.trim(), escalateMins:document.getElementById('nEscMins').value.trim(), from:document.getElementById('nFrom').value.trim(), approveSecret:document.getElementById('nSecret').value.trim() };
   const key=document.getElementById('nKey').value.trim(); if(key) body.resendApiKey=key; // only send when provided (never wipes stored key)
   const ortk=document.getElementById('nOrToken').value.trim(); if(ortk) body.ownerrez_oauth_token=ortk;
   try{ const r=await fetch(api('set_notify_config'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(body)});
