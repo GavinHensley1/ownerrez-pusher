@@ -474,6 +474,26 @@ async function resendSend({apiKey,from,to,subject,html}){
     return {sent:r.ok, status:r.status, detail}; }
   catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
+function renderThread(item, approvals){
+  var key = item.thread_id || item.booking_id || null;
+  var convo;
+  if(key){ convo=(approvals||[]).filter(function(x){return (x.thread_id||x.booking_id)===key;}).sort(function(a,b){return String(a.ts).localeCompare(String(b.ts));}); }
+  else { convo=[item]; }
+  if(!convo.length) convo=[item];
+  function fmt(ts){ try{ return new Date(ts).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}); }catch(e){ return ""; } }
+  function guestB(name,text,ts,isNew){ return '<div style="margin:8px 0;text-align:left">'
+    +'<div style="font-size:11px;color:#94a3b8;margin:0 0 2px 0">'+escHtml(name||"Guest")+(isNew?" &middot; newest":"")+(ts?(" &middot; "+escHtml(fmt(ts))):"")+'</div>'
+    +'<div style="display:inline-block;max-width:88%;background:'+(isNew?"#fef3c7":"#f1f5f9")+';border:1px solid '+(isNew?"#fcd34d":"#e2e8f0")+';border-radius:12px;padding:8px 12px;font-size:14px;color:#0f172a;white-space:pre-wrap">'+escHtml(text)+'</div></div>'; }
+  function sentB(text,ts){ return '<div style="margin:8px 0;text-align:right">'
+    +'<div style="font-size:11px;color:#94a3b8;margin:0 0 2px 0">You sent'+(ts?(" &middot; "+escHtml(fmt(ts))):"")+'</div>'
+    +'<div style="display:inline-block;max-width:88%;background:#dcfce7;border:1px solid #86efac;border-radius:12px;padding:8px 12px;font-size:14px;color:#0f172a;white-space:pre-wrap;text-align:left">'+escHtml(text)+'</div></div>'; }
+  var multi=convo.length>1; var rows="";
+  for(var i=0;i<convo.length;i++){ var m=convo[i]; var isNew=(m.id===item.id)&&multi;
+    if(m.question) rows+=guestB(m.guest_name||item.guest_name,m.question,m.ts,isNew);
+    if(m.status==="approved" && m.answer) rows+=sentB(m.answer,m.decidedAt||m.ts);
+  }
+  return rows||guestB(item.guest_name,item.question,item.ts,false);
+}
 // Build + send (or stage) the Victor approval email with Approve/Reject links.
 async function sendVictorApprovalEmail(req, item, ctx){
   ctx=ctx||{};
@@ -484,6 +504,8 @@ async function sendVictorApprovalEmail(req, item, ctx){
   const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const unit=ctx.unit||""; const guestName=ctx.guestName||"";
   const proposed=item.proposed||"";
+  const _approvals=await getApprovals();
+  const threadHtml=renderThread(item,_approvals);
   const esc=item.escalate===true;
   const subject=(esc?"\u26a0 Unknown — approval needed":"Parkside approval needed")+(unit?(" — "+unit):"");
   const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#ffffff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
@@ -495,9 +517,11 @@ async function sendVictorApprovalEmail(req, item, ctx){
     +'<table style="width:100%;border-collapse:collapse;font-size:14px">'
     +(unit?'<tr><td style="padding:6px 0;color:#64748b;width:90px">Unit</td><td style="padding:6px 0;font-weight:600">'+escHtml(unit)+'</td></tr>':'')
     +(guestName?'<tr><td style="padding:6px 0;color:#64748b">Guest</td><td style="padding:6px 0;font-weight:600">'+escHtml(guestName)+'</td></tr>':'')
-    +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">Question</td><td style="padding:6px 0">'+escHtml(item.question)+'</td></tr>'
-    +'<tr><td style="padding:6px 0;color:#64748b;vertical-align:top">'+(esc?'\u26a0 Holding reply (I don\u2019t know this)':'Suggested reply (from your knowledge base)')+'</td><td style="padding:6px 0">'+(proposed?escHtml(proposed):'<i style="color:#94a3b8">No suggested reply found in your saved data. Open Victor&rsquo;s area \u2192 Approval queue to type a reply and approve (the one-click Approve link can only send an existing suggested reply, never a blank).</i>')+'</td></tr>'
     +'</table>'
+    +'<div style="margin:16px 0 6px 0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.04em">Conversation</div>'
+    +'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:4px 12px">'+threadHtml+'</div>'
+    +'<div style="margin:16px 0 6px 0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.04em">'+(esc?'Holding reply (I don&rsquo;t know this)':'Suggested reply')+'</div>'
+    +'<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:14px;white-space:pre-wrap;color:#0f172a">'+(proposed?escHtml(proposed):'<i style="color:#94a3b8">No suggested reply found &mdash; open Victor&rsquo;s area then Approval queue to type one.</i>')+'</div>'
     +'<div style="margin:18px 0">'+btn(yes,"#16a34a","\u2705 Approve & Send")+btn(editUrl,"#2563eb","\u270f\ufe0f Write / edit the reply")+btn(no,"#dc2626","\u274c Reject")+'</div>'
     +'<p style="color:#94a3b8;font-size:12px;margin-top:8px">'+(esc?'Approving the holding message sends it as-is and does NOT save it as an answer. Use \u270f\ufe0f to provide the real answer (that gets saved). ':'Approve sends this reply to the guest and saves it so it auto-answers next time. ')+'Reject sends nothing. (Ref '+escHtml(item.id)+')</p>'
     +(secret?'':'<p style="color:#dc2626;font-size:12px">\u26a0 APPROVE_LINK_SECRET is not set on the server, so these links will not work yet.</p>')
