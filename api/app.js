@@ -732,7 +732,8 @@ async function processGuestQuestion(req, p){
   // verbatim. ALWAYS compose a FRESH reply tailored to exactly what THIS guest asked,
   // pulling only the relevant facts. If the specific thing asked isn't in our info ->
   // escalate with the holding message (do NOT fall back to an unrelated saved answer).
-  const draft=await aiDraftAnswer(kb, question, guestName, await getApprovedBank());
+  const history=await getThreadLog(threadId, bookingId);
+  const draft=await aiDraftAnswer(kb, question, guestName, await getApprovedBank(), history);
   let proposed=draft.answer||holdingMessage(guestName), pSource="composed", escalate=false;
   if(draft.known==="full"){ pSource="composed"; }
   else if(draft.known==="partial"){ pSource="composed_partial"; escalate=true; }
@@ -750,11 +751,12 @@ function holdingMessage(guestName){ const f=String(guestName||"").trim().split(/
   return "Hi "+(f||"there")+"! Great question \u2014 I want to make sure I get you the right info, so let me check with my manager and I\u2019ll get right back to you shortly. \uD83D\uDE0A"; }
 // KB-grounded draft. Returns {known:"full"|"partial"|"none", answer}. NEVER fabricates:
 // unknown parts -> say we will confirm with the manager and follow up (no guessing).
-async function aiDraftAnswer(kb, question, guestName, approvedBank){
+async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return {known:"none", answer:holdingMessage(guestName), noKey:true};
   const kbFacts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a);
   const bankFacts=((approvedBank)||[]).filter(e=>e&&String(e.a||"").trim()).map(e=>"- "+(e.q?("(previously asked: "+String(e.q).slice(0,70)+") "):"")+String(e.a).trim());
   const facts=[...kbFacts, ...bankFacts].join("\n");
+  const convo=(Array.isArray(history)?history:[]).filter(m=>m&&m.b).slice(-12).map(m=>(m.d==="out"?"Us (already sent): ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim()).join("\n");
   const first=String(guestName||"").trim().split(/\s+/)[0]||"";
   const hold=holdingMessage(guestName);
   const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). A human reviews your draft before it is sent. "
@@ -766,9 +768,10 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank){
     +"- full: answer every part using ONLY KNOWN INFO.\n"
     +"- partial: answer the part(s) you DO know from KNOWN INFO; for the unknown part(s) say you'll check with your manager and follow up shortly \u2014 NEVER guess it.\n"
     +"- none: do NOT attempt an answer. Use this exact warm holding message: \""+hold+"\"\n"
+    +"You may be shown CONVERSATION SO FAR: earlier messages from this guest and replies WE already sent. Use it to understand what is being asked (pronouns, follow-ups) and do NOT repeat info we already gave. Still answer ONLY from KNOWN INFO.\n"
     +"Reply with ONLY a JSON object: {\"known\":\"full\"|\"partial\"|\"none\", \"answer\":\"...\"}. 'answer' is always the full message text.\n\n"
     +"KNOWN INFO:\n"+(facts||"(none saved yet)");
-  const userMsg=(first?("Guest first name: "+first+"\n"):"")+"Guest message: "+String(question);
+  const userMsg=(first?("Guest first name: "+first+"\n"):"")+(convo?("CONVERSATION SO FAR (oldest first):\n"+convo+"\n\n"):"")+"Newest guest message (reply to THIS): "+String(question);
   try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:350,temperature:0.2,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return {known:"none", answer:holdingMessage(guestName), error:JSON.stringify(j).slice(0,200)};
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
@@ -1078,9 +1081,13 @@ module.exports=async(req,res)=>{
         +"(pets, smoking, parking, wifi, occupancy, early/late checkout, hot tub, amenities, anything). If it is not explicitly stated, it is NOT known. "
         +"Reply with ONLY a JSON object, no other text: {\"in_kb\": true|false, \"answer\": \"...\"}. "
         +"If in_kb is false, answer MUST be \"\". If true, write answer in 1-2 short sentences — warm, friendly, like Gavin's Airbnb messages, 'we/us', an occasional emoji ok, NO long sign-off — using ONLY KNOWN INFO. "
+        +"You may be shown CONVERSATION SO FAR (earlier guest messages and replies we already sent) — use it for context (follow-ups, pronouns) and avoid repeating what we already told them; still answer ONLY from KNOWN INFO.\n"
         +"\n\nKNOWN INFO:\n"+(facts||"(none saved yet)");
+      const _hist=await getThreadLog((b&&b.thread_id)||null, bookingId);
+      const _convo=(Array.isArray(_hist)?_hist:[]).filter(m=>m&&m.b).slice(-12).map(m=>(m.d==="out"?"Us (already sent): ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim()).join("\n");
+      const _userContent=(_convo?("CONVERSATION SO FAR (oldest first):\n"+_convo+"\n\n"):"")+"Newest guest message (reply to THIS): "+String(question);
       try{
-        const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0,system:sys,messages:[{role:"user",content:String(question)}]})});
+        const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0,system:sys,messages:[{role:"user",content:_userContent}]})});
         const j=await r.json(); if(!r.ok) return res.status(200).json({error:"Anthropic API error",detail:JSON.stringify(j).slice(0,300)});
         let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
         let inKb=false, answer="";
