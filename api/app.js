@@ -400,6 +400,7 @@ async function sendGuestReply(enabled, ids, body){
   // Persist the exact outcome so the owner/dev can see it in notify_status.lastSend.
   try{ const rec={ranAt:new Date().toISOString(), tokenLen, hasThread:!!threadId, hasBooking:!!bookingId, ...result};
        if(redis) await redis.set("parkside:last_send",rec); else _memLastSend=rec; }catch(e){}
+  try{ if(result&&result.sent){ await appendThreadLog(threadId, bookingId, "out", body, ""); } }catch(e){}
   return result;
 }
 // ===== Configurable SMS provider (replaces the old hardcoded Twilio / "Willow" path) =====
@@ -474,12 +475,25 @@ async function resendSend({apiKey,from,to,subject,html}){
     return {sent:r.ok, status:r.status, detail}; }
   catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
-function renderThread(item, approvals){
-  var key = item.thread_id || item.booking_id || null;
-  var convo;
-  if(key){ convo=(approvals||[]).filter(function(x){return (x.thread_id||x.booking_id)===key;}).sort(function(a,b){return String(a.ts).localeCompare(String(b.ts));}); }
-  else { convo=[item]; }
-  if(!convo.length) convo=[item];
+// ---- per-conversation message log (BOTH directions) ----
+// OwnerRez GET /v2/messages is gated, so the engine keeps its own per-thread log of
+// every inbound guest message AND every reply we send, keyed by thread (fallback booking).
+let _memThreads={};
+function threadKey(threadId, bookingId){ return threadId?("t:"+threadId):(bookingId?("b:"+bookingId):null); }
+async function getThreadLog(threadId, bookingId){ var k=threadKey(threadId,bookingId); if(!k) return [];
+  try{ return (redis?(await redis.get("parkside:thr:"+k)):_memThreads[k])||[]; }catch(e){ return []; } }
+async function appendThreadLog(threadId, bookingId, dir, body, name){
+  var k=threadKey(threadId,bookingId); if(!k) return;
+  var b=String(body||"").slice(0,4000); if(!b) return;
+  try{ var arr=(redis?(await redis.get("parkside:thr:"+k)):_memThreads[k])||[];
+    if(dir==="out"){ for(var i=Math.max(0,arr.length-6);i<arr.length;i++){ if(arr[i]&&arr[i].d==="out"&&arr[i].b===b) return; } }
+    arr.push({d:dir, b:b, t:new Date().toISOString(), n:String(name||"")}); arr=arr.slice(-120);
+    if(redis) await redis.set("parkside:thr:"+k, arr); else _memThreads[k]=arr;
+  }catch(e){}
+}
+// Render the full TWO-WAY conversation for the approval email. Prefers the per-thread
+// log (true in/out history); falls back to reconstructing from approval items.
+async function renderThread(item, approvals){
   function fmt(ts){ try{ return new Date(ts).toLocaleString("en-US",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}); }catch(e){ return ""; } }
   function guestB(name,text,ts,isNew){ return '<div style="margin:8px 0;text-align:left">'
     +'<div style="font-size:11px;color:#94a3b8;margin:0 0 2px 0">'+escHtml(name||"Guest")+(isNew?" &middot; newest":"")+(ts?(" &middot; "+escHtml(fmt(ts))):"")+'</div>'
@@ -487,11 +501,22 @@ function renderThread(item, approvals){
   function sentB(text,ts){ return '<div style="margin:8px 0;text-align:right">'
     +'<div style="font-size:11px;color:#94a3b8;margin:0 0 2px 0">You sent'+(ts?(" &middot; "+escHtml(fmt(ts))):"")+'</div>'
     +'<div style="display:inline-block;max-width:88%;background:#dcfce7;border:1px solid #86efac;border-radius:12px;padding:8px 12px;font-size:14px;color:#0f172a;white-space:pre-wrap;text-align:left">'+escHtml(text)+'</div></div>'; }
-  var multi=convo.length>1; var rows="";
-  for(var i=0;i<convo.length;i++){ var m=convo[i]; var isNew=(m.id===item.id)&&multi;
-    if(m.question) rows+=guestB(m.guest_name||item.guest_name,m.question,m.ts,isNew);
-    if(m.status==="approved" && m.answer) rows+=sentB(m.answer,m.decidedAt||m.ts);
+  var log=await getThreadLog(item.thread_id, item.booking_id);
+  if(log && log.length){
+    var lastIn=-1; for(var j=0;j<log.length;j++){ if(log[j].d==="in") lastIn=j; }
+    var out="";
+    for(var i=0;i<log.length;i++){ var m=log[i];
+      if(m.d==="out") out+=sentB(m.b,m.t);
+      else out+=guestB(m.n||item.guest_name,m.b,m.t,(i===lastIn && log.length>1)); }
+    if(out) return out;
   }
+  var key=item.thread_id||item.booking_id||null;
+  var convo = key ? (approvals||[]).filter(function(x){return (x.thread_id||x.booking_id)===key;}).sort(function(a,b){return String(a.ts).localeCompare(String(b.ts));}) : [item];
+  if(!convo.length) convo=[item];
+  var multi=convo.length>1; var rows="";
+  for(var c=0;c<convo.length;c++){ var it=convo[c]; var isNew=(it.id===item.id)&&multi;
+    if(it.question) rows+=guestB(it.guest_name||item.guest_name,it.question,it.ts,isNew);
+    if(it.status==="approved" && it.answer) rows+=sentB(it.answer,it.decidedAt||it.ts); }
   return rows||guestB(item.guest_name,item.question,item.ts,false);
 }
 // Build + send (or stage) the Victor approval email with Approve/Reject links.
@@ -505,7 +530,7 @@ async function sendVictorApprovalEmail(req, item, ctx){
   const unit=ctx.unit||""; const guestName=ctx.guestName||"";
   const proposed=item.proposed||"";
   const _approvals=await getApprovals();
-  const threadHtml=renderThread(item,_approvals);
+  const threadHtml=await renderThread(item,_approvals);
   const esc=item.escalate===true;
   const subject=(esc?"\u26a0 Unknown — approval needed":"Parkside approval needed")+(unit?(" — "+unit):"");
   const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#ffffff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
@@ -714,6 +739,7 @@ async function processGuestQuestion(req, p){
   else { pSource="escalation"; escalate=true; }
   const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate,
     unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
+  await appendThreadLog(threadId, bookingId, "in", question, guestName);
   const list=await getApprovals(); list.push(item); await setApprovals(list);
   const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
   const sms=await smsVictor(enabled, "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(write one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
@@ -1342,10 +1368,11 @@ module.exports=async(req,res)=>{
       await writeWhStatus({ranAt:new Date().toISOString(), event:"thread_message", action:act, entity_id:b.entity_id, entityKeys:Object.keys(e),
         dir:{from_role:e.from_role, from_contact_id:e.from_contact_id, is_draft:e.is_draft, resolved:direction}});
 
+      const msgBody=String(e.body||e.message||e.content||e.text||"").trim();
       if(isDraft) return res.status(200).json({ok:true, ignored:"draft"});
-      if(!inboundRole) return res.status(200).json({ok:true, ignored:"not inbound (from_role="+(e.from_role||"")+")"});
+      if(!inboundRole){ try{ if(role && msgBody) await appendThreadLog(threadId, bookingId, "out", msgBody, ""); }catch(e2){} return res.status(200).json({ok:true, logged_outbound:!!(role&&msgBody), ignored_for_reply:"from_role="+(e.from_role||"")}); }
 
-      const question=String(e.body||e.message||e.content||e.text||"").trim();
+      const question=msgBody;
       if(!question) return res.status(200).json({ok:true, ignored:"no text"});
       const guestName=nameFrom();
       try{ const out=await processGuestQuestion(req,{question, threadId, bookingId, guestName, unit:"", source:"ownerrez_webhook"});
