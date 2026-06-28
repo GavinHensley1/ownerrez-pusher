@@ -385,7 +385,7 @@ async function sendGuestReply(enabled, ids, body){
   let result;
   if(!enabled){ result={sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"}; }
   else { const auth=await orAuthHeader();
-    if(!auth){ result={sent:false, staged:true, reason:"no OwnerRez token (paste the OwnerRez OAuth token in "+CARD+")"}; }
+    if(!auth){ result={sent:false, staged:true, reason:"no OwnerRez token (paste the OwnerRez OAuth token in Victor's → Email notifications)"}; }
     else if(!threadId && !bookingId){ result={sent:false, staged:true, reason:"no thread_id / booking_id (need an inbound thread to reply to)"}; }
     else {
       // OwnerRez send: POST /v2/messages with the thread_id (from the inbound webhook).
@@ -701,7 +701,7 @@ async function runPollMessages(req){
   return await writePollStatus({ok:true, polled:0, disabled:true, note:"inbound via OwnerRez webhook (thread_message); GET /v2/messages polling disabled"});
   /* eslint-disable no-unreachable */
   const auth=await orAuthHeader();
-  if(!auth) return await writePollStatus({ok:false, polled:0, error:"OwnerRez token not set (paste the OwnerRez OAuth token in "+CARD+", or set OWNERREZ_OAUTH_TOKEN / OWNERREZ_API_USER+TOKEN)"});
+  if(!auth) return await writePollStatus({ok:false, polled:0, error:"OwnerRez token not set (paste the OwnerRez OAuth token in Victor's → Email notifications, or set OWNERREZ_OAUTH_TOKEN / OWNERREZ_API_USER+TOKEN)"});
   const H={Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
   const sinceIso=new Date(Date.now()-1000*60*60*24).toISOString(); // last 24h window
   let items=[];
@@ -1479,14 +1479,14 @@ module.exports=async(req,res)=>{
         let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{b=Object.fromEntries(new URLSearchParams(b));}catch{b={};} } } b=b||{};
         const answer=String(b.answer||"").trim();
         if(!it){ res.statusCode=200; return res.end(htmlPage("Not found","This request was not found (it may already be handled).")); }
-        if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status, "This request was already "+it.status+". Nothing was changed.")); }
+        if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status+" ✓", "This request was already "+it.status+", most likely by the other recipient. The guest was not messaged twice — nothing was changed.")); }
         if(!answer){ res.statusCode=200; return res.end(editPageHtml(it, tok, it.unit, it.guest_name, "Please enter a reply before sending.")); }
         const out=await decideApproval(id, "yes", answer); // sends owner's edited text + learns it into the approved bank/KB
         if(out.ok && out.decision==="approved"){ res.statusCode=200; return res.end(htmlPage("Sent \u2713", "Your reply was sent to the guest and saved so similar questions suggest it next time.")); }
         res.statusCode=200; return res.end(htmlPage("Couldn\u2019t send", (out.error||"Unknown error")+".")); }
       // GET -> render editor
       if(!it){ res.statusCode=200; return res.end(htmlPage("Not found","This request was not found (it may already be handled).")); }
-      if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status, "This request was already "+it.status+".")); }
+      if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status+" ✓", "This request was already "+it.status+", most likely by the other recipient. The guest was not messaged twice.")); }
       res.statusCode=200; return res.end(editPageHtml(it, tok, it.unit, it.guest_name, ""));
     }
     // View rejected drafts (password) so the owner can see what was wrong.
@@ -1509,6 +1509,7 @@ module.exports=async(req,res)=>{
         let title, msg;
         if(out.ok && out.decision==="approved"){ title="Approved — reply sent"; msg="The guest reply was sent and saved to the knowledge base."; }
         else if(out.ok && out.decision==="rejected"){ title="Rejected"; msg="This request was rejected. Nothing was sent to the guest."; }
+        else if(out.ok===false && /^already /i.test(String(out.error||""))){ const st=((out.item&&out.item.status)||String(out.error||"").replace(/^already\s+/i,"")||"handled"); title="Already handled ✓"; msg="This guest message was already "+st+", most likely by the other recipient. Don’t worry — nothing was sent to the guest twice."; }
         else { title="Couldn't complete"; msg=(out.error||"Unknown error")+"."; }
         res.statusCode=200; return res.end(htmlPage(title,msg));
       }
