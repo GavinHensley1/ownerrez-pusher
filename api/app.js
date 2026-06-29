@@ -44,7 +44,7 @@ const GAP_RESET_MIN=Number(process.env.GAP_RESET_MIN||2); // min-stay restored t
 const PACE_LEN_DEFAULT=365; // native horizon (days) the PACE_SEED ramp is authored over — the effective pacing-window length today
 const DEFAULT_KNOBS={
   GAIN:GS.GAIN, STEP:GS.STEP, BAND_NEAR:GS.BAND_NEAR,           // demand / glide controller (overall strength)
-  anticGain:Number(process.env.ANTIC_GAIN||0), // ANTICIPATORY far-out demand: lift/lower a night by its month target vs the yearly average, weighted by how far out it is (1-paceFrac). 0 = OFF (no change).
+  farDemand:Number(process.env.FAR_DEMAND||0.15), // FAR-OUT demand strength: how strongly pace-vs-actual demand still adjusts price far out (where the near-term gap collapses), as a fraction. 0 = off, 0.15 = gentle (default). Bounded; near-term unaffected.
   paceLength:PACE_LEN_DEFAULT, // pacing-window horizon in DAYS — how far out the booking-pace ramp is defined; default = native PACE_SEED span (365d) so behavior is unchanged
   wResort:1.0, wUnit:0.0,   // demand split: blendedGap = wResort*resortGap + wUnit*unitGap (default = resort-only = today's behavior)
   gap1:GAP_DISC[1], gap2:GAP_DISC[2], gap3:GAP_DISC[3], gapWeekend:GAP_WEEKEND_FACTOR, // orphan-gap discounts
@@ -52,7 +52,7 @@ const DEFAULT_KNOBS={
   floor:FLOOR, ceil:CEIL, saneMin:Number(process.env.SANE_MIN_PUSH||110) // clamp + push sanity
 };
 const KNOB_RANGES={ // [min,max,isInt] for validation
-  GAIN:[0,2,false], anticGain:[0,1.5,false], STEP:[0.01,0.5,false], BAND_NEAR:[0.01,0.6,false],
+  GAIN:[0,2,false], farDemand:[0,1,false], STEP:[0.01,0.5,false], BAND_NEAR:[0.01,0.6,false],
   paceLength:[30,720,true],
   wResort:[0,2,false], wUnit:[0,2,false],
   gap1:[0,0.6,false], gap2:[0,0.6,false], gap3:[0,0.6,false], gapWeekend:[0,1,false],
@@ -217,7 +217,6 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
   const start=new Date(startDate+"T00:00:00Z"); const t0=new Date(today+"T00:00:00Z"); const out=[]; overrides=overrides||{}; gsState=gsState||{}; opts=opts||{};
   const mode=opts.mode||"steady"; const gsNext={...gsState}; const applyGap=opts.applyGap===true;
   const K=opts.knobs||DEFAULT_KNOBS; // editable filter-strength knobs (defaults == prior hardcoded behavior)
-  const _tv=[]; for(const _m in (targets||{})){ const _r=targets[_m]; if(_r){ if(isFinite(_r.wd))_tv.push(_r.wd); if(isFinite(_r.we))_tv.push(_r.we); } } const seasonRef=_tv.length?(_tv.reduce((a,c)=>a+c,0)/_tv.length):0.55; // yearly-average occupancy target = the anticipatory reference
   const sv=Object.values(signalMap).filter(v=>v>0); const peakThr=(sv.length?median(sv):K.floor)*MODEL.PEAK_MULT;
   const poolCache={};
   for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const mo=d.getUTCMonth()+1; const we=isWe(d); const dt=we?1:0; const dtN=we?"weekend":"weekday";
@@ -230,8 +229,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     const tRow=(targets&&targets[mo])||SEED_TARGETS[mo]; let target=we?tRow.we:tRow.wd;
     if(target==null||!isFinite(target)){ const sd=SEED_TARGETS[mo]; target=we?sd.we:sd.wd; } // fallback: never silently use a flat/zero target
     const pf=GS.USE_PACE_REF?paceFrac(lead,dtN,null,K.paceLength):1; const ref=target*pf; // pace-ref = saved target x deterministic booking-pace ramp (1.0 at lead 0 -> reaches the FULL saved target at check-in); ramp horizon = K.paceLength days
-    // ANTICIPATORY far-out demand: far out (paceFrac~0 -> farW~1) the reactive controller has no booking signal, so price by the month's OWN demand profile (target vs yearly avg). Near term (farW~0) this fades out and the reactive controller takes over. anticGain=0 -> no effect.
-    const farW=Math.max(0,Math.min(1,1-pf)); const seasonGap=target-seasonRef; const anticMult=1+(K.anticGain||0)*farW*seasonGap;
+    const farW=Math.max(0,Math.min(1,1-pf)); // 0 near check-in, 1 far out
     // DEMAND is split: RESORT (whole-resort occ vs pace-ref) at night level; UNIT (this unit's own occ) inside the loop.
     // blendedGap = wResort*resortGap + wUnit*unitGap ; default wResort=1,wUnit=0 -> blendedGap == resortGap == today's behavior.
     let resortGap=null,lm=0;
@@ -241,10 +239,16 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     for(const u of UNITS){ const key=u.orp+"|"+ds; const gkey=u.orp+"|"+mk+"|"+dt;
       const prem=UNIT_PREM[u.orp]||1.0; const base=Math.round(sig*prem); const floorMult=K.floor/base, ceilMult=ceil/base;
       // UNIT demand: this unit's own occupancy vs the same pace-ref, then blend with resort demand.
-      let unitOcc=null,unitGap=null,blendedGap=null,desiredBase=1;
+      let unitOcc=null,unitGap=null,blendedGap=null,desiredBase=1,farDemandMult=1,_relDev=0;
       if(occ.hasData){ const ua=occ.agg.unitAgg&&occ.agg.unitAgg[u.orp]&&occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt];
         unitOcc=ua&&ua.t?ua.b/ua.t:0; unitGap=Math.max(-1,Math.min(1,ref-unitOcc));
-        blendedGap=K.wResort*resortGap + K.wUnit*unitGap; desiredBase=(1-K.GAIN*blendedGap)*anticMult; }
+        blendedGap=K.wResort*resortGap + K.wUnit*unitGap;
+        // FAR-OUT demand: near term the absolute gap above drives price; far out (farW->1) it collapses toward 0.
+        // So add a PROPORTIONAL pace deviation (how far off pace, as a fraction of expected), applied GENTLY and ONLY
+        // far out (xfarW x farDemand), bounded by floor/ceil. farDemand=0 -> off; near term farW~0 -> no effect (today's behavior).
+        var _pref=Math.max(ref,0.06); _relDev=Math.max(-1,Math.min(1,(ref-(poolOcc||0))/_pref));
+        farDemandMult=1 - K.GAIN*(K.farDemand||0)*farW*_relDev;
+        desiredBase=(1-K.GAIN*blendedGap)*farDemandMult; }
       let amount,overridden=false,applied=null,desiredC=null,minNights=null,easedDemand=null;
       // per-unit orphan-gap lookup (forward-only detection from buildAgg): {runLen,hasWeekend}
       const gi=(occ.agg&&occ.agg.gaps&&occ.agg.gaps[u.orp])?occ.agg.gaps[u.orp][ds]:null;
@@ -264,7 +268,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
         const prev=(gsState[gkey]!=null)?gsState[gkey]:1.0;
         const step=Math.max(-K.STEP,Math.min(K.STEP,desiredC-prev)); const steppedDemand=Math.max(floorMult,Math.min(ceilMult,prev+step));
         gsNext[gkey]=steppedDemand; // gsState tracks the eased DEMAND mult only (perishable discounts never corrupt it)
-        easedDemand=(mode==="step")?steppedDemand:desiredC;
+        easedDemand=(mode==="step" && farW<0.5)?steppedDemand:desiredC; // far out (farW>=0.5): apply the stable far-out demand directly, no glide lag-swings
         let mult=easedDemand*(1-lm); // last-minute — immediate
         if(gapApplied){ mult=mult*(1-gapDisc); minNights=gapTier; } // gap STACKS on top — also immediate
         applied=Math.max(floorMult,Math.min(ceilMult,mult));
@@ -273,7 +277,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
       out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,minNights,gapApplied,
         gapTier,gapHasWeekend:gapHasWe,gapDisc:Number(gapDisc.toFixed(3)),effDisc:Number(effDisc.toFixed(3)),discSource,
         poolOcc:poolOcc==null?null:Number(poolOcc.toFixed(3)),unitOcc:unitOcc==null?null:Number(unitOcc.toFixed(3)),ref:Number(ref.toFixed(3)),
-        savedTarget:Number(target.toFixed(3)),paceFrac:Number(pf.toFixed(3)),anticMult:Number(anticMult.toFixed(3)),farW:Number(farW.toFixed(3)),seasonRef:Number(seasonRef.toFixed(3)),
+        savedTarget:Number(target.toFixed(3)),paceFrac:Number(pf.toFixed(3)),farW:Number(farW.toFixed(3)),farDemandMult:Number(farDemandMult.toFixed(3)),relDev:Number(_relDev.toFixed(3)),
         resortGap:resortGap==null?null:Number(resortGap.toFixed(3)),unitGap:unitGap==null?null:Number(unitGap.toFixed(3)),gap:blendedGap==null?null:Number(blendedGap.toFixed(3)),
         desiredBaseMult:occ.hasData?Number(desiredBase.toFixed(3)):null, easedDemandMult:easedDemand==null?null:Number(easedDemand.toFixed(3)), prem,
         lead,lm:Number(lm.toFixed(3)),desiredMult:desiredC==null?null:Number(desiredC.toFixed(3)),appliedMult:applied==null?null:Number(applied.toFixed(3))}); } }
@@ -361,7 +365,7 @@ function computePace(poolAgg,targets,learned,today,months,paceLen){ const pace={
 // Heuristics from occupancy-vs-target pace trend; each suggestion is clearly labelled with its basis + confidence.
 function clampKnob(key,v){ const r=KNOB_RANGES[key]; if(!r) return v; v=Math.max(r[0],Math.min(r[1],Number(v))); return r[2]?Math.round(v):Number(v.toFixed(3)); }
 // RECOMMENDED SETTINGS: for EVERY knob, a learning-recommended value + one-line basis. Suggest-only; adopting is Gavin's explicit per-knob choice.
-const KNOB_ORDER=["GAIN","anticGain","paceLength","STEP","BAND_NEAR","wResort","wUnit","gap1","gap2","gap3","gapWeekend","lmMax","lmWindow","lmSteep","floor","ceil","saneMin"];
+const KNOB_ORDER=["GAIN","farDemand","paceLength","STEP","BAND_NEAR","wResort","wUnit","gap1","gap2","gap3","gapWeekend","lmMax","lmWindow","lmSteep","floor","ceil","saneMin"];
 async function genRecommendations(today){
   const st=await getState(); const K=await getKnobs(); const learned=await getLearned();
   const od=await getOccData(st,today,365,true);
@@ -1071,20 +1075,13 @@ module.exports=async(req,res)=>{
         // Demand = the ACTUALLY-APPLIED (eased) effect — where the price is today on its glide toward target. Split into
         // resort + unit by their gap contribution; NO separate "glide easing" row.
         const easedMult=(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult);
-        const antic=(live.anticMult!=null?live.anticMult:1);
-        const reactiveEased=(antic!==0)?(easedMult/antic):easedMult; // demand mult WITHOUT the far-out factor (broken out as its own step below)
-        const demandDelta=Math.round(base*reactiveEased)-base; // reactive (occupancy-vs-pace) $ only
+        const demandDelta=Math.round(base*easedMult)-base; // total $ demand moves the price: near-term pace gap + gentle far-out demand (already eased)
         const rc=K.wResort*(live.resortGap||0), uc=K.wUnit*(live.unitGap||0); const blend=rc+uc;
         const resortDelta=Math.abs(blend)>1e-9?Math.round(demandDelta*(rc/blend)):demandDelta;
         const glideNote=(live.easedDemandMult!=null && Math.abs(easedMult-live.desiredBaseMult)>0.005)?'  ·  applied is gliding toward its full target ×'+live.desiredBaseMult+' over the next few daily runs (gradual, not instant)':'';
-        steps.push({label:'Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind→raise)':live.resortGap<0?' (ahead→lower)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wResort+glideNote, ...eff(base+resortDelta)});
-        steps.push({label:'Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind→raise)':live.unitGap<0?' (ahead→lower)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wUnit+(K.wUnit===0?'  (0 = off)':''), ...eff(base+demandDelta)});
-        // FAR-OUT demand (anticipatory): season-based lift/drop, strongest far out (high farW), fades to 0 near check-in. Always shown so it is visible.
-        { const _sg=(live.savedTarget!=null&&live.seasonRef!=null)?(live.savedTarget-live.seasonRef):0;
-          const _amTxt=(K.anticGain>0)
-            ? ('anticGain '+K.anticGain+'  ×  far-out weight '+pct(live.farW)+' (1−pacing)  ×  season '+sgn(_sg)+' (this month '+pct(live.savedTarget)+' vs yr-avg '+pct(live.seasonRef)+')  →  ×'+antic.toFixed(3)+' = '+(antic>=1?'+':'−')+Math.abs(Math.round((antic-1)*100))+'%'+((live.farW!=null&&live.farW<0.05)?'  (too near for far-out demand to matter)':''))
-            : ('OFF — Far-out demand knob (anticGain) is 0  →  ×1.00 (no change)');
-          steps.push({label:'Far-out demand', math:_amTxt, ...eff(base*easedMult)}); }
+        const farNote=(live.farW!=null&&live.farW>=0.5&&K.farDemand>0)?('  ·  far-out ('+pct(live.farW)+' out): pace deviation '+sgn(live.relDev)+' applied gently × farDemand '+K.farDemand+'  →  ×'+(live.farDemandMult!=null?live.farDemandMult.toFixed(3):'1.000')):'';
+        steps.push({label:'Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind pace → lower to fill)':live.resortGap<0?' (ahead of pace → raise)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wResort+farNote+glideNote, ...eff(base+resortDelta)});
+        steps.push({label:'Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind pace → lower)':live.unitGap<0?' (ahead of pace → raise)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wUnit+(K.wUnit===0?'  (0 = off)':''), ...eff(base+demandDelta)});
         // Last-minute — ALWAYS shown; applied IMMEDIATELY on top of the eased demand. $0 if outside the window.
         const lmTxt=live.lm>0?('lead '+live.lead+'d → proximity ('+K.lmWindow+'−'+live.lead+')/'+K.lmWindow+'^'+K.lmSteep+' × max '+Math.round(K.lmMax*100)+'%  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'% (perishable, still open)'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');
         if(isGapActive){
@@ -1114,7 +1111,7 @@ module.exports=async(req,res)=>{
     }
     if(action==="get_knobs"){
       const k=await getKnobs();
-      const pick=x=>({GAIN:x.GAIN,anticGain:x.anticGain,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,paceLength:x.paceLength,wResort:x.wResort,wUnit:x.wUnit,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,lmSteep:x.lmSteep,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
+      const pick=x=>({GAIN:x.GAIN,farDemand:x.farDemand,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,paceLength:x.paceLength,wResort:x.wResort,wUnit:x.wUnit,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,lmSteep:x.lmSteep,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
       return res.status(200).json({knobs:pick(k), defaults:pick(DEFAULT_KNOBS), ranges:KNOB_RANGES, unitPremiums:UNIT_PREM});
     }
     if(action==="set_knobs"){

@@ -144,10 +144,11 @@
 
   <div class="card" id="tuneCard">
     <h2>🎚 Filter tuning <span class="muted" style="font-weight:400;text-transform:none">— manual strength knobs now; the learning system will drive these automatically later</span></h2>
-    <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then Save. Applies immediately to the calendar &amp; breakdown (does not push to OwnerRez).</div>
+    <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then Save. <b>Save knobs</b> updates the calendar &amp; breakdown only; <b>Save &amp; push prices</b> also sends the recalculated prices to OwnerRez right away.</div>
     <div id="tuneGrid"></div>
     <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center">
       <button onclick="saveKnobs()">Save knobs</button>
+      <button onclick="pushKnobPrices()">⟳ Save &amp; push prices to OwnerRez</button>
       <button class="ghost" onclick="resetKnobs()">Reset to defaults</button>
       <span id="tuneStatus" class="muted" style="align-self:center"></span>
     </div>
@@ -530,7 +531,7 @@ async function bdClearPin(){
 // ===== Filter tuning knobs (manual now; learning later) =====
 let KNOBS_META=null;
 const KNOB_GROUPS=[
-  ['Demand / glide controller',[['GAIN','Glide strength','overall demand reactivity'],['anticGain','Far-out demand','anticipatory — prices far-out nights by season (high-demand months up, low-demand down), fading into reactive pricing near check-in; 0 = off, 0.25 = gentle, up to 1.5 (default 0)'],['paceLength','Pacing length (days)','horizon the booking-pace ramp spans; longer = pace builds earlier/further out, shorter = ramps up closer to check-in (default 365)'],['wResort','Resort-demand weight','whole-resort occupancy (default 1)'],['wUnit','Unit-demand weight','this individual unit (default 0)'],['STEP','Max change / run','easing speed'],['BAND_NEAR','Normal band','informational']]],
+  ['Demand / glide controller',[['GAIN','Glide strength','overall demand reactivity'],['farDemand','Far-out demand strength','how strongly pace-vs-actual demand keeps adjusting price far out (where the near-term gap collapses) — gentle and capped, fades into full reactive pricing near check-in; 0 = off (far-out flat), 0.15 = gentle (default)'],['paceLength','Pacing length (days)','horizon the booking-pace ramp spans; longer = pace builds earlier/further out, shorter = ramps up closer to check-in (default 365)'],['wResort','Resort-demand weight','whole-resort occupancy (default 1)'],['wUnit','Unit-demand weight','this individual unit (default 0)'],['STEP','Max change / run','easing speed'],['BAND_NEAR','Normal band','informational']]],
   ['Orphan-gap discounts',[['gap1','1-night gap','0.30 = −30%'],['gap2','2-night gap','0.18 = −18%'],['gap3','3-night gap','0.08 = −8%'],['gapWeekend','Weekend factor','×0.5 = half depth on weekends']]],
   ['Last-minute (perishable, proximity-driven)',[['lmMax','Max discount','0.30 = −30% day-of'],['lmWindow','Window (days)','discount within N days of check-in'],['lmSteep','Curve steepness','higher = fades faster as lead grows']]],
   ['Clamp & push sanity',[['floor','Floor $',''],['ceil','Ceiling $',''],['saneMin','Push min $','non-gap nights raised to this']]],
@@ -563,6 +564,19 @@ async function saveKnobs(){
   document.getElementById('tuneStatus').textContent='Saved ✓ — recomputing…';
   await loadKnobs(); await loadRecommendations(); await applyPreview(); await refreshBreakdownIfOpen();
   document.getElementById('tuneStatus').textContent='Saved ✓ — calendar + breakdown updated';
+}
+async function pushKnobPrices(){
+  const st=document.getElementById('tuneStatus');
+  if(!confirm('Save these knob settings and push the recalculated prices to OwnerRez now?')) return;
+  await saveKnobs(); // persist knobs + refresh calendar/breakdown
+  st.textContent='Pushing updated prices to OwnerRez…';
+  try{
+    const r=await fetch(api('run'),{headers:{'x-app-password':PW}}); const j=await r.json().catch(()=>({}));
+    if(j.mode==='LIVE_SYNC'){ st.textContent='Pushed ✓ — '+j.sent+' prices sent to OwnerRez (HTTP '+j.status+')'+(j.gapNights?(', '+j.gapNights+' gap nights'):'')+(j.overrides?(', '+j.overrides+' pinned'):''); }
+    else if(j.mode==='COMPUTED_NO_SYNC'){ st.textContent='⚠ Recalculated but NOT pushed — auto-sync is OFF. Turn on Go live first, then push.'; }
+    else if(!r.ok){ st.textContent='Push failed (auth?): '+(j.error||('HTTP '+r.status)); }
+    else { st.textContent='Push result: '+(j.note||JSON.stringify(j).slice(0,140)); }
+  }catch(e){ st.textContent='Push failed: '+e.message; }
 }
 async function resetKnobs(){
   if(!confirm('Reset all filter knobs to their defaults?')) return;
