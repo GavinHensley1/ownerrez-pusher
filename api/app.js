@@ -42,6 +42,7 @@ const GAP_RESET_MIN=Number(process.env.GAP_RESET_MIN||2); // min-stay restored t
 // ===== Editable filter-strength knobs (manual tuning now; the learning system will drive these later).
 // Defaults below == the current hardcoded behavior. Overrides persist in redis parkside:knobs and apply immediately.
 const PACE_LEN_DEFAULT=365; // native horizon (days) the PACE_SEED ramp is authored over — the effective pacing-window length today
+const GAP1_CAP=Number(process.env.GAP1_MAX_PUSH||125)||125; // one-night orphan gap hard cap ($) — applied in compute (panel+push) so it is consistent everywhere
 const DEFAULT_KNOBS={
   GAIN:GS.GAIN, STEP:GS.STEP, BAND_NEAR:GS.BAND_NEAR,           // demand / glide controller (overall strength)
   farDemand:Number(process.env.FAR_DEMAND||0.15), // FAR-OUT demand strength: how strongly pace-vs-actual demand still adjusts price far out (where the near-term gap collapses), as a fraction. 0 = off, 0.15 = gentle (default). Bounded; near-term unaffected.
@@ -201,6 +202,7 @@ function compute(signalMap,targets,today,startDate,days,occ,overrides,learned){
           if(peak)m=Math.max(1,m); // peak nights never discounted below seasonal market base (peak wins over orphan)
           m=Math.max(MODEL.MULT_MIN,Math.min(MODEL.MULT_MAX,m));
           amount=Math.max(FLOOR,Math.min(ceil,Math.round(base*m))); } }
+      if(!overridden && gapLen===1 && amount>GAP1_CAP) amount=GAP1_CAP; // one-night orphan gap hard cap
       out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",overridden,orphan,base:baseOut,gapLen}); } }
   return out;
 }
@@ -274,7 +276,11 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
         applied=Math.max(floorMult,Math.min(ceilMult,mult));
         amount=Math.max(K.floor,Math.min(ceil,Math.round(base*applied)));
       }
-      out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,minNights,gapApplied,
+      // HARD CAP: a single-night orphan gap (gapTier===1) is never priced above $GAP1_CAP — applied here so the
+      // panel calendar, the breakdown, and the OwnerRez push all show the same capped price. Manual overrides untouched.
+      let gap1Capped=false; const preCapAmount=amount;
+      if(!overridden && gapTier===1 && amount>GAP1_CAP){ amount=GAP1_CAP; gap1Capped=true; }
+      out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,minNights,gapApplied,gap1Capped,preCapAmount:Number(preCapAmount),
         gapTier,gapHasWeekend:gapHasWe,gapDisc:Number(gapDisc.toFixed(3)),effDisc:Number(effDisc.toFixed(3)),discSource,
         poolOcc:poolOcc==null?null:Number(poolOcc.toFixed(3)),unitOcc:unitOcc==null?null:Number(unitOcc.toFixed(3)),ref:Number(ref.toFixed(3)),
         savedTarget:Number(target.toFixed(3)),paceFrac:Number(pf.toFixed(3)),farW:Number(farW.toFixed(3)),farDemandMult:Number(farDemandMult.toFixed(3)),relDev:Number(_relDev.toFixed(3)),
@@ -289,7 +295,7 @@ function validate(es){ const ok=[]; for(const e of es){ const pid=Number(e.prope
     const mn=Number(e.minNights); if(Number.isInteger(mn)&&mn>=1&&mn<=30) o.min_nights=mn; // only sent on gap nights / gap-resets; omitted elsewhere so OwnerRez keeps its own min-stay
     ok.push(o); } } return ok; }
 async function pushOwnerRez(es,knobs){ const user=process.env.OWNERREZ_API_USER,token=process.env.OWNERREZ_API_TOKEN; if(!user||!token) throw new Error("missing OWNERREZ creds");
-  const K=knobs||DEFAULT_KNOBS; const SANE_MIN=K.saneMin, HARD_FLOOR=K.floor; const GAP1_CAP=Number(process.env.GAP1_MAX_PUSH||125)||125; const _flagged=[]; const _capped=[];
+  const K=knobs||DEFAULT_KNOBS; const SANE_MIN=K.saneMin, HARD_FLOOR=K.floor; const _flagged=[]; const _capped=[];
   for(const _e of es){ let _amt=Math.round(Number(_e.amount)); const _base=Number(_e.base)||_amt;
     // gap nights are EXEMPT from the sane-min (deliberate orphan discount) but keep the hard FLOOR
     const _sane = _e.gapApplied ? HARD_FLOOR : Math.max(SANE_MIN,Math.round(_base*0.60));
@@ -1059,7 +1065,7 @@ module.exports=async(req,res)=>{
       const activeMult=live.appliedMult; const rawPrice=(activeMult==null?live.amount:Math.round(base*activeMult));
       // push-sanity threshold mirrors pushOwnerRez: gap nights exempt (hard floor); else max(saneMin, base*0.6)
       const saneThresh=isGapActive?K.floor:Math.max(K.saneMin,Math.round(base*0.60));
-      const pushedPrice=(live.amount<saneThresh?saneThresh:live.amount);
+      let pushedPrice=(live.amount<saneThresh?saneThresh:live.amount); if(live.gap1Capped && pushedPrice>GAP1_CAP) pushedPrice=GAP1_CAP; // 1-night gap cap wins over the sane-min (matches pushOwnerRez order)
       const pct=x=>x==null?'—':Math.round(x*100)+'%'; const sgn=x=>x==null?'—':(x>0?'+':'')+x.toFixed(2);
       const fP=p=>(p>=0?'+':'−')+Math.abs(p).toFixed(1)+'%'; const fD=d=>{d=Math.round(d);return (d>=0?'+$':'−$')+Math.abs(d);};
       const dirw=d=>d>0?'↑ raises':d<0?'↓ lowers':'→ no change';
@@ -1086,11 +1092,12 @@ module.exports=async(req,res)=>{
         const lmTxt=live.lm>0?('lead '+live.lead+'d → proximity ('+K.lmWindow+'−'+live.lead+')/'+K.lmWindow+'^'+K.lmSteep+' × max '+Math.round(K.lmMax*100)+'%  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'% (perishable, still open)'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');
         if(isGapActive){
           steps.push({label:'Last-minute', math:lmTxt, ...eff(base*(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult)*(1-(live.lm||0)))});
-          steps.push({label:'Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (wknd × '+K.gapWeekend+')':' (mid-week)')+'  →  ×(1 − '+withGap.gapDisc.toFixed(3)+') = −'+Math.round(withGap.gapDisc*100)+'%  (STACKS with last-minute)  ·  min-stay '+withGap.minNights, ...eff(live.amount)});
+          steps.push({label:'Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (wknd × '+K.gapWeekend+')':' (mid-week)')+'  →  ×(1 − '+withGap.gapDisc.toFixed(3)+') = −'+Math.round(withGap.gapDisc*100)+'%  (STACKS with last-minute)  ·  min-stay '+withGap.minNights, ...eff(live.gap1Capped?live.preCapAmount:live.amount)});
         } else {
           steps.push({label:'Last-minute', math:lmTxt, ...eff(live.amount)});
           steps.push({label:'Gap night', math:(gapOn?'no orphan gap on this night':'gap discounting OFF')+(withGap.gapTier>0?('  — if active: '+withGap.gapTier+'-night −'+Math.round(withGap.gapDisc*100)+'%'):'')+'  →  ×1.00 (none)', ...eff(run)});
         }
+        if(live.gap1Capped){ steps.push({label:'1-night gap cap', math:'single-night orphan gap — hard-capped so it never exceeds $'+GAP1_CAP+' (was $'+Math.round(live.preCapAmount)+')', ...eff(live.amount)}); }
       }
       steps.push({label:'Push sanity (min)', math:(isGapActive?('gap night — exempt; hard floor $'+K.floor):('non-gap minimum $'+saneThresh))+(live.peak?' · peak ceiling':''), ...eff(pushedPrice)});
       steps.push({label:'FINAL pushed price', math:'base $'+base+'  +  every ± above  =  the final pushed price'+((isGapActive&&live.minNights)?('  ·  min-stay '+live.minNights):''), value:'$'+pushedPrice, running:'$'+pushedPrice, final:true});
