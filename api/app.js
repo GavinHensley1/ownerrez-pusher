@@ -1071,12 +1071,20 @@ module.exports=async(req,res)=>{
         // Demand = the ACTUALLY-APPLIED (eased) effect — where the price is today on its glide toward target. Split into
         // resort + unit by their gap contribution; NO separate "glide easing" row.
         const easedMult=(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult);
-        const demandDelta=Math.round(base*easedMult)-base; // total $ the demand filter moves the price (already eased toward target)
+        const antic=(live.anticMult!=null?live.anticMult:1);
+        const reactiveEased=(antic!==0)?(easedMult/antic):easedMult; // demand mult WITHOUT the far-out factor (broken out as its own step below)
+        const demandDelta=Math.round(base*reactiveEased)-base; // reactive (occupancy-vs-pace) $ only
         const rc=K.wResort*(live.resortGap||0), uc=K.wUnit*(live.unitGap||0); const blend=rc+uc;
         const resortDelta=Math.abs(blend)>1e-9?Math.round(demandDelta*(rc/blend)):demandDelta;
         const glideNote=(live.easedDemandMult!=null && Math.abs(easedMult-live.desiredBaseMult)>0.005)?'  ·  applied is gliding toward its full target ×'+live.desiredBaseMult+' over the next few daily runs (gradual, not instant)':'';
         steps.push({label:'Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind→raise)':live.resortGap<0?' (ahead→lower)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wResort+glideNote, ...eff(base+resortDelta)});
         steps.push({label:'Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind→raise)':live.unitGap<0?' (ahead→lower)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wUnit+(K.wUnit===0?'  (0 = off)':''), ...eff(base+demandDelta)});
+        // FAR-OUT demand (anticipatory): season-based lift/drop, strongest far out (high farW), fades to 0 near check-in. Always shown so it is visible.
+        { const _sg=(live.savedTarget!=null&&live.seasonRef!=null)?(live.savedTarget-live.seasonRef):0;
+          const _amTxt=(K.anticGain>0)
+            ? ('anticGain '+K.anticGain+'  ×  far-out weight '+pct(live.farW)+' (1−pacing)  ×  season '+sgn(_sg)+' (this month '+pct(live.savedTarget)+' vs yr-avg '+pct(live.seasonRef)+')  →  ×'+antic.toFixed(3)+' = '+(antic>=1?'+':'−')+Math.abs(Math.round((antic-1)*100))+'%'+((live.farW!=null&&live.farW<0.05)?'  (too near for far-out demand to matter)':''))
+            : ('OFF — Far-out demand knob (anticGain) is 0  →  ×1.00 (no change)');
+          steps.push({label:'Far-out demand', math:_amTxt, ...eff(base*easedMult)}); }
         // Last-minute — ALWAYS shown; applied IMMEDIATELY on top of the eased demand. $0 if outside the window.
         const lmTxt=live.lm>0?('lead '+live.lead+'d → proximity ('+K.lmWindow+'−'+live.lead+')/'+K.lmWindow+'^'+K.lmSteep+' × max '+Math.round(K.lmMax*100)+'%  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'% (perishable, still open)'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');
         if(isGapActive){
