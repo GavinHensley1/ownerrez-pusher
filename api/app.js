@@ -1525,6 +1525,19 @@ module.exports=async(req,res)=>{
       const out=status==="all"?list:list.filter(x=>x.status===status);
       return res.status(200).json({approvals:out.slice(-200).reverse(), counts:{pending:list.filter(x=>x.status==="pending").length, approved:list.filter(x=>x.status==="approved").length, rejected:list.filter(x=>x.status==="rejected").length}});
     }
+    // Add/edit the WHY for a rejected item after the fact (teaches the assistant — feeds aiDraftAnswer's PAST REJECTIONS).
+    if(action==="set_reject_reason"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+      const id=String(b.id||""); const reason=String(b.reason||"").slice(0,500).trim();
+      const list=await getApprovals(); const it=list.find(x=>x.id===id);
+      if(!it) return res.status(404).json({error:"item not found"});
+      it.rejectReason=reason; await setApprovals(list);
+      try{ const rk=(redis?(await redis.get("parkside:kb_rejected")):_memRejected)||[]; const r=rk.find(x=>x.id===id);
+        if(r){ r.reason=reason; } else { rk.push({id:it.id,q:it.question,draft:it.proposed||"",reason:reason,source:it.source||null,ts:new Date().toISOString()}); }
+        const t=rk.slice(-500); if(redis) await redis.set("parkside:kb_rejected",t); else _memRejected=t; }catch(e){}
+      return res.status(200).json({ok:true, id, reason});
+    }
     // Edit & send: a tiny mobile page to write/correct the reply, then send THAT.
     // Auth: x-app-password OR ?token=<approve secret>.
     if(action==="edit_approval"){

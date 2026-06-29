@@ -200,16 +200,13 @@
     </div>
     <div class="legend" id="msgNote">When <b>ON</b>, in-KB answers and the escalation apology are sent to the guest through the channel connected to OwnerRez, and Victor is texted on escalations. When <b>OFF</b>, nothing is sent — the tester below just shows what would happen. No channel is connected yet (Vrbo pending, Airbnb future), so even ON sends nothing until a channel is live.</div>
   </div>
-  <div class="card" style="border-color:var(--accent)">
-    <h2>Messaging — guest auto-response knowledge base</h2>
-    <div class="legend">This is the information the assistant is allowed to use when answering guests. It answers <b>only</b> from what's saved here and never makes things up; if an answer isn't here it flags the question to escalate. Edit any answer and Save. <b>Nothing is auto-sent yet</b> — this is the editable data store plus a preview tester.</div>
-  </div>
   <div class="card">
     <h2>Message formatting / style</h2>
     <textarea id="kbFormat" class="full" placeholder="Paste your formatting samples here — how you want guest messages to look (greeting, tone, sign-off, structure). The assistant will match this."></textarea>
   </div>
   <div class="card">
-    <h2>Pre-saved answers (topic &rarr; answer)</h2>
+    <h2>📋 Facts — the only info the assistant may use</h2>
+    <div class="legend" style="margin-bottom:8px">The assistant answers guests <b>only</b> from these facts and never makes anything up; if a question isn&rsquo;t covered here it escalates to you. Edit any answer and Save.</div>
     <div id="kbList"></div>
     <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
       <button class="ghost" onclick="addKbItem()">+ Add topic</button>
@@ -223,26 +220,6 @@
     <div style="margin-top:10px;display:flex;gap:10px"><button onclick="aiPreview()">Preview AI answer</button><span id="aiStatus" class="muted" style="align-self:center"></span></div>
     <div id="aiOut" class="legend" style="white-space:pre-wrap;margin-top:10px"></div>
   </div>
-  <div class="card" style="border-color:var(--pin)">
-    <h2>Test confirmation message <span class="muted" style="font-weight:400;text-transform:none">(dry-run — nothing is sent to anyone)</span></h2>
-    <div class="legend" style="margin-top:0">Two-stage, channel-branched (dry-run — nothing is sent). <b>Airbnb</b>: Stage 1 sends an OwnerRez <b>email-provision link</b> (Airbnb hides the guest email); after the guest provides it, OwnerRez sends its own confirmation; once that's completed, Stage 2 sends the <b>StayDeck guidebook</b> link. <b>Vrbo / Booking.com</b>: email is already on file, so Stage 1 is an <b>auto-confirmation with NO link / no guest action</b>; Stage 2 then sends the guidebook. <b>iCal "Blocked-Off Time"</b> (Brightside) is excluded — try that channel to see it.</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
-      <label class="muted" style="font-size:12px">Stage<br><select id="ctStage" style="width:100%"><option value="1">Stage 1 — confirmation (Airbnb: email link · Vrbo/Booking: auto, no link)</option><option value="2">Stage 2 — guidebook (after OwnerRez confirmation completed)</option></select></label>
-      <label class="muted" style="font-size:12px">Guest first name<br><input id="ctName" style="width:100%" placeholder="e.g. Jane"></label>
-      <label class="muted" style="font-size:12px">Unit<br><select id="ctUnit" style="width:100%"></select></label>
-      <label class="muted" style="font-size:12px">Channel<br><select id="ctChannel" style="width:100%"><option value="airbnb">Airbnb (API)</option><option value="vrbo">Vrbo (API)</option><option value="booking">Booking.com (API)</option><option value="ical">iCal block (Brightside) — excluded</option></select></label>
-      <label class="muted" style="font-size:12px">Booking ref<br><input id="ctRef" style="width:100%" placeholder="e.g. HMABCD123 (ORB… = block)"></label>
-      <label class="muted" style="font-size:12px">Check-in<br><input id="ctIn" style="width:100%" placeholder="e.g. Aug 14, 2026"></label>
-      <label class="muted" style="font-size:12px">Check-out<br><input id="ctOut" style="width:100%" placeholder="e.g. Aug 17, 2026"></label>
-    </div>
-    <textarea id="ctMsg" class="full" style="min-height:60px;margin-top:10px" placeholder="What the guest said (their booking/inquiry message), e.g. 'So excited — it's our anniversary trip!'"></textarea>
-    <div style="margin-top:10px;display:flex;gap:10px"><button onclick="confirmTest()">Generate test confirmation</button><span id="ctStatus" class="muted" style="align-self:center"></span></div>
-    <div id="ctOutWrap" style="display:none;margin-top:12px">
-      <div id="ctOut" class="legend" style="white-space:pre-wrap;background:#0c141d;border:1px solid var(--line);border-radius:6px;padding:10px"></div>
-      <div id="ctLink" class="legend" style="margin-top:6px"></div>
-    </div>
-  </div>
-
   <div class="card">
     <h2>Approval queue — guest questions awaiting Victor</h2>
     <div class="legend">When a question isn’t confidently answered by the knowledge base, it’s queued here and (once the SMS number is live) texted to Victor for a YES/NO. Approving sends the answer to the guest <b>and</b> saves it to the knowledge base so it auto-answers next time. You can also decide right here.</div>
@@ -254,6 +231,17 @@
     </div>
     <div id="apPrune" class="muted" style="margin:-2px 0 6px 0"></div>
     <div id="apList" class="legend"></div>
+  </div>
+
+  <div class="card">
+    <h2>✅❌ Approved &amp; rejected — what the AI recommended &amp; your decisions</h2>
+    <div class="legend">Every guest question the AI flagged: what it recommended, whether you approved it (and what was actually sent) or rejected it, and why. For rejected ones you can add or edit the reason — it teaches the assistant so it stops repeating the mistake.</div>
+    <div style="margin:8px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button onclick="loadDecisions()">Refresh</button>
+      <select id="decFilter" onchange="loadDecisions()" style="width:auto"><option value="all">All decided</option><option value="approved">Approved only</option><option value="rejected">Rejected only</option></select>
+      <span id="decCount" class="muted"></span>
+    </div>
+    <div id="decList" class="legend"></div>
   </div>
 
   <div class="card">
@@ -355,6 +343,53 @@ function updateStatusCard(){
       +'<span id="gapToggleStatus" class="muted" style="margin-left:8px"></span>'; }
 }
 function toggleAdv(){ const b=document.getElementById('advBody'); const c=document.getElementById('advCaret'); const open=b.style.display!=='none'; b.style.display=open?'none':'block'; c.textContent=open?'▸':'▾'; }
+function makeCollapsible(scope){
+  document.querySelectorAll(scope+' .card > h2').forEach(function(h){
+    if(h.dataset.col) return; h.dataset.col='1';
+    h.style.cursor='pointer'; h.style.userSelect='none';
+    var c=document.createElement('span'); c.className='secCaret'; c.textContent=' ▾'; c.style.color='var(--mut)'; c.style.fontWeight='400'; h.appendChild(c);
+    h.addEventListener('click',function(){ var card=h.parentElement; var open=card.dataset.collapsed!=='1'; var n=h.nextElementSibling; while(n){ n.style.display=open?'none':''; n=n.nextElementSibling; } card.dataset.collapsed=open?'1':'0'; c.textContent=open?' ▸':' ▾'; });
+  });
+}
+async function loadDecisions(){
+  const wrap=document.getElementById('decList'); if(!wrap) return;
+  const filt=(document.getElementById('decFilter')||{}).value||'all';
+  wrap.textContent='Loading…';
+  try{
+    const r=await fetch(api('approvals')+'&status=all&cb='+Date.now(),{headers:{'x-app-password':PW}}); const j=await r.json();
+    let items=(j.approvals||[]).filter(x=>x.status==='approved'||x.status==='rejected');
+    if(filt!=='all') items=items.filter(x=>x.status===filt);
+    const cc=document.getElementById('decCount'); if(cc) cc.textContent=items.length+' shown'+(j.counts?('  ·  ✅ '+j.counts.approved+' approved · ❌ '+j.counts.rejected+' rejected'):'');
+    if(!items.length){ wrap.innerHTML='<span class="muted">No decided messages yet.</span>'; return; }
+    const esc=v=>String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let h='';
+    for(const it of items){
+      const approved=it.status==='approved';
+      const edited=approved && it.answer && it.proposed && String(it.answer).trim()!==String(it.proposed).trim();
+      h+='<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0;background:#0c141d">';
+      h+='<div style="font-size:11px;color:var(--mut)">'+(it.unit?esc(it.unit)+' · ':'')+(it.guest_name?esc(it.guest_name)+' · ':'')+(it.decidedAt?new Date(it.decidedAt).toLocaleString():'')+'</div>';
+      h+='<div style="margin:4px 0"><b style="color:#cfe0f0">Guest asked:</b> '+esc(it.question)+'</div>';
+      h+='<div style="margin:4px 0;color:#9fb0c0"><b>AI recommended:</b> '+esc(it.proposed||'(none)')+'</div>';
+      if(approved){
+        h+='<div style="margin:4px 0;color:#4ade80"><b>✅ APPROVED'+(edited?' (you edited it)':'')+'</b>'+(edited?(' — actually sent: '+esc(it.answer)):'')+'</div>';
+      } else {
+        h+='<div style="margin:4px 0;color:#f87171"><b>❌ REJECTED</b> — nothing sent to the guest</div>';
+        h+='<div style="margin:6px 0 2px;font-size:12px;color:var(--mut)">Why you rejected it (teaches the AI):</div>';
+        h+='<textarea id="dr_'+it.id+'" style="width:100%;min-height:48px;font-size:14px" placeholder="e.g. wrong info / made something up / wrong tone / too long…">'+esc(it.rejectReason||'')+'</textarea>';
+        h+='<div style="margin-top:6px"><button onclick="saveRejectReason(\''+it.id+'\')">Save reason</button> <span id="drs_'+it.id+'" class="muted"></span></div>';
+      }
+      h+='</div>';
+    }
+    wrap.innerHTML=h;
+  }catch(e){ wrap.textContent='Error: '+e.message; }
+}
+async function saveRejectReason(id){
+  const ta=document.getElementById('dr_'+id), st=document.getElementById('drs_'+id);
+  if(st) st.textContent='Saving…';
+  try{ const r=await fetch(api('set_reject_reason'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({id:id,reason:ta?ta.value:''})});
+    const j=await r.json().catch(()=>({})); if(st) st.textContent=(r.ok&&j.ok)?'Saved ✓ — the AI will learn from this':('Failed: '+(j.error||r.status));
+  }catch(e){ if(st) st.textContent='Failed: '+e.message; }
+}
 async function setModelGlide(){
   if(!confirm("Switch pricing model to glide-slope? (Recommended — the active model.)")) return;
   const s=document.getElementById('goliveStatus'); s.textContent='Setting…';
@@ -648,7 +683,7 @@ function switchView(v){
   document.getElementById('horizon').style.display=pricing?'':'none';
   if(pricing){ document.getElementById('syncWrap').style.display=''; setSyncUI(); }
   else { document.getElementById('syncWrap').style.display='none'; }
-  if(!pricing){ if(!MSG_BUILT){ renderMessaging(); MSG_BUILT=true; } loadApprovals(); loadInquiries(); loadNotifyStatus(); }
+  if(!pricing){ if(!MSG_BUILT){ renderMessaging(); MSG_BUILT=true; } loadApprovals(); loadInquiries(); loadNotifyStatus(); loadDecisions(); makeCollapsible('#msgMain'); }
 }
 function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function renderMessaging(){ KB=JSON.parse(JSON.stringify(STATE.kb||{format:"",items:[]})); document.getElementById('kbFormat').value=KB.format||""; drawKb(); setMsgUI();
