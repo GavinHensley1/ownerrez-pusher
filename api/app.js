@@ -44,6 +44,7 @@ const GAP_RESET_MIN=Number(process.env.GAP_RESET_MIN||2); // min-stay restored t
 const PACE_LEN_DEFAULT=365; // native horizon (days) the PACE_SEED ramp is authored over — the effective pacing-window length today
 const DEFAULT_KNOBS={
   GAIN:GS.GAIN, STEP:GS.STEP, BAND_NEAR:GS.BAND_NEAR,           // demand / glide controller (overall strength)
+  anticGain:Number(process.env.ANTIC_GAIN||0), // ANTICIPATORY far-out demand: lift/lower a night by its month target vs the yearly average, weighted by how far out it is (1-paceFrac). 0 = OFF (no change).
   paceLength:PACE_LEN_DEFAULT, // pacing-window horizon in DAYS — how far out the booking-pace ramp is defined; default = native PACE_SEED span (365d) so behavior is unchanged
   wResort:1.0, wUnit:0.0,   // demand split: blendedGap = wResort*resortGap + wUnit*unitGap (default = resort-only = today's behavior)
   gap1:GAP_DISC[1], gap2:GAP_DISC[2], gap3:GAP_DISC[3], gapWeekend:GAP_WEEKEND_FACTOR, // orphan-gap discounts
@@ -51,7 +52,7 @@ const DEFAULT_KNOBS={
   floor:FLOOR, ceil:CEIL, saneMin:Number(process.env.SANE_MIN_PUSH||110) // clamp + push sanity
 };
 const KNOB_RANGES={ // [min,max,isInt] for validation
-  GAIN:[0,2,false], STEP:[0.01,0.5,false], BAND_NEAR:[0.01,0.6,false],
+  GAIN:[0,2,false], anticGain:[0,1.5,false], STEP:[0.01,0.5,false], BAND_NEAR:[0.01,0.6,false],
   paceLength:[30,720,true],
   wResort:[0,2,false], wUnit:[0,2,false],
   gap1:[0,0.6,false], gap2:[0,0.6,false], gap3:[0,0.6,false], gapWeekend:[0,1,false],
@@ -216,6 +217,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
   const start=new Date(startDate+"T00:00:00Z"); const t0=new Date(today+"T00:00:00Z"); const out=[]; overrides=overrides||{}; gsState=gsState||{}; opts=opts||{};
   const mode=opts.mode||"steady"; const gsNext={...gsState}; const applyGap=opts.applyGap===true;
   const K=opts.knobs||DEFAULT_KNOBS; // editable filter-strength knobs (defaults == prior hardcoded behavior)
+  const _tv=[]; for(const _m in (targets||{})){ const _r=targets[_m]; if(_r){ if(isFinite(_r.wd))_tv.push(_r.wd); if(isFinite(_r.we))_tv.push(_r.we); } } const seasonRef=_tv.length?(_tv.reduce((a,c)=>a+c,0)/_tv.length):0.55; // yearly-average occupancy target = the anticipatory reference
   const sv=Object.values(signalMap).filter(v=>v>0); const peakThr=(sv.length?median(sv):K.floor)*MODEL.PEAK_MULT;
   const poolCache={};
   for(let i=0;i<days;i++){ const d=new Date(start); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const mo=d.getUTCMonth()+1; const we=isWe(d); const dt=we?1:0; const dtN=we?"weekend":"weekday";
@@ -228,6 +230,8 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     const tRow=(targets&&targets[mo])||SEED_TARGETS[mo]; let target=we?tRow.we:tRow.wd;
     if(target==null||!isFinite(target)){ const sd=SEED_TARGETS[mo]; target=we?sd.we:sd.wd; } // fallback: never silently use a flat/zero target
     const pf=GS.USE_PACE_REF?paceFrac(lead,dtN,null,K.paceLength):1; const ref=target*pf; // pace-ref = saved target x deterministic booking-pace ramp (1.0 at lead 0 -> reaches the FULL saved target at check-in); ramp horizon = K.paceLength days
+    // ANTICIPATORY far-out demand: far out (paceFrac~0 -> farW~1) the reactive controller has no booking signal, so price by the month's OWN demand profile (target vs yearly avg). Near term (farW~0) this fades out and the reactive controller takes over. anticGain=0 -> no effect.
+    const farW=Math.max(0,Math.min(1,1-pf)); const seasonGap=target-seasonRef; const anticMult=1+(K.anticGain||0)*farW*seasonGap;
     // DEMAND is split: RESORT (whole-resort occ vs pace-ref) at night level; UNIT (this unit's own occ) inside the loop.
     // blendedGap = wResort*resortGap + wUnit*unitGap ; default wResort=1,wUnit=0 -> blendedGap == resortGap == today's behavior.
     let resortGap=null,lm=0;
@@ -240,7 +244,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
       let unitOcc=null,unitGap=null,blendedGap=null,desiredBase=1;
       if(occ.hasData){ const ua=occ.agg.unitAgg&&occ.agg.unitAgg[u.orp]&&occ.agg.unitAgg[u.orp][mk]&&occ.agg.unitAgg[u.orp][mk][dt];
         unitOcc=ua&&ua.t?ua.b/ua.t:0; unitGap=Math.max(-1,Math.min(1,ref-unitOcc));
-        blendedGap=K.wResort*resortGap + K.wUnit*unitGap; desiredBase=1-K.GAIN*blendedGap; }
+        blendedGap=K.wResort*resortGap + K.wUnit*unitGap; desiredBase=(1-K.GAIN*blendedGap)*anticMult; }
       let amount,overridden=false,applied=null,desiredC=null,minNights=null,easedDemand=null;
       // per-unit orphan-gap lookup (forward-only detection from buildAgg): {runLen,hasWeekend}
       const gi=(occ.agg&&occ.agg.gaps&&occ.agg.gaps[u.orp])?occ.agg.gaps[u.orp][ds]:null;
@@ -269,7 +273,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
       out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,minNights,gapApplied,
         gapTier,gapHasWeekend:gapHasWe,gapDisc:Number(gapDisc.toFixed(3)),effDisc:Number(effDisc.toFixed(3)),discSource,
         poolOcc:poolOcc==null?null:Number(poolOcc.toFixed(3)),unitOcc:unitOcc==null?null:Number(unitOcc.toFixed(3)),ref:Number(ref.toFixed(3)),
-        savedTarget:Number(target.toFixed(3)),paceFrac:Number(pf.toFixed(3)),
+        savedTarget:Number(target.toFixed(3)),paceFrac:Number(pf.toFixed(3)),anticMult:Number(anticMult.toFixed(3)),farW:Number(farW.toFixed(3)),seasonRef:Number(seasonRef.toFixed(3)),
         resortGap:resortGap==null?null:Number(resortGap.toFixed(3)),unitGap:unitGap==null?null:Number(unitGap.toFixed(3)),gap:blendedGap==null?null:Number(blendedGap.toFixed(3)),
         desiredBaseMult:occ.hasData?Number(desiredBase.toFixed(3)):null, easedDemandMult:easedDemand==null?null:Number(easedDemand.toFixed(3)), prem,
         lead,lm:Number(lm.toFixed(3)),desiredMult:desiredC==null?null:Number(desiredC.toFixed(3)),appliedMult:applied==null?null:Number(applied.toFixed(3))}); } }
@@ -357,7 +361,7 @@ function computePace(poolAgg,targets,learned,today,months,paceLen){ const pace={
 // Heuristics from occupancy-vs-target pace trend; each suggestion is clearly labelled with its basis + confidence.
 function clampKnob(key,v){ const r=KNOB_RANGES[key]; if(!r) return v; v=Math.max(r[0],Math.min(r[1],Number(v))); return r[2]?Math.round(v):Number(v.toFixed(3)); }
 // RECOMMENDED SETTINGS: for EVERY knob, a learning-recommended value + one-line basis. Suggest-only; adopting is Gavin's explicit per-knob choice.
-const KNOB_ORDER=["GAIN","paceLength","STEP","BAND_NEAR","wResort","wUnit","gap1","gap2","gap3","gapWeekend","lmMax","lmWindow","lmSteep","floor","ceil","saneMin"];
+const KNOB_ORDER=["GAIN","anticGain","paceLength","STEP","BAND_NEAR","wResort","wUnit","gap1","gap2","gap3","gapWeekend","lmMax","lmWindow","lmSteep","floor","ceil","saneMin"];
 async function genRecommendations(today){
   const st=await getState(); const K=await getKnobs(); const learned=await getLearned();
   const od=await getOccData(st,today,365,true);
@@ -787,6 +791,10 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
   const kbFacts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a);
   const bankFacts=((approvedBank)||[]).filter(e=>e&&String(e.a||"").trim()).map(e=>"- "+(e.q?("(previously asked: "+String(e.q).slice(0,70)+") "):"")+String(e.a).trim());
   const facts=[...kbFacts, ...bankFacts].join("\n");
+  let _learn="";
+  try{ const _corr=(await getCorrections()).slice(-8).map(c=>'- For "'+c.q+'": do NOT reply like "'+c.bad+'" — the owner corrected it to "'+c.good+'".').join("\n");
+       const _rej=(await getRejections()).slice(-8).filter(r=>r&&r.q).map(r=>'- For "'+String(r.q).slice(0,120)+'": a past draft was rejected'+(r.reason?(' because: '+r.reason):'')+'.').join("\n");
+       _learn=(_corr?("LEARNED CORRECTIONS (the owner edited these past drafts — match the corrected version, avoid the rejected phrasing):\n"+_corr+"\n\n"):"")+(_rej?("PAST REJECTIONS (avoid repeating these mistakes):\n"+_rej+"\n\n"):""); }catch(e){ _learn=""; }
   const convo=(Array.isArray(history)?history:[]).filter(m=>m&&m.b).slice(-12).map(m=>(m.d==="out"?"Us (already sent): ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim()).join("\n");
   const first=String(guestName||"").trim().split(/\s+/)[0]||"";
   const hold=holdingMessage(guestName);
@@ -801,6 +809,7 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
     +"- none: do NOT attempt an answer. Use this exact warm holding message: \""+hold+"\"\n"
     +"You may be shown CONVERSATION SO FAR: earlier messages from this guest and replies WE already sent. Use it to understand what is being asked (pronouns, follow-ups) and do NOT repeat info we already gave. Still answer ONLY from KNOWN INFO.\n"
     +"Reply with ONLY a JSON object: {\"known\":\"full\"|\"partial\"|\"none\", \"answer\":\"...\"}. 'answer' is always the full message text.\n\n"
+    +_learn
     +"KNOWN INFO:\n"+(facts||"(none saved yet)");
   const userMsg=(first?("Guest first name: "+first+"\n"):"")+(convo?("CONVERSATION SO FAR (oldest first):\n"+convo+"\n\n"):"")+"Newest guest message (reply to THIS): "+String(question);
   try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:350,temperature:0.2,system:sys,messages:[{role:"user",content:userMsg}]})});
@@ -810,8 +819,36 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
     catch{ return {known:"none", answer:holdingMessage(guestName)}; }
   }catch(e){ return {known:"none", answer:holdingMessage(guestName), error:String(e.message||e)}; }
 }
+// Learning stores: corrections (owner edited a draft) and rejections (with optional reason).
+let _memCorrections=[];
+async function appendCorrection(question, badDraft, goodAnswer){
+  try{ const rec={q:String(question||"").slice(0,200), bad:String(badDraft||"").replace(/\s+/g," ").trim().slice(0,600), good:String(goodAnswer||"").replace(/\s+/g," ").trim().slice(0,600), ts:new Date().toISOString()};
+    if(!rec.bad||!rec.good||rec.bad===rec.good) return;
+    const arr=(redis?(await redis.get("parkside:kb_corrections")):_memCorrections)||[]; arr.push(rec); const t=arr.slice(-200);
+    if(redis) await redis.set("parkside:kb_corrections",t); else _memCorrections=t; }catch(e){}
+}
+async function getCorrections(){ try{ return (redis?(await redis.get("parkside:kb_corrections")):_memCorrections)||[]; }catch(e){ return []; } }
+async function getRejections(){ try{ return (redis?(await redis.get("parkside:kb_rejected")):_memRejected)||[]; }catch(e){ return []; } }
+// Reject page: asks WHY (optional) so the assistant can learn from the rejection.
+function rejectPageHtml(it, token){
+  const action='/api/app?action=approve&id='+encodeURIComponent(it.id)+'&decision=no&token='+encodeURIComponent(token||'');
+  const chip=t=>'<button type="button" onclick="document.getElementById(\'rr\').value=this.textContent" style="background:#1f2c3b;color:#cfe0f0;border:1px solid #2c3e52;border-radius:999px;padding:7px 12px;font-size:13px;margin:4px 6px 0 0;cursor:pointer">'+t+'</button>';
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reject &amp; tell me why</title></head>'
+    +'<body style="font-family:-apple-system,Arial,Helvetica,sans-serif;background:#0f1720;color:#e7eef6;margin:0;padding:16px"><div style="max-width:560px;margin:0 auto">'
+    +'<h1 style="font-size:20px;margin:6px 0 12px 0">Reject this reply</h1>'
+    +'<div style="background:#16212e;border:1px solid #26354a;border-radius:10px;padding:12px 14px;margin:12px 0">'
+    +'<div style="color:#9fb0c0;font-size:12px;margin-bottom:4px">Guest asked</div><div style="font-size:15px">'+escHtml(it.question)+'</div>'
+    +(it.proposed?'<div style="color:#9fb0c0;font-size:12px;margin:10px 0 4px">Draft being rejected</div><div style="font-size:14px;color:#f0b8b8;white-space:pre-wrap">'+escHtml(it.proposed)+'</div>':'')+'</div>'
+    +'<form method="POST" action="'+action+'">'
+    +'<label style="color:#9fb0c0;font-size:12px">Why are you rejecting it? <span style="color:#64748b">(optional — helps it learn)</span></label>'
+    +'<textarea id="rr" name="reason" placeholder="e.g. wrong info, wrong tone, made something up, too long…" style="width:100%;min-height:110px;font-size:16px;padding:12px;border-radius:10px;border:1px solid #26354a;background:#0c141d;color:#e7eef6;box-sizing:border-box;margin-top:6px"></textarea>'
+    +'<div style="margin-top:8px">'+chip("Wrong info")+chip("Made something up")+chip("Wrong tone")+chip("Too long")+chip("Off-topic")+chip("Not allowed")+'</div>'
+    +'<button type="submit" style="width:100%;margin-top:14px;background:#dc2626;color:#fff;border:none;border-radius:10px;padding:15px;font-size:17px;font-weight:700">Reject &amp; save reason</button>'
+    +'</form><p style="color:#64748b;font-size:12px;margin-top:10px">Nothing is sent to the guest. Your reason is used to improve future drafts. (Ref '+escHtml(it.id)+')</p>'
+    +'</div></body></html>';
+}
 // Decide a queued approval item: YES -> send to guest + learn into KB; NO -> reject.
-async function decideApproval(id, decision, overrideAnswer){
+async function decideApproval(id, decision, overrideAnswer, reason){
   if(!id) return {ok:false, error:"no id"};
   const list=await getApprovals(); const it=list.find(x=>x.id===id);
   if(!it) return {ok:false, error:"item not found: "+id};
@@ -833,15 +870,19 @@ async function decideApproval(id, decision, overrideAnswer){
       if(existing) existing.a=answer; else kb.items.push({topic:it.question.slice(0,60), a:answer, src:"approved"});
       await setState({kb});
     }
+    // LEARN FROM THE EDIT: owner changed the proposed reply -> store (bad draft, good sent) so future drafts avoid the mistake.
+    let learnedEdit=false;
+    try{ if(isOverride && it.proposed && answer && String(answer).trim()!==String(it.proposed).trim()){ await appendCorrection(it.question, it.proposed, answer); learnedEdit=true; } }catch(e){}
     it.status="approved"; it.answer=answer; it.decidedAt=new Date().toISOString();
     await setApprovals(list);
-    return {ok:true, decision:"approved", id, guestSend, sent:guestSend.sent===true, learned:shouldLearn, approvedBankSize:bankSize};
+    return {ok:true, decision:"approved", id, guestSend, sent:guestSend.sent===true, learned:shouldLearn, learnedEdit, approvedBankSize:bankSize};
   }
-  it.status="rejected"; it.decidedAt=new Date().toISOString(); await setApprovals(list);
+  const _reason=reason?String(reason).slice(0,500):"";
+  it.status="rejected"; it.decidedAt=new Date().toISOString(); it.rejectReason=_reason; await setApprovals(list);
   try{ const rk=(redis?(await redis.get("parkside:kb_rejected")):_memRejected)||[];
-    rk.push({id:it.id, q:it.question, draft:it.proposed||"", source:it.source||null, ts:new Date().toISOString()});
+    rk.push({id:it.id, q:it.question, draft:it.proposed||"", reason:_reason, source:it.source||null, ts:new Date().toISOString()});
     const trimmed=rk.slice(-500); if(redis) await redis.set("parkside:kb_rejected", trimmed); else _memRejected=trimmed; }catch(e){}
-  return {ok:true, decision:"rejected", id};
+  return {ok:true, decision:"rejected", id, reason:_reason};
 }
 
 module.exports=async(req,res)=>{
@@ -1510,6 +1551,20 @@ module.exports=async(req,res)=>{
         const secret=(await getNotifyConfig()).secret;
         res.setHeader("Content-Type","text/html; charset=utf-8");
         if(!secret || String(q.token||"")!==secret){ res.statusCode=403; return res.end(htmlPage("Link error","This approval link is invalid or expired.")); }
+        // REJECT path: capture a "why" reason first (so it can learn), then reject on submit. Approve (yes) falls through unchanged.
+        if(String(q.decision||"").toLowerCase()==="no"){
+          let _lb=req.body; if(typeof _lb==="string"){ try{_lb=JSON.parse(_lb);}catch{ try{_lb=Object.fromEntries(new URLSearchParams(_lb));}catch{_lb={};} } } _lb=_lb||{};
+          const _id=String(q.id||""); const _confirmed=(req.method==="POST")||q.confirm==="1";
+          if(!_confirmed){ const _list=await getApprovals(); const _it=_list.find(x=>x.id===_id);
+            if(!_it){ res.statusCode=200; return res.end(htmlPage("Not found","This request was not found (it may already be handled).")); }
+            if(_it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+_it.status,"This request was already "+_it.status+", most likely by the other recipient. The guest was not messaged twice.")); }
+            res.statusCode=200; return res.end(rejectPageHtml(_it, secret)); }
+          const _reason=String((_lb&&_lb.reason)||q.reason||"").trim();
+          const _o=await decideApproval(_id,"no",null,_reason);
+          if(_o.ok&&_o.decision==="rejected"){ res.statusCode=200; return res.end(htmlPage("Rejected","Nothing was sent to the guest."+(_reason?" Thanks for the reason — future drafts will learn from it.":""))); }
+          if(_o.ok===false && /^already /i.test(String(_o.error||""))){ res.statusCode=200; return res.end(htmlPage("Already handled","This request was already handled. Nothing was sent to the guest twice.")); }
+          res.statusCode=200; return res.end(htmlPage("Couldn't complete",(_o.error||"Unknown error")+"."));
+        }
         const out=await decideApproval(String(q.id||""), String(q.decision||"").toLowerCase(), null);
         let title, msg;
         if(out.ok && out.decision==="approved"){ title="Approved — reply sent"; msg="The guest reply was sent and saved to the knowledge base."; }
@@ -1520,7 +1575,7 @@ module.exports=async(req,res)=>{
       }
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
-      const out=await decideApproval(String(b.id||""), String(b.decision||"").toLowerCase(), b.answer!=null?String(b.answer):null);
+      const out=await decideApproval(String(b.id||""), String(b.decision||"").toLowerCase(), b.answer!=null?String(b.answer):null, b.reason!=null?String(b.reason):null);
       return res.status(out.ok?200:400).json(out);
     }
     // PUBLIC provider webhook: Victor replies YES/NO via text. Provider-agnostic body parse.
