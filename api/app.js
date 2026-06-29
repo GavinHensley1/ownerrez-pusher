@@ -281,12 +281,17 @@ function validate(es){ const ok=[]; for(const e of es){ const pid=Number(e.prope
     const mn=Number(e.minNights); if(Number.isInteger(mn)&&mn>=1&&mn<=30) o.min_nights=mn; // only sent on gap nights / gap-resets; omitted elsewhere so OwnerRez keeps its own min-stay
     ok.push(o); } } return ok; }
 async function pushOwnerRez(es,knobs){ const user=process.env.OWNERREZ_API_USER,token=process.env.OWNERREZ_API_TOKEN; if(!user||!token) throw new Error("missing OWNERREZ creds");
-  const K=knobs||DEFAULT_KNOBS; const SANE_MIN=K.saneMin, HARD_FLOOR=K.floor; const _flagged=[];
-  for(const _e of es){ const _amt=Math.round(Number(_e.amount)); const _base=Number(_e.base)||_amt;
+  const K=knobs||DEFAULT_KNOBS; const SANE_MIN=K.saneMin, HARD_FLOOR=K.floor; const GAP1_CAP=Number(process.env.GAP1_MAX_PUSH||125)||125; const _flagged=[]; const _capped=[];
+  for(const _e of es){ let _amt=Math.round(Number(_e.amount)); const _base=Number(_e.base)||_amt;
     // gap nights are EXEMPT from the sane-min (deliberate orphan discount) but keep the hard FLOOR
     const _sane = _e.gapApplied ? HARD_FLOOR : Math.max(SANE_MIN,Math.round(_base*0.60));
-    if(_amt<_sane){ _flagged.push({property_id:_e.property_id,date:_e.date,was:_amt,base:Math.round(_base),raisedTo:_sane}); _e.amount=_sane; } }
+    if(_amt<_sane){ _flagged.push({property_id:_e.property_id,date:_e.date,was:_amt,base:Math.round(_base),raisedTo:_sane}); _e.amount=_sane; _amt=_sane; }
+    // HARD CAP: a ONE-NIGHT orphan gap can never push above $GAP1_CAP (default 125). gapTier=1 (glide) / gapLen=1 (legacy).
+    // Manual overrides are left alone (deliberate human price).
+    const _is1nightOrphan = !_e.overridden && (Number(_e.gapTier)===1 || Number(_e.gapLen)===1);
+    if(_is1nightOrphan && _amt>GAP1_CAP){ _capped.push({property_id:_e.property_id,date:_e.date,was:_amt,cappedTo:GAP1_CAP}); _e.amount=GAP1_CAP; } }
   if(_flagged.length){ console.warn("[price-sanity] raised "+_flagged.length+" sub-min push prices to >=$"+SANE_MIN,JSON.stringify(_flagged.slice(0,40))); if(redis){ try{ await redis.set("parkside:sanity_flags",{ts:Date.now(),count:_flagged.length,sane_min:SANE_MIN,items:_flagged.slice(0,200)}); }catch(_x){} } }
+  if(_capped.length){ console.warn("[price-sanity] capped "+_capped.length+" one-night-orphan prices to <=$"+GAP1_CAP,JSON.stringify(_capped.slice(0,40))); if(redis){ try{ await redis.set("parkside:sanity_gap1cap",{ts:Date.now(),count:_capped.length,cap:GAP1_CAP,items:_capped.slice(0,200)}); }catch(_x){} } }
   const ok=validate(es); if(!ok.length) throw new Error("no valid entries"); const auth="Basic "+Buffer.from(`${user}:${token}`).toString("base64");
   const r=await fetch(ENDPOINT,{method:"PATCH",headers:{Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},body:JSON.stringify(ok)});
   const t=await r.text(); return {status:r.status,sent:ok.length,ownerrezOk:r.ok,body:t.slice(0,200)}; }
