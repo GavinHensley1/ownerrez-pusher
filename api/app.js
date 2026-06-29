@@ -1106,7 +1106,7 @@ module.exports=async(req,res)=>{
     }
     if(action==="get_knobs"){
       const k=await getKnobs();
-      const pick=x=>({GAIN:x.GAIN,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,paceLength:x.paceLength,wResort:x.wResort,wUnit:x.wUnit,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,lmSteep:x.lmSteep,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
+      const pick=x=>({GAIN:x.GAIN,anticGain:x.anticGain,STEP:x.STEP,BAND_NEAR:x.BAND_NEAR,paceLength:x.paceLength,wResort:x.wResort,wUnit:x.wUnit,gap1:x.gap1,gap2:x.gap2,gap3:x.gap3,gapWeekend:x.gapWeekend,lmMax:x.lmMax,lmWindow:x.lmWindow,lmSteep:x.lmSteep,floor:x.floor,ceil:x.ceil,saneMin:x.saneMin});
       return res.status(200).json({knobs:pick(k), defaults:pick(DEFAULT_KNOBS), ranges:KNOB_RANGES, unitPremiums:UNIT_PREM});
     }
     if(action==="set_knobs"){
