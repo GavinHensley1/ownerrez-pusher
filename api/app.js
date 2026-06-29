@@ -534,7 +534,9 @@ async function renderThread(item, approvals){
 async function sendVictorApprovalEmail(req, item, ctx){
   ctx=ctx||{};
   const cfg=await getNotifyConfig();
-  const origin=appOrigin(req); const secret=cfg.secret;
+  // Approval/escalation links MUST use the stable public origin (token-gated, meant for non-Vercel recipients).
+  // appOrigin(req) can be a protection-gated deployment host when the sweep runs from cron -> Vercel login wall.
+  const origin=(process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app")||appOrigin(req); const secret=cfg.secret;
   const base=origin+"/api/app?action=approve&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const yes=base+"&decision=yes", no=base+"&decision=no";
   const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
