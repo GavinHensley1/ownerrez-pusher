@@ -144,11 +144,11 @@
 
   <div class="card" id="tuneCard">
     <h2>🎚 Filter tuning <span class="muted" style="font-weight:400;text-transform:none">— manual strength knobs now; the learning system will drive these automatically later</span></h2>
-    <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then Save. <b>Save knobs</b> updates the calendar &amp; breakdown only; <b>Save &amp; push prices</b> also sends the recalculated prices to OwnerRez right away.</div>
+    <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then click <b>Update prices</b> to recalculate them with the new settings and preview the result here in the calendar &amp; breakdown. <b>Nothing is sent to OwnerRez</b> — review the updated prices, then push separately when you&rsquo;re ready.</div>
     <div id="tuneGrid"></div>
     <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center">
       <button onclick="saveKnobs()">Save knobs</button>
-      <button onclick="pushKnobPrices()">⟳ Save &amp; push prices to OwnerRez</button>
+      <button onclick="updateKnobPrices()">⟳ Update prices</button>
       <button class="ghost" onclick="resetKnobs()">Reset to defaults</button>
       <span id="tuneStatus" class="muted" style="align-self:center"></span>
     </div>
@@ -565,18 +565,13 @@ async function saveKnobs(){
   await loadKnobs(); await loadRecommendations(); await applyPreview(); await refreshBreakdownIfOpen();
   document.getElementById('tuneStatus').textContent='Saved ✓ — calendar + breakdown updated';
 }
-async function pushKnobPrices(){
+async function updateKnobPrices(){
+  // Recalculate the engine's prices with the current knob settings and refresh the on-screen
+  // calendar + breakdown. Does NOT push to OwnerRez — review here, then push separately.
   const st=document.getElementById('tuneStatus');
-  if(!confirm('Save these knob settings and push the recalculated prices to OwnerRez now?')) return;
-  await saveKnobs(); // persist knobs + refresh calendar/breakdown
-  st.textContent='Pushing updated prices to OwnerRez…';
-  try{
-    const r=await fetch(api('run'),{headers:{'x-app-password':PW}}); const j=await r.json().catch(()=>({}));
-    if(j.mode==='LIVE_SYNC'){ st.textContent='Pushed ✓ — '+j.sent+' prices sent to OwnerRez (HTTP '+j.status+')'+(j.gapNights?(', '+j.gapNights+' gap nights'):'')+(j.overrides?(', '+j.overrides+' pinned'):''); }
-    else if(j.mode==='COMPUTED_NO_SYNC'){ st.textContent='⚠ Recalculated but NOT pushed — auto-sync is OFF. Turn on Go live first, then push.'; }
-    else if(!r.ok){ st.textContent='Push failed (auth?): '+(j.error||('HTTP '+r.status)); }
-    else { st.textContent='Push result: '+(j.note||JSON.stringify(j).slice(0,140)); }
-  }catch(e){ st.textContent='Push failed: '+e.message; }
+  st.textContent='Saving knobs & recalculating prices…';
+  await saveKnobs(); // set_knobs + applyPreview + refreshBreakdownIfOpen (no OwnerRez push)
+  st.textContent='Prices updated with the new settings ✓ — review them in the calendar & breakdown above, then push to OwnerRez when you\'re ready.';
 }
 async function resetKnobs(){
   if(!confirm('Reset all filter knobs to their defaults?')) return;
