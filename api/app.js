@@ -1693,6 +1693,18 @@ module.exports=async(req,res)=>{
       return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth, primaryChannel:cfg.primaryChannel, smsUrlSet:!!cfg.smsUrl, smsToSet:!!cfg.smsTo }});
     }
     // Send ONE sample approval email to the configured Victor address (password).
+    if(action==="send_test_sms"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      const cfg=await getNotifyConfig();
+      if(!cfg.smsUrl) return res.status(200).json({ ok:false, reason:"No SMS gateway URL set \u2014 fill the SMS fields and Save first." });
+      if(!cfg.smsTo)  return res.status(200).json({ ok:false, reason:"No phone number set \u2014 fill \u2018Your phone number\u2019 and Save first." });
+      const sample="Parkside test \u2705 your SMS approval alerts are working. (Sent from your control panel \u2014 no guest involved.)";
+      const r=await sendSmsGateway(cfg, sample);
+      const ok=r.sent===true;
+      return res.status(200).json({ ok, sent:ok, to:cfg.smsTo, status:(r.status||null),
+        error: ok?null:(r.error||r.body||r.reason||("HTTP "+(r.status||"?"))),
+        note: ok?("Test text sent to "+cfg.smsTo+" \u2014 check your phone."):"Gateway did not accept it \u2014 check the username/password and URL." });
+    }
     if(action==="send_test_email"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       const sample={ id:"test-"+Date.now().toString(36), question:"TEST — Is there a fire pit guests can use?", proposed:"Yes! There's a shared fire pit at the resort, open in the evenings. 🔥", status:"pending", ts:new Date().toISOString() };

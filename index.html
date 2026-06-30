@@ -278,6 +278,11 @@
           <label class="muted" style="font-size:12px;margin-top:10px;display:block">Body template <span style="color:#9fb0c0">(pre-set for the SMS Gateway app; advanced &mdash; leave as-is unless using a different app)</span><br><input id="nSmsBody" style="width:100%" placeholder='{&quot;textMessage&quot;:{&quot;text&quot;:&quot;{text}&quot;},&quot;phoneNumbers&quot;:[&quot;{to}&quot;]}'></label>
           <label class="muted" style="font-size:12px;margin-top:10px;display:block">Extra headers <span style="color:#9fb0c0">(optional — &quot;Key: Value&quot; per line, or JSON)</span><br><textarea id="nSmsHeaders" style="width:100%;min-height:44px" placeholder="Authorization: Bearer xxxxx"></textarea></label>
           <div class="muted" style="font-size:11px;margin-top:6px">The backup (#2) stays email. The text includes tap-to-approve / edit / reject links.</div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button onclick="saveNotify()">Save SMS settings</button>
+            <button class="ghost" onclick="sendTestSms()">Send test text</button>
+            <span id="nSmsMsg" class="muted" style="align-self:center;font-size:12px"></span>
+          </div>
         </div>
       </div>
       <label class="muted" style="font-size:12px">From address<br><input id="nFrom" style="width:100%" placeholder="Parkside Tepees &lt;notifications@send.parksidetepees.com&gt;"></label>
@@ -889,5 +894,15 @@ async function sendTestEmail(){
     if(j.ok){ msg.textContent="Test sent \u2713 to "+(j.to||"Victor")+" — check the inbox."; }
     else msg.textContent="Test failed: "+(j.error||"unknown")+(j.to?(" (to "+j.to+")"):"");
   }catch(e){ msg.textContent="Test failed: "+e.message; }
+}
+async function sendTestSms(){
+  const msg=document.getElementById('nSmsMsg'); if(msg){ msg.style.color=''; msg.textContent='Saving & sending\u2026'; }
+  try{ await saveNotify(); }catch(e){}
+  try{
+    const r=await fetch(api('send_test_sms'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:'{}'});
+    const j=await r.json().catch(()=>({}));
+    if(msg){ if(j.ok){ msg.style.color='#2ecc71'; msg.textContent='Sent \u2713 to '+(j.to||'your phone')+' \u2014 check your texts.'; }
+      else { msg.style.color='#f4b942'; msg.textContent='Failed: '+(j.error||j.reason||'unknown'); } }
+  }catch(e){ if(msg){ msg.style.color='#f4b942'; msg.textContent='Failed: '+e.message; } }
 }
 </script></body></html>
