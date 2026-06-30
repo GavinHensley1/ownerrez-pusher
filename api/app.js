@@ -569,68 +569,20 @@ async function renderThread(item, approvals){
 async function sendVictorApprovalEmail(req, item, ctx){
   ctx=ctx||{};
   const cfg=await getNotifyConfig();
-  // Approval/escalation links MUST use the stable public origin (token-gated, meant for non-Vercel recipients).
-  // appOrigin(req) can be a protection-gated deployment host when the sweep runs from cron -> Vercel login wall.
-  const origin=(process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app")||appOrigin(req); const secret=cfg.secret;
-  const base=origin+"/api/app?action=approve&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
-  const yes=base+"&decision=yes", no=base+"&decision=no";
-  const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const unit=ctx.unit||""; const guestName=ctx.guestName||"";
   const proposed=item.proposed||"";
-  const toAddr=(ctx.toOverride||cfg.to); const isEsc=ctx.escalation===true;
-  // PRIMARY notification as SMS when the first recipient is set to text. The 2nd-notice escalation always stays email.
-  if(!isEsc && cfg.primaryChannel==="sms" && cfg.smsUrl && cfg.smsTo){
-    const _esc=item.escalate===true;
+  // SMS-only: text the owner the labeled approval. (Email channel removed.)
+  if(cfg.smsUrl && cfg.smsTo){
     const _lbl=item.smsLabel||"Q?"; const _ctx=[unit,guestName].filter(Boolean).join(" - "); const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-8); const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"You: ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim().slice(0,150)).join("\n\n"):("Guest: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,160)); const smsText=_lbl+(_ctx?(" - "+_ctx):"")+"\n"+_convo+"\n\nDraft: "+String(proposed||"(none)").replace(/\s+/g," ").trim().slice(0,300)+"\n\nReply: "+_lbl+" yes  |  "+_lbl+" no";
     const result=await sendSmsGateway(cfg, smsText);
-    return {...result, channel:"sms", to:cfg.smsTo||null, escalation:false, approveUrl:yes, editUrl, rejectUrl:no, subject:"(SMS)"};
+    return {...result, channel:"sms", to:cfg.smsTo||null, subject:"(SMS)"};
   }
-  const _approvals=await getApprovals();
-  const threadHtml=await renderThread(item,_approvals);
-  const esc=item.escalate===true;
-  const subject=(isEsc?"⏰ No response — 2nd notice: ":"")+(esc?"\u26a0 Unknown — approval needed":"Parkside approval needed")+(unit?(" — "+unit):"");
-  const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#ffffff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
-  const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
-    +'<h2 style="margin:0 0 4px 0">Guest message — approval needed</h2>'
-    +(isEsc?'<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 14px;margin:0 0 14px 0;color:#991b1b;font-size:14px"><b>⏰ Escalated to you — the primary contact hasn’t responded.</b><br>Same guest request and same suggested reply as the first email. Approve, edit, or reject below.</div>':'')
-    +(esc
-      ? '<div style="background:#fff7ed;border:1px solid #fdba74;border-radius:8px;padding:12px 14px;margin:0 0 14px 0;color:#9a3412;font-size:14px"><b>\u26a0 Not in your knowledge base — I don\u2019t know this one.</b><br>Tap <b>\u270f\ufe0f Write / edit the reply</b> to give the real answer (it gets saved for next time), or approve the holding message below to send it as-is.</div>'
-      : '<p style="color:#475569;margin:0 0 14px 0">This was answered from your knowledge base. Review and decide:</p>')
-    +'<table style="width:100%;border-collapse:collapse;font-size:14px">'
-    +(unit?'<tr><td style="padding:6px 0;color:#64748b;width:90px">Unit</td><td style="padding:6px 0;font-weight:600">'+escHtml(unit)+'</td></tr>':'')
-    +(guestName?'<tr><td style="padding:6px 0;color:#64748b">Guest</td><td style="padding:6px 0;font-weight:600">'+escHtml(guestName)+'</td></tr>':'')
-    +'</table>'
-    +'<div style="margin:16px 0 6px 0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.04em">Conversation</div>'
-    +'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:4px 12px">'+threadHtml+'</div>'
-    +'<div style="margin:16px 0 6px 0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.04em">'+(esc?'Holding reply (I don&rsquo;t know this)':'Suggested reply')+'</div>'
-    +'<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:14px;white-space:pre-wrap;color:#0f172a">'+(proposed?escHtml(proposed):'<i style="color:#94a3b8">No suggested reply found &mdash; open Victor&rsquo;s area then Approval queue to type one.</i>')+'</div>'
-    +'<div style="margin:18px 0">'+btn(yes,"#16a34a","\u2705 Approve & Send")+btn(editUrl,"#2563eb","\u270f\ufe0f Write / edit the reply")+btn(no,"#dc2626","\u274c Reject")+'</div>'
-    +'<p style="color:#94a3b8;font-size:12px;margin-top:8px">'+(esc?'Approving the holding message sends it as-is and does NOT save it as an answer. Use \u270f\ufe0f to provide the real answer (that gets saved). ':'Approve sends this reply to the guest and saves it so it auto-answers next time. ')+'Reject sends nothing. (Ref '+escHtml(item.id)+')</p>'
-    +(secret?'':'<p style="color:#dc2626;font-size:12px">\u26a0 APPROVE_LINK_SECRET is not set on the server, so these links will not work yet.</p>')
-    +'</div>';
-  const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:toAddr, subject, html});
-  return {...result, to:toAddr||null, from:cfg.from||null, subject, escalation:isEsc, approveUrl:yes, editUrl, rejectUrl:no};
+  return {sent:false, staged:true, reason:"SMS not configured", channel:"none"};
 }
 // Primary->secondary escalation: any approval still pending after escalateMins gets the
 // SAME approval email (same suggested reply) re-sent ONCE to the backup contact.
 async function escalateStaleApprovals(req){
-  try{
-    const cfg=await getNotifyConfig();
-    if(!cfg.to2) return {escalated:0, reason:"no secondary email set"};
-    if(cfg.to2===cfg.to) return {escalated:0, reason:"secondary same as primary"};
-    const cutoff=Date.now()-cfg.escalateMins*60*1000;
-    const list=await getApprovals(); let changed=false; const done=[];
-    for(const it of list){
-      if(!it || it.status!=="pending" || it.escalatedTo2) continue;
-      const t=Date.parse(it.primaryNotifiedAt||it.ts||"");
-      if(!isFinite(t) || t>cutoff) continue;
-      const r=await sendVictorApprovalEmail(req, it, {unit:it.unit||"", guestName:it.guest_name||"", toOverride:cfg.to2, escalation:true});
-      it.escalatedTo2=true; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=!!(r&&r.sent===true);
-      changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:r&&r.to});
-    }
-    if(changed) await setApprovals(list);
-    return {escalated:done.length, mins:cfg.escalateMins, items:done};
-  }catch(e){ return {error:String(e.message||e)}; }
+  return {escalated:0, reason:"email escalation removed (SMS-only)"};
 }
 function htmlPage(title, msg){
   return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+escHtml(title)+'</title></head>'
@@ -1720,7 +1672,7 @@ module.exports=async(req,res)=>{
       const lbl=target.smsLabel||"Q?";
       if((lm && rest==="")||isYes(rest)){
         const out=await decideApproval(target.id, "yes", null);
-        await ackBack(out && out.sent ? (lbl+" sent to the guest.") : (lbl+" NOT sent: "+((out&&out.error)||"error")));
+        await ackBack(out && out.sent ? (lbl+" sent to the guest. ✅") : (lbl+" NOT sent: "+((out&&out.error)||"error")));
         return res.status(200).json({decided:"yes", label:lbl, out});
       }
       if(isNo(rest)){
@@ -1802,16 +1754,6 @@ module.exports=async(req,res)=>{
         error: ok?null:(r.error||r.body||r.reason||("HTTP "+(r.status||"?"))),
         note: ok?("Test text sent to "+cfg.smsTo+" \u2014 check your phone."):"Gateway did not accept it \u2014 check the username/password and URL." });
     }
-    if(action==="send_test_email"){
-      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
-      const sample={ id:"test-"+Date.now().toString(36), question:"TEST — Is there a fire pit guests can use?", proposed:"Yes! There's a shared fire pit at the resort, open in the evenings. 🔥", status:"pending", ts:new Date().toISOString() };
-      const r=await sendVictorApprovalEmail(req, sample, {unit:"Bear Claw (test)", guestName:"Test Guest"});
-      const ok = r.sent===true;
-      return res.status(ok?200:200).json({ ok, sent:ok, to:r.to, from:r.from,
-        error: ok?null:(r.detail||r.reason||r.error||("HTTP "+(r.status||"?"))),
-        note: ok?"Sample approval email sent — check Victor's inbox.":"Not sent — fix the config and try again." });
-    }
-
     // Config visibility for the email/notify channel. Booleans only (no secrets);
     // if a Resend key is present, also lists the account's verified sender domains.
     if(action==="notify_status"){
