@@ -465,6 +465,7 @@ async function sendSmsGateway(cfg, text){
   const tmpl=(cfg&&cfg.smsBody)||'{"phone":"{to}","message":"{text}"}';
   let headers={"Content-Type": (String(tmpl).trim().charAt(0)==="{"?"application/json":"application/x-www-form-urlencoded")};
   try{ const hs=String((cfg&&cfg.smsHeaders)||"").trim(); if(hs){ if(hs.charAt(0)==="{"){ Object.assign(headers, JSON.parse(hs)); } else { hs.split(/\n+/).forEach(function(l){ const i=l.indexOf(":"); if(i>0) headers[l.slice(0,i).trim()]=l.slice(i+1).trim(); }); } } }catch(e){}
+  if((cfg&&cfg.smsUser) && !Object.keys(headers).some(function(k){return k.toLowerCase()==="authorization";})){ headers["Authorization"]="Basic "+Buffer.from(String(cfg.smsUser)+":"+String(cfg.smsPass||"")).toString("base64"); }
   try{ const r=await fetch(url,{method:"POST",headers:headers,body:fillSmsBody(tmpl,to,text)});
     const t=await r.text(); return {sent:r.ok, status:r.status, provider:"gateway", body:String(t).slice(0,160)}; }
   catch(e){ return {sent:false, error:String(e.message||e)}; }
@@ -491,10 +492,12 @@ async function getNotifyConfig(){ const c=await getNotifyRaw(); return {
   webhookUser: (c.webhook_user||process.env.OR_WEBHOOK_USER||"").trim(),
   webhookPass: (c.webhook_pass||process.env.OR_WEBHOOK_PASS||"").trim(),
   primaryChannel: ((c.primaryChannel||"email")==="sms")?"sms":"email",
-  smsUrl: (c.smsGatewayUrl||process.env.SMS_GATEWAY_URL||"").trim(),
+  smsUrl: (c.smsGatewayUrl||process.env.SMS_GATEWAY_URL||"https://api.sms-gate.app/3rdparty/v1/messages").trim(),
   smsTo:  (c.smsTo||process.env.SMS_VICTOR_NUMBER||process.env.VICTOR_PHONE||"").trim(),
-  smsBody: (c.smsBody||process.env.SMS_BODY_TEMPLATE||'{"phone":"{to}","message":"{text}"}'),
+  smsBody: (c.smsBody||process.env.SMS_BODY_TEMPLATE||'{"textMessage":{"text":"{text}"},"phoneNumbers":["{to}"]}'),
   smsHeaders: (c.smsHeaders||process.env.SMS_HEADERS||""),
+  smsUser: (c.smsUser||process.env.SMS_USER||"").trim(),
+  smsPass: (c.smsPass||process.env.SMS_PASS||""),
 }; }
 let _memWh=null;
 async function writeWhStatus(o){ const x={...o}; if(redis) await redis.set("parkside:wh_status",x); else _memWh=x; return x; }
@@ -1683,6 +1686,8 @@ module.exports=async(req,res)=>{
       if(typeof b.smsTo==="string"){ const t=b.smsTo.trim(); if(t!=="") next.smsTo=t; else delete next.smsTo; }
       if(typeof b.smsBody==="string"){ if(b.smsBody.trim()!=="") next.smsBody=b.smsBody; else delete next.smsBody; }
       if(typeof b.smsHeaders==="string"){ if(b.smsHeaders.trim()!=="") next.smsHeaders=b.smsHeaders; else delete next.smsHeaders; }
+      if(typeof b.smsUser==="string"){ const t=b.smsUser.trim(); if(t!=="") next.smsUser=t; else delete next.smsUser; }
+      if(typeof b.smsPass==="string" && b.smsPass!=="") next.smsPass=b.smsPass; else if(b.smsPass==="") delete next.smsPass;
       await setNotifyRaw(next);
       const cfg=await getNotifyConfig();
       return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth, primaryChannel:cfg.primaryChannel, smsUrlSet:!!cfg.smsUrl, smsToSet:!!cfg.smsTo }});
@@ -1735,7 +1740,7 @@ module.exports=async(req,res)=>{
         messaging_enabled:!!stN.messaging_enabled,
         counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
-        from:cfg.from||null, to:cfg.to||null, to2:cfg.to2||null, primaryChannel:cfg.primaryChannel, smsUrl:cfg.smsUrl||null, smsTo:cfg.smsTo||null, smsBody:cfg.smsBody||null, smsHeaders:cfg.smsHeaders||null,
+        from:cfg.from||null, to:cfg.to||null, to2:cfg.to2||null, primaryChannel:cfg.primaryChannel, smsUrl:cfg.smsUrl||null, smsTo:cfg.smsTo||null, smsBody:cfg.smsBody||null, smsHeaders:cfg.smsHeaders||null, smsUser:cfg.smsUser||null, smsPassSet:!!cfg.smsPass,
         source:{ apiKey: raw.resendApiKey?"ui":(process.env.RESEND_API_KEY?"env":null), from: raw.from?"ui":(process.env.RESEND_FROM?"env":null), to: raw.victorEmail?"ui":(process.env.VICTOR_EMAIL?"env":null), secret: raw.approveSecret?"ui":(process.env.APPROVE_LINK_SECRET?"env":null) } };
       if(cfg.apiKey){
         try{ const r=await fetch("https://api.resend.com/domains",{headers:{Authorization:"Bearer "+cfg.apiKey}});
