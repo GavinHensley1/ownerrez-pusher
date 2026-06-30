@@ -581,7 +581,7 @@ async function sendVictorApprovalEmail(req, item, ctx){
   // PRIMARY notification as SMS when the first recipient is set to text. The 2nd-notice escalation always stays email.
   if(!isEsc && cfg.primaryChannel==="sms" && cfg.smsUrl && cfg.smsTo){
     const _esc=item.escalate===true;
-    const _lbl=item.smsLabel||"Q?"; const _ctx=[unit,guestName].filter(Boolean).join(" — "); const _code=item.smsCode||""; const _yesL=origin+"/api/app?c="+_code+"&d=y"; const _noL=origin+"/api/app?c="+_code+"&d=n"; const smsText=(_esc?"⚠ Unknown — ":"")+_lbl+(_ctx?(" — "+_ctx):"")+"\nQ: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,300)+"\n\nSuggested reply:\n"+String(proposed||"(none — text a reply)").slice(0,500)+"\n\nApprove: "+_yesL+"\nReject: "+_noL+"\nOr text \""+_lbl+" <your correction>\" to revise.";
+    const _lbl=item.smsLabel||"Q?"; const _ctx=[unit,guestName].filter(Boolean).join(" - "); const smsText=(_esc?"Unknown - ":"")+_lbl+(_ctx?(" - "+_ctx):"")+"\nQ: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,160)+"\nDraft: "+String(proposed||"(none)").replace(/\s+/g," ").trim().slice(0,260)+"\nReply: "+_lbl+" yes  |  "+_lbl+" no  |  "+_lbl+" <your fix>";
     const result=await sendSmsGateway(cfg, smsText);
     return {...result, channel:"sms", to:cfg.smsTo||null, escalation:false, approveUrl:yes, editUrl, rejectUrl:no, subject:"(SMS)"};
   }
