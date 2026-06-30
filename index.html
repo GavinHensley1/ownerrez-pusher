@@ -266,6 +266,18 @@
       <label class="muted" style="font-size:12px">Victor&rsquo;s email (To)<br><input id="nTo" type="email" style="width:100%" placeholder="victor@example.com"></label>
       <label class="muted" style="font-size:12px">Backup email (To #2) <span style="color:#9fb0c0">(escalation if #1 doesn&rsquo;t respond in time)</span><br><input id="nTo2" type="email" style="width:100%" placeholder="backup@example.com"></label>
       <label class="muted" style="font-size:12px">Escalate to backup after (minutes)<br><input id="nEscMins" type="number" min="5" step="5" style="width:140px" placeholder="60"></label>
+      <div style="border-top:1px solid var(--line);padding-top:12px">
+        <div style="font-weight:600;margin-bottom:6px">Primary alert channel</div>
+        <label class="muted" style="font-size:12px">Send the first/primary alert as<br>
+          <select id="nPrimaryChannel" onchange="updateSmsVis()" style="width:100%"><option value="email">Email</option><option value="sms">Text (SMS) via your phone gateway</option></select></label>
+        <div id="smsFields" style="display:none;gap:10px;margin-top:10px">
+          <label class="muted" style="font-size:12px">SMS gateway URL <span style="color:#9fb0c0">(your Android SMS app&rsquo;s send endpoint)</span><br><input id="nSmsUrl" style="width:100%" placeholder="http://192.168.1.50:8080/send"></label>
+          <label class="muted" style="font-size:12px;margin-top:10px;display:block">Your phone number (recipient)<br><input id="nSmsTo" style="width:100%" placeholder="+18655551234"></label>
+          <label class="muted" style="font-size:12px;margin-top:10px;display:block">Body template <span style="color:#9fb0c0">(use {to} and {text}; match your app&rsquo;s format)</span><br><input id="nSmsBody" style="width:100%" placeholder='{&quot;phone&quot;:&quot;{to}&quot;,&quot;message&quot;:&quot;{text}&quot;}'></label>
+          <label class="muted" style="font-size:12px;margin-top:10px;display:block">Extra headers <span style="color:#9fb0c0">(optional — &quot;Key: Value&quot; per line, or JSON)</span><br><textarea id="nSmsHeaders" style="width:100%;min-height:44px" placeholder="Authorization: Bearer xxxxx"></textarea></label>
+          <div class="muted" style="font-size:11px;margin-top:6px">The backup (#2) stays email. The text includes tap-to-approve / edit / reject links.</div>
+        </div>
+      </div>
       <label class="muted" style="font-size:12px">From address<br><input id="nFrom" style="width:100%" placeholder="Parkside Tepees &lt;notifications@send.parksidetepees.com&gt;"></label>
       <label class="muted" style="font-size:12px">Resend API key <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nKey" type="password" autocomplete="new-password" style="width:100%" placeholder="re_********************"> <span id="nKeyState" style="font-size:12px;font-weight:600"></span></label>
       <label class="muted" style="font-size:12px">OwnerRez OAuth token (messaging) <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nOrToken" type="password" autocomplete="new-password" style="width:100%" placeholder="paste OwnerRez OAuth access token"> <span id="nOrState" style="font-size:12px;font-weight:600"></span></label>
@@ -814,6 +826,12 @@ async function loadNotifyStatus(){
     if(to && !to.value) to.value=j.to||"";
     const to2=document.getElementById('nTo2'); if(to2 && !to2.value) to2.value=j.to2||"";
     const em=document.getElementById('nEscMins'); if(em && !em.value && j.escalateMins) em.value=j.escalateMins;
+    const pc=document.getElementById('nPrimaryChannel'); if(pc && j.primaryChannel) pc.value=j.primaryChannel;
+    const sU=document.getElementById('nSmsUrl'); if(sU && !sU.value) sU.value=j.smsUrl||"";
+    const sT=document.getElementById('nSmsTo'); if(sT && !sT.value) sT.value=j.smsTo||"";
+    const sB=document.getElementById('nSmsBody'); if(sB && !sB.value) sB.value=j.smsBody||"";
+    const sH=document.getElementById('nSmsHeaders'); if(sH && !sH.value) sH.value=j.smsHeaders||"";
+    updateSmsVis();
     if(from && !from.value) from.value=j.from||DEFAULT_FROM;
     const yn=b=>b?"\u2705":"\u2014";
     const kS=document.getElementById('nKeyState'), oS=document.getElementById('nOrState'), sS=document.getElementById('nSecState');
@@ -830,6 +848,7 @@ async function loadNotifyStatus(){
       +(j.resendConfigured?" — <b style='color:#2ecc71'>ready</b>":" — <b style='color:#f4b942'>incomplete</b>")+dom;
   }catch(e){ el.textContent="Status error: "+e.message; }
 }
+function updateSmsVis(){ const sel=document.getElementById('nPrimaryChannel'); const fld=document.getElementById('smsFields'); if(fld) fld.style.display=(sel&&sel.value==='sms')?'grid':'none'; }
 function genSecret(){
   let out=""; const a=new Uint8Array(24);
   (window.crypto||{}).getRandomValues ? crypto.getRandomValues(a) : a.forEach((_,i)=>a[i]=Math.floor(Math.random()*256));
@@ -842,6 +861,11 @@ async function saveNotify(){
   const body={ victorEmail:document.getElementById('nTo').value.trim(), victorEmail2:document.getElementById('nTo2').value.trim(), escalateMins:document.getElementById('nEscMins').value.trim(), from:document.getElementById('nFrom').value.trim(), approveSecret:document.getElementById('nSecret').value.trim() };
   const key=document.getElementById('nKey').value.trim(); if(key) body.resendApiKey=key; // only send when provided (never wipes stored key)
   const ortk=document.getElementById('nOrToken').value.trim(); if(ortk) body.ownerrez_oauth_token=ortk;
+  const pc=document.getElementById('nPrimaryChannel'); if(pc) body.primaryChannel=pc.value;
+  const sU=document.getElementById('nSmsUrl'); if(sU) body.smsGatewayUrl=sU.value.trim();
+  const sT=document.getElementById('nSmsTo'); if(sT) body.smsTo=sT.value.trim();
+  const sB=document.getElementById('nSmsBody'); if(sB) body.smsBody=sB.value;
+  const sH=document.getElementById('nSmsHeaders'); if(sH) body.smsHeaders=sH.value;
   try{ const r=await fetch(api('set_notify_config'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(body)});
     const j=await r.json().catch(()=>({}));
     if(r.ok&&j.ok){

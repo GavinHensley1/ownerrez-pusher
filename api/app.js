@@ -452,6 +452,23 @@ async function sendSms(to, body){
   return {sent:false, staged:true, reason:"unknown SMS_PROVIDER '"+provider+"'"};
 }
 // Text Victor for approvals/escalations (staged until the provider is configured).
+// Generic HTTP SMS gateway (e.g. an Android SMS-gateway app that exposes an HTTP send endpoint). Template uses {to}/{text}.
+function fillSmsBody(tmpl, to, text){
+  const j = String(tmpl||"").trim().charAt(0)==="{" || String(tmpl||"").trim().charAt(0)==="[";
+  const t = j ? JSON.stringify(String(text)).slice(1,-1) : encodeURIComponent(String(text));
+  const tv = j ? String(to) : encodeURIComponent(String(to));
+  return String(tmpl||"").split("{text}").join(t).split("{to}").join(tv);
+}
+async function sendSmsGateway(cfg, text){
+  const url=(cfg&&cfg.smsUrl)||""; if(!url) return {sent:false, staged:true, reason:"no SMS gateway URL set"};
+  const to=(cfg&&cfg.smsTo)||""; if(!to) return {sent:false, staged:true, reason:"no SMS recipient number set"};
+  const tmpl=(cfg&&cfg.smsBody)||'{"phone":"{to}","message":"{text}"}';
+  let headers={"Content-Type": (String(tmpl).trim().charAt(0)==="{"?"application/json":"application/x-www-form-urlencoded")};
+  try{ const hs=String((cfg&&cfg.smsHeaders)||"").trim(); if(hs){ if(hs.charAt(0)==="{"){ Object.assign(headers, JSON.parse(hs)); } else { hs.split(/\n+/).forEach(function(l){ const i=l.indexOf(":"); if(i>0) headers[l.slice(0,i).trim()]=l.slice(i+1).trim(); }); } } }catch(e){}
+  try{ const r=await fetch(url,{method:"POST",headers:headers,body:fillSmsBody(tmpl,to,text)});
+    const t=await r.text(); return {sent:r.ok, status:r.status, provider:"gateway", body:String(t).slice(0,160)}; }
+  catch(e){ return {sent:false, error:String(e.message||e)}; }
+}
 async function smsVictor(enabled, text){
   if(!enabled) return {sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"};
   return sendSms(victorNumber(), text);
@@ -473,6 +490,11 @@ async function getNotifyConfig(){ const c=await getNotifyRaw(); return {
   ownerrezOauth: (c.ownerrez_oauth_token||process.env.OWNERREZ_OAUTH_TOKEN||"").trim(),
   webhookUser: (c.webhook_user||process.env.OR_WEBHOOK_USER||"").trim(),
   webhookPass: (c.webhook_pass||process.env.OR_WEBHOOK_PASS||"").trim(),
+  primaryChannel: ((c.primaryChannel||"email")==="sms")?"sms":"email",
+  smsUrl: (c.smsGatewayUrl||process.env.SMS_GATEWAY_URL||"").trim(),
+  smsTo:  (c.smsTo||process.env.SMS_VICTOR_NUMBER||process.env.VICTOR_PHONE||"").trim(),
+  smsBody: (c.smsBody||process.env.SMS_BODY_TEMPLATE||'{"phone":"{to}","message":"{text}"}'),
+  smsHeaders: (c.smsHeaders||process.env.SMS_HEADERS||""),
 }; }
 let _memWh=null;
 async function writeWhStatus(o){ const x={...o}; if(redis) await redis.set("parkside:wh_status",x); else _memWh=x; return x; }
@@ -553,6 +575,13 @@ async function sendVictorApprovalEmail(req, item, ctx){
   const unit=ctx.unit||""; const guestName=ctx.guestName||"";
   const proposed=item.proposed||"";
   const toAddr=(ctx.toOverride||cfg.to); const isEsc=ctx.escalation===true;
+  // PRIMARY notification as SMS when the first recipient is set to text. The 2nd-notice escalation always stays email.
+  if(!isEsc && cfg.primaryChannel==="sms" && cfg.smsUrl && cfg.smsTo){
+    const _esc=item.escalate===true;
+    const smsText=(_esc?"⚠ Unknown — ":"")+"Parkside approval"+(unit?(" — "+unit):"")+"\nGuest: "+String(item.question||"").slice(0,220)+"\nSuggested: "+String(proposed||"(write one)").slice(0,220)+"\n✅ Approve: "+yes+"\n✏️ Edit: "+editUrl+"\n❌ Reject: "+no;
+    const result=await sendSmsGateway(cfg, smsText);
+    return {...result, channel:"sms", to:cfg.smsTo||null, escalation:false, approveUrl:yes, editUrl, rejectUrl:no, subject:"(SMS)"};
+  }
   const _approvals=await getApprovals();
   const threadHtml=await renderThread(item,_approvals);
   const esc=item.escalate===true;
@@ -1649,9 +1678,14 @@ module.exports=async(req,res)=>{
       else if(b.resendApiKey==="") delete next.resendApiKey;
       if(typeof b.ownerrez_oauth_token==="string" && b.ownerrez_oauth_token.trim()!=="") next.ownerrez_oauth_token=b.ownerrez_oauth_token.trim();
       else if(b.ownerrez_oauth_token==="") delete next.ownerrez_oauth_token;
+      if(b.primaryChannel==="sms"||b.primaryChannel==="email") next.primaryChannel=b.primaryChannel;
+      if(typeof b.smsGatewayUrl==="string"){ const t=b.smsGatewayUrl.trim(); if(t!=="") next.smsGatewayUrl=t; else delete next.smsGatewayUrl; }
+      if(typeof b.smsTo==="string"){ const t=b.smsTo.trim(); if(t!=="") next.smsTo=t; else delete next.smsTo; }
+      if(typeof b.smsBody==="string"){ if(b.smsBody.trim()!=="") next.smsBody=b.smsBody; else delete next.smsBody; }
+      if(typeof b.smsHeaders==="string"){ if(b.smsHeaders.trim()!=="") next.smsHeaders=b.smsHeaders; else delete next.smsHeaders; }
       await setNotifyRaw(next);
       const cfg=await getNotifyConfig();
-      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth }});
+      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth, primaryChannel:cfg.primaryChannel, smsUrlSet:!!cfg.smsUrl, smsToSet:!!cfg.smsTo }});
     }
     // Send ONE sample approval email to the configured Victor address (password).
     if(action==="send_test_email"){
@@ -1701,7 +1735,7 @@ module.exports=async(req,res)=>{
         messaging_enabled:!!stN.messaging_enabled,
         counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
-        from:cfg.from||null, to:cfg.to||null, to2:cfg.to2||null,
+        from:cfg.from||null, to:cfg.to||null, to2:cfg.to2||null, primaryChannel:cfg.primaryChannel, smsUrl:cfg.smsUrl||null, smsTo:cfg.smsTo||null, smsBody:cfg.smsBody||null, smsHeaders:cfg.smsHeaders||null,
         source:{ apiKey: raw.resendApiKey?"ui":(process.env.RESEND_API_KEY?"env":null), from: raw.from?"ui":(process.env.RESEND_FROM?"env":null), to: raw.victorEmail?"ui":(process.env.VICTOR_EMAIL?"env":null), secret: raw.approveSecret?"ui":(process.env.APPROVE_LINK_SECRET?"env":null) } };
       if(cfg.apiKey){
         try{ const r=await fetch("https://api.resend.com/domains",{headers:{Authorization:"Bearer "+cfg.apiKey}});
