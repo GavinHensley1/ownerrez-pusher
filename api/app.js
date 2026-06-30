@@ -902,6 +902,7 @@ async function decideApproval(id, decision, overrideAnswer, reason){
     const isOverride=!!(overrideAnswer&&overrideAnswer.trim());
     const answer=(isOverride?overrideAnswer.trim():"")||it.proposed||"";
     if(!answer) return {ok:false, error:"no answer to send (proposed was empty — supply an answer)"};
+    if(/^\s*(q\s*\d+|y|yes|n|no|ok|okay|send|approve|approved|reject|skip)\s*$/i.test(answer)) return {ok:false, error:"refused: that looks like a command, not a guest reply — nothing was sent"};
     const guestSend=await sendGuestReply(enabled, {threadId:it.thread_id, bookingId:it.booking_id}, answer);
     // LEARN only a REAL answer: an owner-typed answer (override) OR an approved known answer.
     // NEVER learn a holding/escalation message (it.escalate && not overridden).
@@ -951,12 +952,13 @@ async function reviseFromSms(req, item, extraInfo){
   try{ const nt=normQ(item.question); const ex=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
        if(ex) ex.a=extraInfo; else kb.items.push({topic:String(item.question||"").slice(0,60), a:extraInfo, src:"sms-correction"});
        await setState({kb}); }catch(e){}
-  let proposed=extraInfo, known="full";
+  let proposed=null, known="full";
   try{ const history=await getThreadLog(item.thread_id, item.booking_id);
        const d=await aiDraftAnswer(kb, item.question, item.guest_name, await getApprovedBank(), history);
-       if(d && d.answer){ proposed=d.answer; known=d.known||"full"; } if(d && d.noKey) proposed=extraInfo; }catch(e){}
-  if(!proposed) proposed=extraInfo;
-  try{ if(item.proposed && proposed && String(proposed).trim()!==String(item.proposed).trim()) await appendCorrection(item.question, item.proposed, proposed); }catch(e){}
+       if(d && d.answer && !d.noKey){ proposed=String(d.answer).trim(); known=d.known||"full"; } }catch(e){}
+  // NEVER send the owner's raw correction text to the guest. If the AI could not produce a fresh draft, keep the prior AI draft and flag it.
+  if(!proposed) return {proposed:item.proposed||"", known:"full", failed:true};
+  try{ if(item.proposed && proposed!==String(item.proposed).trim()) await appendCorrection(item.question, item.proposed, proposed); }catch(e){}
   const list=await getApprovals(); const it=list.find(x=>x.id===item.id);
   if(it){ it.proposed=proposed; it.escalate=(known==="none"); it.revisedAt=new Date().toISOString(); await setApprovals(list); }
   return {proposed, known};
@@ -1718,7 +1720,7 @@ module.exports=async(req,res)=>{
       const lbl=target.smsLabel||"Q?";
       if((lm && rest==="")||isYes(rest)){
         const out=await decideApproval(target.id, "yes", null);
-        await ackBack(out && out.sent ? (lbl+" sent to the guest. ✅") : (lbl+" couldn't send: "+((out&&out.error)||"error")));
+        await ackBack(out && out.sent ? (lbl+" sent to the guest.") : (lbl+" NOT sent: "+((out&&out.error)||"error")));
         return res.status(200).json({decided:"yes", label:lbl, out});
       }
       if(isNo(rest)){
@@ -1727,6 +1729,7 @@ module.exports=async(req,res)=>{
         return res.status(200).json({decided:"no", label:lbl, out});
       }
       const rev=await reviseFromSms(req, target, rest);
+      if(rev && rev.failed){ await ackBack(lbl+": couldn't re-draft from that. The suggested reply is unchanged - reply \""+lbl+" yes\" to send it as-is, or text a clearer correction."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
       await ackBack(lbl+" (updated)\nSuggested reply:\n"+String(rev.proposed||"").slice(0,600)+"\n\nReply \""+lbl+" yes\" to send, or text another correction.");
       return res.status(200).json({revised:true, label:lbl, proposed:rev.proposed});
     }

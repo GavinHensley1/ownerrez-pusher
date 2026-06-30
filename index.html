@@ -192,13 +192,13 @@
 
 <div class="wrap" id="msgMain" style="display:none">
   <div class="card">
-    <h2>Auto-reply to guests <span class="muted" style="font-weight:400;text-transform:none">(default OFF — preview/test only)</span></h2>
+    <h2>Messaging <span class="muted" style="font-weight:400;text-transform:none">(master switch)</span></h2>
     <div class="toggle">
-      <span class="muted">Send replies to guests via OwnerRez</span>
+      <span class="muted">Messaging &mdash; text me approvals &amp; send my approved replies to guests</span>
       <div class="switch" id="msgSwitch" onclick="toggleMessaging()"><div class="knob"></div></div>
       <span class="pill" id="msgState">OFF</span>
     </div>
-    <div class="legend" id="msgNote">When <b>ON</b>, in-KB answers and the escalation apology are sent to the guest through the channel connected to OwnerRez, and Victor is texted on escalations. When <b>OFF</b>, nothing is sent — the tester below just shows what would happen. No channel is connected yet (Vrbo pending, Airbnb future), so even ON sends nothing until a channel is live.</div>
+    <div class="legend" id="msgNote">The on/off for the whole guest-messaging system. When <b>ON</b>, the engine drafts a reply to each guest message, texts it to you for approval, and sends your approved reply to the guest. When <b>OFF</b>, nothing is sent to guests.</div>
   </div>
   <div class="card">
     <h2>Message formatting / style</h2>
@@ -433,7 +433,7 @@ function setMsgUI(){
 }
 async function toggleMessaging(){
   const next=!STATE.messaging_enabled;
-  if(next && !confirm("Turn auto-reply ON? When a channel is connected, the engine will send replies to real guests and text Victor on escalations.")) return;
+  if(next && !confirm("Turn Messaging ON? Your approved replies will be sent to real guests.")) return;
   const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({messaging_enabled:next})});
   if(r.ok){ STATE.messaging_enabled=next; setMsgUI(); }
 }
