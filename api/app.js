@@ -581,7 +581,7 @@ async function sendVictorApprovalEmail(req, item, ctx){
   // PRIMARY notification as SMS when the first recipient is set to text. The 2nd-notice escalation always stays email.
   if(!isEsc && cfg.primaryChannel==="sms" && cfg.smsUrl && cfg.smsTo){
     const _esc=item.escalate===true;
-    const smsText=(_esc?"⚠ Unknown — ":"")+"Parkside approval"+(unit?(" — "+unit):"")+"\nGuest: "+String(item.question||"").slice(0,220)+"\nSuggested: "+String(proposed||"(write one)").slice(0,220)+"\n✅ Approve: "+yes+"\n✏️ Edit: "+editUrl+"\n❌ Reject: "+no;
+    const _lbl=item.smsLabel||"Q?"; const _ctx=[unit,guestName].filter(Boolean).join(" — "); const _code=item.smsCode||""; const _yesL=origin+"/api/app?c="+_code+"&d=y"; const _noL=origin+"/api/app?c="+_code+"&d=n"; const smsText=(_esc?"⚠ Unknown — ":"")+_lbl+(_ctx?(" — "+_ctx):"")+"\nQ: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,300)+"\n\nSuggested reply:\n"+String(proposed||"(none — text a reply)").slice(0,500)+"\n\nApprove: "+_yesL+"\nReject: "+_noL+"\nOr text \""+_lbl+" <your correction>\" to revise.";
     const result=await sendSmsGateway(cfg, smsText);
     return {...result, channel:"sms", to:cfg.smsTo||null, escalation:false, approveUrl:yes, editUrl, rejectUrl:no, subject:"(SMS)"};
   }
@@ -820,7 +820,7 @@ async function processGuestQuestion(req, p){
     unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
   await appendThreadLog(threadId, bookingId, "in", question, guestName);
   item.primaryNotifiedAt=new Date().toISOString();
-  const list=await getApprovals(); list.push(item); await setApprovals(list);
+  const list=await getApprovals(); item.smsLabel=smsLabelFor(list, item); item.smsCode=mkSmsCode(); item.firstProposed=proposed; list.push(item); await setApprovals(list);
   const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
   const sms=await smsVictor(enabled, "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(write one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
   return {queued:true, require_approval_all:requireAll, id:item.id, proposed, matchSource:pSource, escalate, victorEmail, victorSms:sms};
@@ -929,10 +929,56 @@ async function decideApproval(id, decision, overrideAnswer, reason){
   return {ok:true, decision:"rejected", id, reason:_reason};
 }
 
+// --- SMS approval labels (Q1, Q2 ...) + revise-from-text ---
+function smsLabelFor(list, item){
+  if(item && item.smsLabel) return item.smsLabel;
+  const used=new Set((list||[]).filter(x=>x.status==="pending"&&x.smsLabel).map(x=>parseInt(String(x.smsLabel).replace(/\D/g,""),10)).filter(n=>n>0));
+  let n=1; while(used.has(n)) n++; return "Q"+n;
+}
+function mkSmsCode(){ return (Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,5)); }
+function findByCode(list, code){ code=String(code||"").trim(); if(!code) return null; const m=(list||[]).filter(x=>x.smsCode===code); return m.length?m[m.length-1]:null; }
+function findByLabel(list, label){
+  const num=parseInt(String(label||"").replace(/\D/g,""),10); if(!num) return null;
+  const pend=(list||[]).filter(x=>x.status==="pending"&&x.smsLabel&&parseInt(String(x.smsLabel).replace(/\D/g,""),10)===num);
+  if(pend.length) return pend[pend.length-1];
+  const any=(list||[]).filter(x=>x.smsLabel&&parseInt(String(x.smsLabel).replace(/\D/g,""),10)===num);
+  return any.length?any[any.length-1]:null;
+}
+// Owner texted a correction for a pending item: fold the new info into the KB, re-draft, record the correction, re-stage.
+async function reviseFromSms(req, item, extraInfo){
+  extraInfo=String(extraInfo||"").trim();
+  const st=await getState(); const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
+  try{ const nt=normQ(item.question); const ex=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
+       if(ex) ex.a=extraInfo; else kb.items.push({topic:String(item.question||"").slice(0,60), a:extraInfo, src:"sms-correction"});
+       await setState({kb}); }catch(e){}
+  let proposed=extraInfo, known="full";
+  try{ const history=await getThreadLog(item.thread_id, item.booking_id);
+       const d=await aiDraftAnswer(kb, item.question, item.guest_name, await getApprovedBank(), history);
+       if(d && d.answer){ proposed=d.answer; known=d.known||"full"; } if(d && d.noKey) proposed=extraInfo; }catch(e){}
+  if(!proposed) proposed=extraInfo;
+  try{ if(item.proposed && proposed && String(proposed).trim()!==String(item.proposed).trim()) await appendCorrection(item.question, item.proposed, proposed); }catch(e){}
+  const list=await getApprovals(); const it=list.find(x=>x.id===item.id);
+  if(it){ it.proposed=proposed; it.escalate=(known==="none"); it.revisedAt=new Date().toISOString(); await setApprovals(list); }
+  return {proposed, known};
+}
+
 module.exports=async(req,res)=>{
   try{
     res.setHeader("Cache-Control","no-store, max-age=0, must-revalidate"); res.setHeader("CDN-Cache-Control","no-store"); res.setHeader("Vercel-CDN-Cache-Control","no-store");
     const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
+    if(action==="go" || ((!action) && req.query && req.query.c)){
+      res.setHeader("Content-Type","text/html; charset=utf-8");
+      const list=await getApprovals();
+      const it=findByCode(list, (req.query&&req.query.c)||"");
+      const d=String((req.query&&req.query.d)||"").toLowerCase();
+      const decision=(d==="n"||d==="no")?"no":"yes";
+      if(!it){ res.statusCode=200; return res.end(htmlPage("Link expired","This approval link is no longer valid (it may already have been handled).")); }
+      if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status+" ✓",(it.smsLabel||"This one")+" was already "+it.status+". The guest was not messaged twice.")); }
+      const out=await decideApproval(it.id, decision, null, decision==="no"?"rejected via link":undefined);
+      if(decision==="no"){ res.statusCode=200; return res.end(htmlPage("Skipped",(it.smsLabel||"It")+" was skipped — nothing was sent to the guest.")); }
+      if(out&&out.ok&&out.decision==="approved"){ res.statusCode=200; return res.end(htmlPage("Sent ✓",(it.smsLabel||"Your reply")+" was sent to the guest and saved for next time.")); }
+      res.statusCode=200; return res.end(htmlPage("Couldn’t send",((out&&out.error)||"Unknown error")+"."));
+    }
     if(action==="state"){
       if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=OWNERREZ_ICAL[u.orp]?1:0;
         const gapEnabled=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
@@ -1639,22 +1685,52 @@ module.exports=async(req,res)=>{
     }
     // PUBLIC provider webhook: Victor replies YES/NO via text. Provider-agnostic body parse.
     if(action==="sms_inbound"){
-      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch{ b={}; } } } b=b||{};
-      const from=String(b.From||b.from||b.source||"").trim();
-      const body=String(b.Body||b.body||b.text||b.message||"").trim();
-      const vn=victorNumber();
-      if(vn && from && from.replace(/[^0-9]/g,"").slice(-10)!==vn.replace(/[^0-9]/g,"").slice(-10))
-        return res.status(200).json({ignored:true, reason:"sender is not Victor's number"});
-      const mYes=body.match(/^\s*(yes|y|approve)\b\s*([a-z0-9]+)?/i);
-      const mNo=body.match(/^\s*(no|n|reject)\b\s*([a-z0-9]+)?/i);
-      let decision=null, id=null;
-      if(mYes){ decision="yes"; id=mYes[2]||null; } else if(mNo){ decision="no"; id=mNo[2]||null; }
-      if(!decision) return res.status(200).json({ignored:true, reason:"reply was not YES/NO"});
-      if(!id){ const list=await getApprovals(); const pend=list.filter(x=>x.status==="pending"); id=pend.length?pend[pend.length-1].id:null; }
-      if(!id) return res.status(200).json({ignored:true, reason:"no pending item to decide"});
-      const out=await decideApproval(id, decision, null);
-      return res.status(200).json(out);
+      const cfg=await getNotifyConfig();
+      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+      const pl=(b&&b.payload)?b.payload:b;
+      const from=String(pl.phoneNumber||pl.from||b.From||b.from||b.source||"").trim();
+      const bodyRaw=String(pl.message||pl.text||b.Body||b.body||b.text||b.message||"").trim();
+      const tok=(req.query&&req.query.token)||"";
+      if(cfg.secret && tok && tok!==cfg.secret) return res.status(200).json({ignored:true, reason:"bad token"});
+      const vn=cfg.smsTo||victorNumber();
+      if(vn && from && from.replace(/\D/g,"").slice(-10)!==vn.replace(/\D/g,"").slice(-10))
+        return res.status(200).json({ignored:true, reason:"sender is not the owner's number"});
+      if(!bodyRaw) return res.status(200).json({ignored:true, reason:"empty"});
+      const ackBack=async(t)=>{ try{ if(cfg.smsUrl&&cfg.smsTo) await sendSmsGateway(cfg, t); }catch(e){} };
+      const list=await getApprovals(); const pend=list.filter(x=>x.status==="pending");
+      const lm=bodyRaw.match(/^\s*q\s*0*(\d+)\b\s*([\s\S]*)$/i);
+      let target=null, rest=bodyRaw;
+      if(lm){ target=findByLabel(list, "Q"+lm[1]); rest=String(lm[2]||"").trim();
+        if(!target){ await ackBack("I don't see a pending Q"+lm[1]+". Pending: "+(pend.map(x=>x.smsLabel||"?").join(", ")||"none")+"."); return res.status(200).json({ignored:true, reason:"label not found"}); } }
+      const isYes=(t)=>/^(y|yes|yep|yeah|ok|okay|sure|send|approve|approved|confirm|go)\b/i.test(t);
+      const isNo=(t)=>/^(n|no|nope|reject|skip|cancel|decline|stop)\b/i.test(t);
+      if(!target){
+        if(isYes(rest)||isNo(rest)){
+          if(pend.length===1) target=pend[0];
+          else if(pend.length===0){ await ackBack("Nothing pending right now."); return res.status(200).json({ignored:true}); }
+          else { await ackBack("You have "+pend.length+" pending ("+pend.map(x=>x.smsLabel).join(", ")+"). Reply e.g. \""+pend[0].smsLabel+" yes\"."); return res.status(200).json({need_label:true}); }
+        } else {
+          if(pend.length===1){ target=pend[0]; rest=bodyRaw; }
+          else if(pend.length===0){ await ackBack("Nothing pending. Replies start with the label, e.g. \"Q1 yes\"."); return res.status(200).json({ignored:true}); }
+          else { await ackBack("Which one? Start with the label, e.g. \""+pend[0].smsLabel+" "+bodyRaw.slice(0,40)+"\"."); return res.status(200).json({need_label:true}); }
+        }
+      }
+      const lbl=target.smsLabel||"Q?";
+      if((lm && rest==="")||isYes(rest)){
+        const out=await decideApproval(target.id, "yes", null);
+        await ackBack(out && out.sent ? (lbl+" sent to the guest. ✅") : (lbl+" couldn't send: "+((out&&out.error)||"error")));
+        return res.status(200).json({decided:"yes", label:lbl, out});
+      }
+      if(isNo(rest)){
+        const out=await decideApproval(target.id, "no", null, "rejected via text");
+        await ackBack(lbl+" skipped — nothing was sent to the guest.");
+        return res.status(200).json({decided:"no", label:lbl, out});
+      }
+      const rev=await reviseFromSms(req, target, rest);
+      await ackBack(lbl+" (updated)\nSuggested reply:\n"+String(rev.proposed||"").slice(0,600)+"\n\nReply \""+lbl+" yes\" to send, or text another correction.");
+      return res.status(200).json({revised:true, label:lbl, proposed:rev.proposed});
     }
+
     // Queryable KB so future response generation can pull approved answers.
     if(action==="kb_query"){
       const st=await getState(); const kb=st.kb||KB_SEED; const q=(req.query&&req.query.q)||"";
@@ -1693,6 +1769,24 @@ module.exports=async(req,res)=>{
       return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth, primaryChannel:cfg.primaryChannel, smsUrlSet:!!cfg.smsUrl, smsToSet:!!cfg.smsTo }});
     }
     // Send ONE sample approval email to the configured Victor address (password).
+    if(action==="sms_register_webhook"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      const cfg=await getNotifyConfig();
+      if(!cfg.smsUrl||!cfg.smsUser) return res.status(200).json({ ok:false, reason:"Set the SMS gateway URL + username/password and Save first." });
+      const base=String(cfg.smsUrl).replace(/\/messages\/?$/,"");
+      const hooksUrl=base+"/webhooks";
+      const origin=(process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app");
+      const cbUrl=origin+"/api/app?action=sms_inbound"+(cfg.secret?("&token="+encodeURIComponent(cfg.secret)):"");
+      const auth="Basic "+Buffer.from(String(cfg.smsUser)+":"+String(cfg.smsPass||"")).toString("base64");
+      try{
+        let existing=[]; try{ const lr=await fetch(hooksUrl,{headers:{Authorization:auth}}); if(lr.ok) existing=await lr.json(); }catch(e){}
+        const dup=Array.isArray(existing)&&existing.find(w=>w&&w.url===cbUrl&&(w.event==="sms:received"));
+        if(dup) return res.status(200).json({ ok:true, already:true, callback:cbUrl });
+        const r=await fetch(hooksUrl,{method:"POST",headers:{Authorization:auth,"Content-Type":"application/json"},body:JSON.stringify({url:cbUrl, event:"sms:received"})});
+        const t=await r.text(); let j=null; try{j=JSON.parse(t);}catch(e){}
+        return res.status(200).json({ ok:r.ok, status:r.status, callback:cbUrl, result:(j||String(t).slice(0,300)) });
+      }catch(e){ return res.status(200).json({ ok:false, error:String(e.message||e) }); }
+    }
     if(action==="send_test_sms"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       const cfg=await getNotifyConfig();
