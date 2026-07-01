@@ -778,6 +778,14 @@ async function processGuestQuestion(req, p){
   return {queued:true, require_approval_all:requireAll, id:item.id, proposed, matchSource:pSource, escalate, victorEmail, victorSms:sms};
 }
 
+function scrubContact(text){
+  if(!text) return text;
+  var t=String(text);
+  t=t.replace(/\(?\+?\d[\d\s().\-]{7,}\d\)?/g, function(m){ var d=m.replace(/\D/g,""); return (d.length>=10 && d.length<=15)?" ":m; });
+  t=t.replace(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g," ");
+  t=t.replace(/[ \t]{2,}/g," ").replace(/\s+([.,!?;:])/g,"$1").replace(/\(\s*\)/g,"").trim();
+  return t;
+}
 function holdingMessage(guestName){ const f=String(guestName||"").trim().split(/\s+/)[0];
   return "Hi "+(f||"there")+"! Great question \u2014 I want to make sure I get you the right info, so let me check with my manager and I\u2019ll get right back to you shortly. \uD83D\uDE0A"; }
 // KB-grounded draft. Returns {known:"full"|"partial"|"none", answer}. NEVER fabricates:
@@ -800,6 +808,7 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
     +"First decide how much of the guest's message the KNOWN INFO answers: 'full' (every part), 'partial' (some parts), or 'none'.\n"
     +"Match the question word to the right fact: 'where'->a location/place/address; 'when'/'what time'->a time; 'how'->a process; 'what'/'which'->the specific item. If the specific thing asked is NOT in KNOWN INFO, treat that part as UNKNOWN (do not substitute a different fact).\n"
     +"Format: ONE warm greeting line ('Hi "+(first||"there")+"!'), then the answer in 1-3 short sentences, then a brief friendly closing. No padding, no over-explaining.\n"
+    +"NEVER include a phone number, email address, or external link, and never say 'call us', 'text us', or 'email us'. The channel BLOCKS messages that contain contact info, so they fail to send. Keep everything inside this message thread.\n"
     +"- full: answer every part using ONLY KNOWN INFO.\n"
     +"- partial: answer the part(s) you DO know from KNOWN INFO; for the unknown part(s) say you'll check with your manager and follow up shortly \u2014 NEVER guess it.\n"
     +"- none: do NOT attempt an answer. Use this exact warm holding message: \""+hold+"\"\n"
@@ -811,7 +820,7 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
   try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:350,temperature:0.2,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return {known:"none", answer:holdingMessage(guestName), error:JSON.stringify(j).slice(0,200)};
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
-    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; let answer=String(o.answer||"").trim(); if(!answer) answer=holdingMessage(guestName); return {known, answer}; }
+    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; let answer=scrubContact(String(o.answer||"").trim()); if(!answer) answer=holdingMessage(guestName); return {known, answer}; }
     catch{ return {known:"none", answer:holdingMessage(guestName)}; }
   }catch(e){ return {known:"none", answer:holdingMessage(guestName), error:String(e.message||e)}; }
 }
@@ -852,9 +861,11 @@ async function decideApproval(id, decision, overrideAnswer, reason){
   const st=await getState(); const enabled=!!st.messaging_enabled;
   if(decision==="yes"||decision==="approve"){
     const isOverride=!!(overrideAnswer&&overrideAnswer.trim());
-    const answer=(isOverride?overrideAnswer.trim():"")||it.proposed||"";
+    let answer=(isOverride?overrideAnswer.trim():"")||it.proposed||"";
     if(!answer) return {ok:false, error:"no answer to send (proposed was empty — supply an answer)"};
     if(/^\s*(q\s*\d+|y|yes|n|no|ok|okay|send|approve|approved|reject|skip)\s*$/i.test(answer)) return {ok:false, error:"refused: that looks like a command, not a guest reply — nothing was sent"};
+    answer=scrubContact(answer);
+    if(!answer || !answer.trim()) return {ok:false, error:"reply was only contact info (phone/email) which the channel blocks - nothing to send"};
     const guestSend=await sendGuestReply(enabled, {threadId:it.thread_id, bookingId:it.booking_id}, answer);
     // LEARN only a REAL answer: an owner-typed answer (override) OR an approved known answer.
     // NEVER learn a holding/escalation message (it.escalate && not overridden).
