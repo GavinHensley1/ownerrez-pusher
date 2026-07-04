@@ -376,20 +376,30 @@ async function genRecommendations(today){
   const st=await getState(); const K=await getKnobs(); const learned=await getLearned();
   const od=await getOccData(st,today,365,true);
   const months=monthList(today,150); const pace=computePace(od.agg.poolAgg, st.targets, learned, today, months, K.paceLength);
-  const upcoming=months.slice(0,4); let behindSum=0,cnt=0; const detail=[];
+  const upcoming=months.slice(0,6); let behindSum=0,cnt=0; const detail=[];
   for(const mk of upcoming){ const a=pace[mk]&&pace[mk].all; if(a&&a.exp>0){ behindSum+=(a.exp-a.act); cnt++; detail.push(mk.slice(5)+' '+a.act+'/'+a.exp); } }
-  const avgBehind=cnt?Math.round(behindSum/cnt):0; // + = behind pace, − = ahead
+  const avgBehind=cnt?Math.round(behindSum/cnt):0; // + = behind pace (need occupancy), − = ahead (capture revenue)
+  const mag=Math.min(1, Math.abs(avgBehind)/12); const behind=avgBehind>0; // strength scales with how far off pace (full at 12+ pts)
   const paceWord=avgBehind>0?(avgBehind+' pts behind pace'):avgBehind<0?((-avgBehind)+' pts ahead of pace'):'on pace';
   const paceBasis='resort '+paceWord+' over next '+cnt+' months';
   const evN=(learned.weekend.n||0)+(learned.weekday.n||0); const gd=(learned.detail&&learned.detail.gap)||{};
-  const rec={}; const hold=(key,why)=>({recommended:K[key], basis:why||'no change indicated yet'});
-  // gap depths: prefer the LEARNED fill-rate depth when there's data; else nudge by pace
+  const rec={}; const hold=(key,why)=>({recommended:K[key], basis:why||'on pace — hold'});
+  // Always-directional, graded lean toward the long-term goal: BEHIND pace → favor filling occupancy;
+  // AHEAD → favor capturing revenue. favorFill=+1 raises the knob when behind; -1 raises it when ahead.
+  const lean=(key, stepAtFull, favorFill, whyFill, whyProtect)=>{
+    if(Math.abs(avgBehind)<2) return hold(key, paceBasis+' → on pace, hold');
+    const sign=behind?favorFill:-favorFill; const val=clampKnob(key, K[key]+sign*stepAtFull*mag);
+    if(Number(val)===Number(K[key])) return hold(key, paceBasis+' → already at its limit');
+    return {recommended:val, basis:paceBasis+' → '+(behind?whyFill:whyProtect)}; };
+  // gap depths: LEARNED fill-rate wins when there's data; otherwise lean by pace.
   for(const [key,len] of [["gap1",1],["gap2",2],["gap3",3]]){ const ld=gd[len];
     if(ld && ld.open>=40){ rec[key]={recommended:clampKnob(key,ld.eff), basis:'learned fill rate ('+ld.open+' exposure-days, '+ld.book+' booked)'}; }
-    else { const adj=avgBehind>=8?0.05:avgBehind<=-8?-0.05:0; rec[key]= adj? {recommended:clampKnob(key,K[key]+adj), basis:paceBasis+' → '+(adj>0?'deepen':'ease')+' gap discount'} : hold(key,paceBasis+' → hold (gap learning still thin)'); } }
-  { const adj=avgBehind>=8?0.05:avgBehind<=-8?-0.05:0; rec.lmMax= adj?{recommended:clampKnob('lmMax',K.lmMax+adj),basis:paceBasis+' → '+(adj>0?'stronger':'lighter')+' last-minute'}:hold('lmMax',paceBasis+' → hold'); }
-  { const adj=avgBehind>=12?0.1:avgBehind<=-12?-0.1:0; rec.GAIN= adj?{recommended:clampKnob('GAIN',K.GAIN+adj),basis:paceBasis+' → '+(adj>0?'more':'less')+' demand reactivity'}:hold('GAIN',paceBasis+' → hold'); }
-  { const adj=avgBehind<=-12?10:0; rec.floor= adj?{recommended:clampKnob('floor',K.floor+adj),basis:paceBasis+' → raise floor to protect revenue'}:hold('floor','no signal to move the floor'); }
+    else rec[key]=lean(key,0.08,+1,'deepen gap discount to fill open nights','ease gap discount, protect rate'); }
+  rec.lmMax=lean('lmMax',0.08,+1,'stronger last-minute to fill','lighter last-minute, hold rate');
+  rec.GAIN=lean('GAIN',0.15,+1,'more demand reactivity to fill','less reactivity, steadier rate');
+  rec.farDemand=lean('farDemand',0.08,+1,'stronger far-out pace response','gentler far-out response');
+  rec.floor=lean('floor',15,-1,'lower floor so discounts can reach & fill','raise floor to capture demand');
+  rec.ceil=(!behind && Math.abs(avgBehind)>=2)?{recommended:clampKnob('ceil',K.ceil+Math.round(20*mag)),basis:paceBasis+' → raise ceiling to capture peak demand'}:hold('ceil',paceBasis+' → hold ceiling');
   for(const key of KNOB_ORDER){ if(!rec[key]) rec[key]=hold(key); }
   const items=KNOB_ORDER.map(key=>({ knob:key, current:K[key], recommended:rec[key].recommended, basis:rec[key].basis, changed:Number(rec[key].recommended)!==Number(K[key]) }));
   const out={ ts:Date.now(), avgBehind, paceBasis, learnEvents:evN, items }; if(redis) await redis.set("parkside:recommendations",out); return out;
@@ -1190,7 +1200,6 @@ module.exports=async(req,res)=>{
       else {
         const monNm=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][new Date(ds+'T00:00:00Z').getUTCMonth()];
         const dtName=isWe(new Date(ds+'T00:00:00Z'))?'weekend':'weekday';
-        steps.push({label:'Pace reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+dtName+')  ×  pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d on a '+K.paceLength+'-day pacing window'+(K.paceLength!==PACE_LEN_DEFAULT?', vs '+PACE_LEN_DEFAULT+'-day default → ramp '+(K.paceLength>PACE_LEN_DEFAULT?'stretched further out':'compressed toward check-in'):'')+')  =  pace-ref '+pct(live.ref)+'  — the bar demand is measured against (no $ change)', value:pct(live.ref), running:'$'+run});
         // Demand = the ACTUALLY-APPLIED (eased) effect — where the price is today on its glide toward target. Split into
         // resort + unit by their gap contribution; NO separate "glide easing" row.
         const easedMult=(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult);
@@ -1199,7 +1208,7 @@ module.exports=async(req,res)=>{
         const resortDelta=Math.abs(blend)>1e-9?Math.round(demandDelta*(rc/blend)):demandDelta;
         const glideNote=(live.easedDemandMult!=null && Math.abs(easedMult-live.desiredBaseMult)>0.005)?'  ·  applied is gliding toward its full target ×'+live.desiredBaseMult+' over the next few daily runs (gradual, not instant)':'';
         const farNote=(live.farW!=null&&live.farW>=0.5&&K.farDemand>0)?('  ·  far-out ('+pct(live.farW)+' out): pace deviation '+sgn(live.relDev)+' applied gently × farDemand '+K.farDemand+'  →  ×'+(live.farDemandMult!=null?live.farDemandMult.toFixed(3):'1.000')):'';
-        steps.push({label:'Resort demand', math:'resort occ '+pct(live.poolOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind pace → lower to fill)':live.resortGap<0?' (ahead of pace → raise)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wResort+farNote+glideNote, ...eff(base+resortDelta)});
+        steps.push({label:'Pacing reference', math:'saved target '+pct(live.savedTarget)+' ('+monNm+' '+dtName+')  ×  pacing '+pct(live.paceFrac)+' (lead '+live.lead+'d on a '+K.paceLength+'-day pacing window'+(K.paceLength!==PACE_LEN_DEFAULT?', vs '+PACE_LEN_DEFAULT+'-day default → ramp '+(K.paceLength>PACE_LEN_DEFAULT?'stretched further out':'compressed toward check-in'):'')+')  =  pace-ref '+pct(live.ref)+'   →   resort occ '+pct(live.poolOcc)+' vs pace-ref  →  gap '+sgn(live.resortGap)+(live.resortGap>0?' (behind pace → lower to fill)':live.resortGap<0?' (ahead of pace → raise)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wResort+farNote+glideNote, ...eff(base+resortDelta)});
         steps.push({label:'Unit demand', math:u.name+' occ '+pct(live.unitOcc)+' vs pace-ref '+pct(live.ref)+'  →  gap '+sgn(live.unitGap)+(live.unitGap>0?' (behind pace → lower)':live.unitGap<0?' (ahead of pace → raise)':'')+'  × GAIN '+K.GAIN+' × weight '+K.wUnit+(K.wUnit===0?'  (0 = off)':''), ...eff(base+demandDelta)});
         // Last-minute — ALWAYS shown; applied IMMEDIATELY on top of the eased demand. $0 if outside the window.
         const lmTxt=live.lm>0?('lead '+live.lead+'d → proximity ('+K.lmWindow+'−'+live.lead+')/'+K.lmWindow+'^'+K.lmSteep+' × max '+Math.round(K.lmMax*100)+'%  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'% (perishable, still open)'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');

@@ -200,26 +200,9 @@
     </div>
     <div class="legend" id="msgNote">The on/off for the whole guest-messaging system. When <b>ON</b>, the engine drafts a reply to each guest message, texts it to you for approval, and sends your approved reply to the guest. When <b>OFF</b>, nothing is sent to guests.</div>
   </div>
-  <div class="card">
-    <h2>Message formatting / style</h2>
-    <textarea id="kbFormat" class="full" placeholder="Paste your formatting samples here — how you want guest messages to look (greeting, tone, sign-off, structure). The assistant will match this."></textarea>
-  </div>
-  <div class="card">
-    <h2>📋 Facts — the only info the assistant may use</h2>
-    <div class="legend" style="margin-bottom:8px">The assistant answers guests <b>only</b> from these facts and never makes anything up; if a question isn&rsquo;t covered here it escalates to you. Edit any answer and Save.</div>
-    <div id="kbList"></div>
-    <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
-      <button class="ghost" onclick="addKbItem()">+ Add topic</button>
-      <button onclick="saveKB()">Save knowledge base</button>
-      <span id="kbStatus" class="muted" style="align-self:center"></span>
-    </div>
-  </div>
-  <div class="card">
-    <h2>AI answer preview <span class="muted" style="font-weight:400;text-transform:none">(test only — nothing is sent to any guest)</span></h2>
-    <textarea id="aiQ" class="full" style="min-height:60px" placeholder="Type a sample guest question, e.g. 'What time is checkout and is there parking?'"></textarea>
-    <div style="margin-top:10px;display:flex;gap:10px"><button onclick="aiPreview()">Preview AI answer</button><span id="aiStatus" class="muted" style="align-self:center"></span></div>
-    <div id="aiOut" class="legend" style="white-space:pre-wrap;margin-top:10px"></div>
-  </div>
+  <div class="group" id="grpApprovals" style="margin-top:20px">
+    <h2 class="groupHead" style="cursor:pointer;user-select:none;border-bottom:1px solid var(--line);padding-bottom:8px" onclick="toggleGroup('grpApprovals')">✅ Approvals &mdash; answer guest questions &amp; review decisions <span class="gcaret" style="color:var(--mut);font-weight:400;float:right">&#9656;</span></h2>
+    <div class="groupBody" style="display:none;margin-top:12px">
   <div class="card">
     <h2>Approval queue — guest questions awaiting Victor</h2>
     <div class="legend">When a question isn’t confidently answered by the knowledge base, it’s queued here and (once the SMS number is live) texted to Victor for a YES/NO. Approving sends the answer to the guest <b>and</b> saves it to the knowledge base so it auto-answers next time. You can also decide right here.</div>
@@ -244,18 +227,37 @@
     <div id="decList" class="legend"></div>
   </div>
 
+    </div>
+  </div>
+  <div class="group" id="grpSetup" style="margin-top:20px">
+    <h2 class="groupHead" style="cursor:pointer;user-select:none;border-bottom:1px solid var(--line);padding-bottom:8px" onclick="toggleGroup('grpSetup')">⚙ Setup &mdash; facts, style, testing &amp; connection <span class="gcaret" style="color:var(--mut);font-weight:400;float:right">&#9656;</span></h2>
+    <div class="groupBody" style="display:none;margin-top:12px">
+  <div class="card">
+    <h2>Message formatting / style</h2>
+    <textarea id="kbFormat" class="full" placeholder="Paste your formatting samples here — how you want guest messages to look (greeting, tone, sign-off, structure). The assistant will match this."></textarea>
+  </div>
+  <div class="card">
+    <h2>📋 Facts — the only info the assistant may use</h2>
+    <div class="legend" style="margin-bottom:8px">The assistant answers guests <b>only</b> from these facts and never makes anything up; if a question isn&rsquo;t covered here it escalates to you. Edit any answer and Save.</div>
+    <div id="kbList"></div>
+    <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
+      <button class="ghost" onclick="addKbItem()">+ Add topic</button>
+      <button onclick="saveKB()">Save knowledge base</button>
+      <span id="kbStatus" class="muted" style="align-self:center"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>AI answer preview <span class="muted" style="font-weight:400;text-transform:none">(test only — nothing is sent to any guest)</span></h2>
+    <textarea id="aiQ" class="full" style="min-height:60px" placeholder="Type a sample guest question, e.g. 'What time is checkout and is there parking?'"></textarea>
+    <div style="margin-top:10px;display:flex;gap:10px"><button onclick="aiPreview()">Preview AI answer</button><span id="aiStatus" class="muted" style="align-self:center"></span></div>
+    <div id="aiOut" class="legend" style="white-space:pre-wrap;margin-top:10px"></div>
+  </div>
   <div class="card">
     <h2>Test the approval pipeline</h2>
     <div class="legend">Simulate an incoming guest question. Known answers auto-send (and never bother Victor); unknown ones get queued above. Works without a live SMS number.</div>
     <textarea id="askQ" class="full" style="min-height:54px" placeholder="e.g. 'Do you allow dogs?' or 'Is there a fire pit?'"></textarea>
     <div style="margin-top:10px;display:flex;gap:10px"><button onclick="askTest()">Send to pipeline</button><span id="askStatus" class="muted" style="align-self:center"></span></div>
     <div id="askOut" class="legend" style="white-space:pre-wrap;margin-top:10px"></div>
-  </div>
-
-  <div class="card">
-    <h2>Booking inquiries (from the public site)</h2>
-    <div style="margin:8px 0;display:flex;gap:10px;align-items:center"><button onclick="loadInquiries()">Refresh inquiries</button><span id="inqCount" class="muted"></span></div>
-    <div class="scroll"><table class="occ" id="inqTable"></table></div>
   </div>
 
   <div class="card">
@@ -305,7 +307,9 @@
       <button onclick="saveNotify()">Save settings</button>
       <span id="nMsg" class="muted" style="align-self:center"></span>
     </div>
+  </div>    </div>
   </div>
+
 </div>
 
 <script>
@@ -362,6 +366,9 @@ function updateStatusCard(){
       +'<span id="gapToggleStatus" class="muted" style="margin-left:8px"></span>'; }
 }
 function toggleAdv(){ const b=document.getElementById('advBody'); const c=document.getElementById('advCaret'); const open=b.style.display!=='none'; b.style.display=open?'none':'block'; c.textContent=open?'▸':'▾'; }
+function toggleGroup(id){ var g=document.getElementById(id); if(!g) return;
+  var b=g.querySelector('.groupBody'), c=g.querySelector('.gcaret');
+  var open=b.style.display!=='none'; b.style.display=open?'none':''; if(c) c.innerHTML=open?'&#9656;':'&#9662;'; }
 function makeCollapsible(scope){
   document.querySelectorAll(scope+' .card > h2').forEach(function(h){
     if(h.dataset.col) return; h.dataset.col='1';
