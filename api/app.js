@@ -397,8 +397,36 @@ async function genRecommendations(today){
 // ===== Guest-messaging send path (added) =====
 const APOLOGY="I'm sorry, I don't know the answer to that. Let me check with a manager and I'll get back to you soon.";
 let _memLastSend=null;
+// HARD GUARD: a guest must ONLY ever receive a clean, AI-suggested reply.
+// These strip/detect any internal approval-label or command artifact so it can
+// NEVER reach a guest, no matter what upstream path called us.
+function stripInternalArtifacts(s){
+  s=String(s==null?"":s);
+  s=s.replace(/\n*\s*Reply:\s*Q?\s*\d+\s*yes\b[\s\S]*$/i,"");   // trailing 'Reply: Q# yes | Q# no'
+  s=s.replace(/\n*\s*Reply:\s*YES\s+\S+\s+or\s+NO\s+\S+[\s\S]*$/i,""); // trailing 'Reply: YES <id> or NO <id>'
+  return s.trim();
+}
+function isInternalArtifact(s){
+  s=String(s==null?"":s).trim();
+  if(!s) return true;
+  if(/reply:\s*q?\s*\d+\s*yes/i.test(s)) return true;                 // label reply-line
+  if(/\bq\s*\d+\s*yes\b[\s\S]*\bq\s*\d+\s*no\b/i.test(s)) return true; // 'Q# yes ... Q# no'
+  if(/parkside approval needed/i.test(s)) return true;                  // owner approval SMS
+  if(/^\s*draft:\s/i.test(s)) return true;                            // owner 'Draft:' scaffold
+  if(/^\s*q\s*\d+\b\s*[-\u2013]/i.test(s)) return true;              // 'Q37 - unit - name' header
+  if(/^\s*(q\s*\d+|y|yes|n|no|ok|okay|send|approve|approved|reject|skip)\s*$/i.test(s)) return true; // bare command
+  return false;
+}
 async function sendGuestReply(enabled, ids, body){
   const cfg=await getNotifyConfig(); const tokenLen=(cfg.ownerrezOauth||"").length;
+  // ==== GUEST-SEND HARD GUARD (single choke-point) ====
+  body=stripInternalArtifacts(body);
+  if(isInternalArtifact(body)){
+    const rec={sent:false, blocked:true, staged:false, reason:"BLOCKED: body looked like an internal approval/label, not a guest reply \u2014 nothing was sent to the guest"};
+    try{ if(cfg.smsUrl&&cfg.smsTo) await sendSmsGateway(cfg, "\u26A0\uFE0F Blocked a guest send that looked like an internal label/command. Nothing went to the guest."); }catch(e){}
+    try{ if(redis) await redis.set("parkside:last_send", {ranAt:new Date().toISOString(), ...rec}); else _memLastSend={ranAt:new Date().toISOString(), ...rec}; }catch(e){}
+    return rec;
+  }
   const threadId=(ids&&typeof ids==="object")?(ids.threadId||ids.thread_id||null):null;
   const bookingId=(ids&&typeof ids==="object")?(ids.bookingId||ids.booking_id||null):(ids||null);
   let result;
@@ -581,8 +609,50 @@ async function sendVictorApprovalEmail(req, item, ctx){
 }
 // Primary->secondary escalation: any approval still pending after escalateMins gets the
 // SAME approval email (same suggested reply) re-sent ONCE to the backup contact.
+async function sendApprovalEmail(req, item, toAddr, isEsc){
+  const cfg=await getNotifyConfig();
+  if(!toAddr || !cfg.apiKey || !cfg.from) return {sent:false, reason:"backup email not configured (need address, Resend key, From)"};
+  const origin=(process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app"); const secret=cfg.secret;
+  const base=origin+"/api/app?action=approve&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
+  const yes=base+"&decision=yes", no=base+"&decision=no";
+  const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
+  const unit=item.unit||""; const guestName=item.guest_name||""; const proposed=item.proposed||"";
+  let threadHtml=""; try{ threadHtml=await renderThread(item, await getApprovals()); }catch(e){}
+  const subject=(isEsc?"No text reply - 2nd notice: ":"")+"Parkside approval needed"+(unit?(" - "+unit):"");
+  const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
+  const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
+    +(isEsc?'<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 14px;margin:0 0 14px;color:#991b1b;font-size:14px"><b>No response to the text within the time limit - escalated to you.</b></div>':'')
+    +'<h2 style="margin:0 0 8px">Guest message - approval needed</h2>'
+    +(unit?'<div style="color:#64748b;font-size:13px">Unit: <b>'+escHtml(unit)+'</b></div>':'')
+    +(guestName?'<div style="color:#64748b;font-size:13px">Guest: <b>'+escHtml(guestName)+'</b></div>':'')
+    +'<div style="margin:14px 0 6px;font-size:12px;color:#64748b;text-transform:uppercase">Conversation</div>'
+    +'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:4px 12px">'+threadHtml+'</div>'
+    +'<div style="margin:14px 0 6px;font-size:12px;color:#64748b;text-transform:uppercase">Suggested reply</div>'
+    +'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:14px;white-space:pre-wrap">'+(proposed?escHtml(proposed):'<i>No suggested reply</i>')+'</div>'
+    +'<div style="margin:18px 0">'+btn(yes,"#16a34a","Approve & Send")+btn(editUrl,"#2563eb","Edit")+btn(no,"#dc2626","Reject")+'</div>'
+    +'<p style="color:#94a3b8;font-size:12px">Approve sends this reply to the guest. Reject sends nothing. (Ref '+escHtml(item.id)+')</p></div>';
+  const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:toAddr, subject, html});
+  return {...result, to:toAddr, from:cfg.from, subject, escalation:isEsc};
+}
+// Backup-email escalation: any approval still pending after escalateMins (no text reply) gets emailed ONCE to the backup address.
 async function escalateStaleApprovals(req){
-  return {escalated:0, reason:"email escalation removed (SMS-only)"};
+  try{
+    const cfg=await getNotifyConfig();
+    if(!cfg.to2) return {escalated:0, reason:"no backup email set"};
+    if(!cfg.apiKey||!cfg.from) return {escalated:0, reason:"backup email not configured (need Resend key + From)"};
+    const cutoff=Date.now()-cfg.escalateMins*60*1000;
+    const list=await getApprovals(); let changed=false; const done=[];
+    for(const it of list){
+      if(!it || it.status!=="pending" || it.escalatedTo2) continue;
+      const t=Date.parse(it.primaryNotifiedAt||it.ts||"");
+      if(!isFinite(t) || t>cutoff) continue;
+      const r=await sendApprovalEmail(req, it, cfg.to2, true);
+      it.escalatedTo2=true; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=!!(r&&r.sent===true);
+      changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:cfg.to2});
+    }
+    if(changed) await setApprovals(list);
+    return {escalated:done.length, mins:cfg.escalateMins, items:done};
+  }catch(e){ return {error:String(e.message||e)}; }
 }
 function htmlPage(title, msg){
   return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+escHtml(title)+'</title></head>'
@@ -1661,7 +1731,7 @@ module.exports=async(req,res)=>{
       if(vn && from && from.replace(/\D/g,"").slice(-10)!==vn.replace(/\D/g,"").slice(-10))
         return res.status(200).json({ignored:true, reason:"sender is not the owner's number"});
       if(!bodyRaw) return res.status(200).json({ignored:true, reason:"empty"});
-      const ackBack=async(t)=>{ try{ if(cfg.smsUrl&&cfg.smsTo) await sendSmsGateway(cfg, t); }catch(e){} };
+      const ackBack=async(t)=>{ if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false}; let _r=null; for(let _i=0;_i<3;_i++){ try{ _r=await sendSmsGateway(cfg, t); if(_r && _r.sent) return _r; }catch(e){ _r={sent:false, error:String(e.message||e)}; } if(_i<2) await new Promise(function(res){setTimeout(res,1200);}); } return _r||{sent:false}; };
       const list=await getApprovals(); const pend=list.filter(x=>x.status==="pending");
       const lm=bodyRaw.match(/^\s*q\s*0*(\d+)\b\s*([\s\S]*)$/i);
       let target=null, rest=bodyRaw;

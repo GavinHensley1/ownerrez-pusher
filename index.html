@@ -281,6 +281,13 @@
           <div class="muted" style="font-size:11px;margin-top:6px">Each text is labeled <b>Q1</b>, <b>Q2</b>&hellip; Reply <b>&ldquo;Q1 yes&rdquo;</b> to send, <b>&ldquo;Q1 no&rdquo;</b> to skip, or <b>&ldquo;Q1 &lt;your correction&gt;&rdquo;</b> to fix it &mdash; the engine updates the facts, re-drafts, and texts the new version back. Click <b>Enable 2-way texting</b> once so your replies reach the engine.</div>
         </div>
       </div>
+      <div style="border-top:1px solid var(--line);margin-top:6px;padding-top:12px">
+        <div style="font-weight:600;margin-bottom:6px">Backup email <span class="muted" style="font-weight:400;text-transform:none">(only if you don&rsquo;t answer the text in time)</span></div>
+        <label class="muted" style="font-size:12px;display:block">Backup email address<br><input id="nTo2" type="email" style="width:100%" placeholder="backup@example.com"></label>
+        <label class="muted" style="font-size:12px;display:block;margin-top:8px">Email the backup after (minutes with no text reply)<br><input id="nEscMins" type="number" min="5" step="5" style="width:140px" placeholder="60"></label>
+        <label class="muted" style="font-size:12px;display:block;margin-top:8px">From address <span style="color:#9fb0c0">(sender for the backup email)</span><br><input id="nFrom" style="width:100%" placeholder="Parkside Tepees &lt;notifications@send.parksidetepees.com&gt;"></label>
+        <label class="muted" style="font-size:12px;display:block;margin-top:8px">Resend API key <span style="color:#9fb0c0">(stored write-only)</span><br><input id="nKey" type="password" autocomplete="new-password" style="width:100%" placeholder="re_********************"> <span id="nKeyState" style="font-size:12px;font-weight:600"></span></label>
+      </div>
       <label class="muted" style="font-size:12px">OwnerRez OAuth token (messaging) <span style="color:#9fb0c0">(paste yours; stored write-only)</span><br><input id="nOrToken" type="password" autocomplete="new-password" style="width:100%" placeholder="paste OwnerRez OAuth access token"> <span id="nOrState" style="font-size:12px;font-weight:600"></span></label>
       <div style="border-top:1px solid var(--line);margin-top:6px;padding-top:12px">
         <div style="font-weight:600;margin-bottom:4px">OwnerRez inbound webhook</div>
@@ -830,14 +837,18 @@ async function loadNotifyStatus(){
     const sPassSt=document.getElementById('nSmsPassState'); const sPassIn=document.getElementById('nSmsPass'); if(sPassSt){ if(j.smsPassSet){ sPassSt.textContent='saved'; sPassSt.style.color='#2ecc71'; if(sPassIn&&!sPassIn.value) sPassIn.placeholder='saved - type a new one to replace'; } else { sPassSt.textContent=''; } }
     updateSmsVis();
     const yn=b=>b?"\u2705":"\u2014";
-    const oS=document.getElementById('nOrState'), sS=document.getElementById('nSecState');
-    const oIn=document.getElementById('nOrToken');
+    const t2=document.getElementById('nTo2'); if(t2 && !t2.value) t2.value=j.to2||"";
+    const em=document.getElementById('nEscMins'); if(em && !em.value && j.escalateMins) em.value=j.escalateMins;
+    const fr=document.getElementById('nFrom'); if(fr && !fr.value) fr.value=j.from||"";
+    const kS=document.getElementById('nKeyState'), oS=document.getElementById('nOrState'), sS=document.getElementById('nSecState');
+    const kIn=document.getElementById('nKey'), oIn=document.getElementById('nOrToken');
+    if(kS){ if(j.resendKey){ kS.textContent="\u2705 Saved"; kS.style.color="#2ecc71"; if(kIn&&!kIn.value) kIn.placeholder="saved - paste a new key to replace"; } else { kS.textContent="\u2014 not set"; kS.style.color="#9fb0c0"; } }
     if(oS){ if(j.ownerrez_oauth_set){ oS.textContent="\u2705 Saved"; oS.style.color="#2ecc71"; if(oIn&&!oIn.value) oIn.placeholder="\u2022\u2022\u2022\u2022\u2022\u2022 saved — paste a new token to replace"; } else { oS.textContent="\u2014 not set"; oS.style.color="#9fb0c0"; } }
     const sIn=document.getElementById('nSecret');
     if(sS){ if(j.approveSecretSet){ sS.textContent="\u2705 Saved"; sS.style.color="#2ecc71"; if(sIn&&!sIn.value) sIn.placeholder="\u2022\u2022\u2022\u2022\u2022\u2022 saved — Generate or type to replace"; } else { sS.textContent="\u2014 not set"; sS.style.color="#9fb0c0"; } }
     if(j.webhook){ const wu=document.getElementById('whUrl'), wus=document.getElementById('whUser'), wp=document.getElementById('whPass');
       if(wu) wu.value=j.webhook.url||""; if(wus) wus.value=j.webhook.user||""; if(wp) wp.value=j.webhook.password||""; }
-    el.innerHTML="Text alerts "+yn(j.smsUrl&&j.smsTo)+" · 2-way secret "+yn(j.approveSecretSet)+" · OwnerRez token "+yn(j.ownerrez_oauth_set)
+    el.innerHTML="Text alerts "+yn(j.smsUrl&&j.smsTo)+" · OwnerRez "+yn(j.ownerrez_oauth_set)+" · Backup email "+yn(j.victorEmail2Set)+(j.escalateMins?(" ("+j.escalateMins+"m)"):"")+" · 2-way secret "+yn(j.approveSecretSet)
       +((j.smsUrl&&j.smsTo&&j.ownerrez_oauth_set)?" — <b style='color:#2ecc71'>ready</b>":" — <b style='color:#f4b942'>finish setup</b>");
   }catch(e){ el.textContent="Status error: "+e.message; }
 }
@@ -852,6 +863,10 @@ function genSecret(){
 async function saveNotify(){
   const msg=document.getElementById('nMsg'); msg.textContent="Saving…";
   const sec=document.getElementById('nSecret'); const body={ approveSecret: sec?sec.value.trim():"", primaryChannel:"sms" };
+  const t2=document.getElementById('nTo2'); if(t2) body.victorEmail2=t2.value.trim();
+  const em=document.getElementById('nEscMins'); if(em) body.escalateMins=em.value.trim();
+  const fr=document.getElementById('nFrom'); if(fr) body.from=fr.value.trim();
+  const key=document.getElementById('nKey'); if(key && key.value.trim()) body.resendApiKey=key.value.trim();
   const ortk=document.getElementById('nOrToken').value.trim(); if(ortk) body.ownerrez_oauth_token=ortk;
   const sU=document.getElementById('nSmsUrl'); if(sU) body.smsGatewayUrl=sU.value.trim();
   const sT=document.getElementById('nSmsTo'); if(sT) body.smsTo=sT.value.trim();
@@ -864,7 +879,7 @@ async function saveNotify(){
     if(r.ok&&j.ok){
       const sv=j.saved||{};
       msg.textContent="Saved \u2713"+(sv.ownerrezOauthSet?" — OwnerRez token stored":"");
-      document.getElementById('nOrToken').value="";
+      const _k=document.getElementById('nKey'); if(_k) _k.value=""; document.getElementById('nOrToken').value="";
       loadNotifyStatus();
     } else msg.textContent="Save failed: "+(j.error||r.status);
   }catch(e){ msg.textContent="Save failed: "+e.message; }
