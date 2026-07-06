@@ -1061,13 +1061,19 @@ module.exports=async(req,res)=>{
       res.status(200); return res.end("ok");
     }
     // Read GPS state (password-gated): latest point, count, recent trail, and the ingest URL to paste into Traccar.
+    // Verify the 2nd ("Gavin") login. Returns ok if the Gavin password matches.
+    if(action==="gavin_auth"){
+      const need=String(process.env.GAVIN_PASSWORD||"");
+      if(!need) return res.status(200).json({ok:false, unset:true});
+      return res.status(200).json({ok: (req.headers["x-gavin-password"]||"")===need});
+    }
     if(action==="gps_status"){
-      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
       const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const sec=String(process.env.GPS_INGEST_SECRET||""); const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
       let last=null, count=0, trail=[];
       try{ if(redis){ last=await redis.get("parkside:gps_last:"+device); const k="parkside:gps:"+device; count=await redis.llen(k);
-        const raw=await redis.lrange(k,-50,-1); trail=(raw||[]).map(x=>{ try{ return typeof x==="string"?JSON.parse(x):x; }catch{ return null; } }).filter(Boolean); } }catch(e){}
+        const raw=await redis.lrange(k,-300,-1); trail=(raw||[]).map(x=>{ try{ return typeof x==="string"?JSON.parse(x):x; }catch{ return null; } }).filter(Boolean); } }catch(e){}
       const zones=await getZones();
       const zoneNow=(last&&last.zone)?last.zone:null;
       const byZone={}; for(const x of trail){ if(!x) continue; const z=x.zone||'off'; byZone[z]=(byZone[z]||0)+1; }
@@ -1075,7 +1081,7 @@ module.exports=async(req,res)=>{
     }
     // Get/set the named zones (password-gated). POST {zones:[{name,lat,lon,radius_m},...]} to replace them.
     if(action==="gps_zones"){
-      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x") && (req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
       if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
         const arr=Array.isArray(b.zones)?b.zones:null; if(!arr) return res.status(400).json({error:"need zones:[{name,lat,lon,radius_m}]"});
         const clean=arr.map(z=>({name:String(z.name||'zone').slice(0,32),lat:Number(z.lat),lon:Number(z.lon),radius_m:Math.round(Number(z.radius_m))})).filter(z=>isFinite(z.lat)&&isFinite(z.lon)&&z.radius_m>0);

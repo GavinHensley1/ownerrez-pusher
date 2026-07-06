@@ -1,6 +1,8 @@
 <!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Parkside Tepees</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root{--bg:#0f1720;--card:#16212e;--ink:#e7eef6;--mut:#9fb0c0;--line:#26354a;--accent:#ff6b4a;--ok:#2ecc71;--warn:#f4b942;--pin:#8b5cf6;--book:#5a6675}
   *{box-sizing:border-box} body{margin:0;font:14px/1.45 system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--ink)}
@@ -82,6 +84,7 @@
   <div id="viewTabs" style="display:inline-flex;gap:6px;margin-left:4px">
     <button id="tabPricing" class="seg on" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
+    <button id="tabMon" class="seg" onclick="switchView('monitoring')">🛰 Monitoring</button>
   </div>
   <span class="muted" id="horizon"></span>
   <span class="sp"></span>
@@ -310,6 +313,36 @@
   </div>    </div>
   </div>
 
+</div>
+
+<div class="wrap" id="monMain" style="display:none">
+  <div class="card" id="gavinGate">
+    <h2>Gavin login</h2>
+    <div class="legend" style="margin-bottom:10px">Protected by a second password. Enter it to view Victor’s location.</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input id="gpw" type="password" placeholder="Gavin password" style="max-width:220px" onkeydown="if(event.key==='Enter')gavinUnlock()">
+      <button onclick="gavinUnlock()">Unlock</button>
+      <span id="gavinErr" class="muted" style="color:var(--warn)"></span>
+    </div>
+  </div>
+  <div id="gavinBody" style="display:none">
+    <div class="card">
+      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+        <div><b>Device</b> <select id="monDevice" onchange="loadMonitor()" style="width:auto"><option value="victor">victor</option><option value="test">test</option></select></div>
+        <div id="monNow" class="legend" style="margin:0">Loading…</div>
+        <span style="flex:1"></span>
+        <label class="muted" style="font-size:12px"><input type="checkbox" id="monAuto" checked onchange="monAutoToggle()"> auto-refresh</label>
+        <button class="ghost" onclick="loadMonitor()">Refresh</button>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <div id="monMap" style="height:520px;width:100%;background:#0c141d"></div>
+    </div>
+    <div class="card">
+      <h2>Zone summary (recent trail)</h2>
+      <div id="monZones" class="legend"></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -701,15 +734,59 @@ async function loadLearning(){
 }
 let MSG_BUILT=false; let KB={format:"",items:[]};
 function switchView(v){
-  const pricing=v!=='messaging';
-  document.getElementById('main').style.display=pricing?'block':'none';
-  document.getElementById('msgMain').style.display=pricing?'none':'block';
-  document.getElementById('tabPricing').className='seg'+(pricing?' on':'');
-  document.getElementById('tabMsg').className='seg'+(pricing?'':' on');
-  document.getElementById('horizon').style.display=pricing?'':'none';
-  if(pricing){ document.getElementById('syncWrap').style.display=''; setSyncUI(); }
-  else { document.getElementById('syncWrap').style.display='none'; }
-  if(!pricing){ if(!MSG_BUILT){ renderMessaging(); MSG_BUILT=true; } loadApprovals(); loadInquiries(); loadNotifyStatus(); loadDecisions(); makeCollapsible('#msgMain'); }
+  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring';
+  document.getElementById('main').style.display=isP?'block':'none';
+  document.getElementById('msgMain').style.display=isM?'block':'none';
+  document.getElementById('monMain').style.display=isMon?'block':'none';
+  document.getElementById('tabPricing').className='seg'+(isP?' on':'');
+  document.getElementById('tabMsg').className='seg'+(isM?' on':'');
+  const tm=document.getElementById('tabMon'); if(tm) tm.className='seg'+(isMon?' on':'');
+  document.getElementById('horizon').style.display=isP?'':'none';
+  document.getElementById('syncWrap').style.display=isP?'':'none';
+  if(isP) setSyncUI();
+  if(isM){ if(!MSG_BUILT){ renderMessaging(); MSG_BUILT=true; } loadApprovals(); loadInquiries(); loadNotifyStatus(); loadDecisions(); makeCollapsible('#msgMain'); }
+  if(isMon && GPW && MON_MAP){ setTimeout(function(){ MON_MAP.invalidateSize(); loadMonitor(); },60); }
+}
+// ===== Monitoring (Gavin) tab: GPS map overlay =====
+let GPW='', MON_MAP=null, MON_LAYERS=null, MON_TIMER=null;
+const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', resort:'#a78bfa', off:'#f87171'};
+async function gavinUnlock(){
+  const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
+  try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); loadMonitor(); monAutoToggle(); }
+    else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
+    else { err.textContent='Wrong password'; } }
+  catch(e){ err.textContent='Error: '+e.message; }
+}
+function initMonMap(){ if(MON_MAP) return;
+  MON_MAP=L.map('monMap',{zoomControl:true}).setView([35.7678,-83.5730],15);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Esri'}).addTo(MON_MAP);
+  MON_LAYERS=L.layerGroup().addTo(MON_MAP);
+  setTimeout(function(){MON_MAP.invalidateSize();},80);
+}
+function monAutoToggle(){ const el=document.getElementById('monAuto'); const on=el?el.checked:true; if(MON_TIMER){clearInterval(MON_TIMER);MON_TIMER=null;} if(on&&GPW) MON_TIMER=setInterval(loadMonitor,45000); }
+function fmtWhen(t){ try{ return new Date(t).toLocaleString(); }catch(e){ return t||''; } }
+async function loadMonitor(){ if(!GPW) return; const dev=(document.getElementById('monDevice')||{}).value||'victor';
+  try{ const r=await fetch(api('gps_status')+'&id='+encodeURIComponent(dev)+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}});
+    if(r.status===401){ document.getElementById('monNow').textContent='Session expired — re-enter Gavin password.'; return; }
+    const j=await r.json(); renderMonitor(j); }
+  catch(e){ document.getElementById('monNow').textContent='Error: '+e.message; }
+}
+function renderMonitor(j){ if(!MON_MAP) initMonMap(); MON_LAYERS.clearLayers();
+  const zones=j.zones||[];
+  for(const z of zones){ if(z.name==='resort') continue; const c=ZONE_COLORS[z.name]||'#93c5fd';
+    L.circle([z.lat,z.lon],{radius:z.radius_m,color:c,weight:1.5,fillColor:c,fillOpacity:0.10}).addTo(MON_LAYERS).bindTooltip(z.name,{permanent:true,direction:'center'}); }
+  const res=zones.find(function(z){return z.name==='resort';}); if(res) L.circle([res.lat,res.lon],{radius:res.radius_m,color:'#a78bfa',weight:1,dashArray:'6 6',fill:false}).addTo(MON_LAYERS);
+  const trail=(j.trail||[]).filter(function(p){return p&&isFinite(p.lat)&&isFinite(p.lon);});
+  if(trail.length>1) L.polyline(trail.map(function(p){return [p.lat,p.lon];}),{color:'#ffffff',weight:2,opacity:0.55}).addTo(MON_LAYERS);
+  for(const p of trail){ const c=ZONE_COLORS[p.zone||'off']||'#f87171'; L.circleMarker([p.lat,p.lon],{radius:4,color:c,fillColor:c,fillOpacity:0.9,weight:1}).addTo(MON_LAYERS).bindPopup((p.zone||'off')+' · '+fmtWhen(p.t)); }
+  const last=j.last; if(last&&isFinite(last.lat)){ const c=ZONE_COLORS[last.zone||'off']||'#f87171';
+    L.circleMarker([last.lat,last.lon],{radius:8,color:'#fff',fillColor:c,fillOpacity:1,weight:2}).addTo(MON_LAYERS).bindPopup('LATEST · '+(last.zone||'off')+' · '+fmtWhen(last.t)).openPopup(); MON_MAP.panTo([last.lat,last.lon]); }
+  const zoneNow=j.zone||(last&&last.zone)||null;
+  document.getElementById('monNow').innerHTML = last ? ('Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> · '+fmtWhen(last.t)+' · '+(j.count||0)+' points') : 'No pings yet for this device.';
+  const by=j.trailByZone||{}; const order=['office','tepees','maintenance','resort','off']; let h='';
+  for(const z of order){ if(by[z]) h+='<span class="pill" style="background:'+(ZONE_COLORS[z]||'#333')+';color:#0b1220;margin-right:8px">'+z+': '+by[z]+'</span>'; }
+  document.getElementById('monZones').innerHTML = h||'<span class="muted">No recent points.</span>';
 }
 function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function renderMessaging(){ KB=JSON.parse(JSON.stringify(STATE.kb||{format:"",items:[]})); document.getElementById('kbFormat').value=KB.format||""; drawKb(); setMsgUI();
