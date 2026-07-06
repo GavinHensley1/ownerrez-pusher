@@ -1027,6 +1027,34 @@ module.exports=async(req,res)=>{
   try{
     res.setHeader("Cache-Control","no-store, max-age=0, must-revalidate"); res.setHeader("CDN-Cache-Control","no-store"); res.setHeader("Vercel-CDN-Cache-Control","no-store");
     const action=(req.query&&req.query.action)||""; const today=new Date().toISOString().slice(0,10), days=365;
+    // ===== Victor GPS ingest (Traccar Client / OsmAnd protocol) =====
+    // Public but secret-gated. Traccar hits /gps/<secret>?id=..&lat=..&lon=..&timestamp=..&speed=..&batt=..&accuracy=..
+    // (rewritten to action=gps). The app's Tracking toggle = clock in/out; OFF sends nothing.
+    if(action==="gps"){
+      const need=String(process.env.GPS_INGEST_SECRET||"");
+      if(!need){ res.status(503); return res.end("gps secret not configured"); }
+      if(String((req.query&&req.query.secret)||"")!==need){ res.status(401); return res.end("unauthorized"); }
+      const q=req.query||{}; const lat=parseFloat(q.lat), lon=parseFloat(q.lon);
+      if(!isFinite(lat)||!isFinite(lon)){ res.status(400); return res.end("missing coords"); }
+      const device=String(q.id||q.deviceid||q.device_id||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      let when=new Date(); const tsRaw=q.timestamp!=null?Number(q.timestamp):NaN;
+      if(isFinite(tsRaw)){ const d=new Date(tsRaw>1e12?tsRaw:tsRaw*1000); if(isFinite(d.getTime())) when=d; }
+      const num=v=>(v!=null&&v!==""&&isFinite(Number(v)))?Number(v):null;
+      const pt={ t:when.toISOString(), lat, lon, spd:num(q.speed), batt:num(q.batt!=null?q.batt:q.battery), acc:num(q.accuracy) };
+      try{ if(redis){ const k="parkside:gps:"+device; await redis.rpush(k, JSON.stringify(pt)); await redis.ltrim(k,-5000,-1); await redis.set("parkside:gps_last:"+device, pt); } }
+      catch(e){ res.status(500); return res.end("db error"); }
+      res.status(200); return res.end("ok");
+    }
+    // Read GPS state (password-gated): latest point, count, recent trail, and the ingest URL to paste into Traccar.
+    if(action==="gps_status"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const sec=String(process.env.GPS_INGEST_SECRET||""); const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
+      let last=null, count=0, trail=[];
+      try{ if(redis){ last=await redis.get("parkside:gps_last:"+device); const k="parkside:gps:"+device; count=await redis.llen(k);
+        const raw=await redis.lrange(k,-50,-1); trail=(raw||[]).map(x=>{ try{ return typeof x==="string"?JSON.parse(x):x; }catch{ return null; } }).filter(Boolean); } }catch(e){}
+      return res.status(200).json({ device, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, trail });
+    }
     if(action==="go" || ((!action) && req.query && req.query.c)){
       res.setHeader("Content-Type","text/html; charset=utf-8");
       const list=await getApprovals();
