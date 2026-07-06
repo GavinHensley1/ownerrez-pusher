@@ -1025,9 +1025,18 @@ async function reviseFromSms(req, item, extraInfo){
 
 // ===== Resort geofence (on-site detection for Victor) =====
 // Default center = midpoint of office (1110 Rocky Creek Way) and tepees (204 Big Sky Way); radius covers the property.
-const GEO_DEFAULT={ lat:35.768083, lon:-83.573789, radius_m:700 };
-async function getGeofence(){ try{ if(redis){ const g=await redis.get('parkside:geofence'); if(g && g.lat!=null && g.lon!=null && g.radius_m) return {lat:Number(g.lat),lon:Number(g.lon),radius_m:Number(g.radius_m)}; } }catch(e){} return GEO_DEFAULT; }
+// Named zones, most-specific FIRST; a point is classified to the first zone it falls inside, else 'off'.
+// 'resort' is the loose catch-all covering the whole property. Coords: office=1110 Rocky Creek Way,
+// tepees=204 Big Sky Way, maintenance=960 Little Cove Rd. Radii are first-pass — tune from real pins.
+const ZONES_DEFAULT=[
+  { name:'office',      lat:35.76542,   lon:-83.57381,   radius_m:60 },
+  { name:'tepees',      lat:35.7707455, lon:-83.5737728, radius_m:140 },
+  { name:'maintenance', lat:35.7648343, lon:-83.5715715, radius_m:70 },
+  { name:'resort',      lat:35.7678,    lon:-83.5730,    radius_m:800 }
+];
+async function getZones(){ try{ if(redis){ const z=await redis.get('parkside:zones'); if(Array.isArray(z)&&z.length) return z.map(x=>({name:String(x.name||'zone'),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)})).filter(x=>isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0); } }catch(e){} return ZONES_DEFAULT; }
 function haversineM(lat1,lon1,lat2,lon2){ const R=6371000, r=x=>x*Math.PI/180; const dLat=r(lat2-lat1), dLon=r(lon2-lon1); const a=Math.sin(dLat/2)**2 + Math.cos(r(lat1))*Math.cos(r(lat2))*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.min(1,Math.sqrt(a))); }
+function classifyPoint(lat,lon,zones){ let best=null; for(const z of zones){ const d=haversineM(lat,lon,z.lat,z.lon); if(d<=z.radius_m){ return {zone:z.name, dist_m:Math.round(d)}; } if(best===null||d<best.dist_m){ best={zone:'off', dist_m:Math.round(d), nearest:z.name}; } } return best||{zone:'off', dist_m:null}; }
 module.exports=async(req,res)=>{
   try{
     res.setHeader("Cache-Control","no-store, max-age=0, must-revalidate"); res.setHeader("CDN-Cache-Control","no-store"); res.setHeader("Vercel-CDN-Cache-Control","no-store");
@@ -1046,7 +1055,7 @@ module.exports=async(req,res)=>{
       if(isFinite(tsRaw)){ const d=new Date(tsRaw>1e12?tsRaw:tsRaw*1000); if(isFinite(d.getTime())) when=d; }
       const num=v=>(v!=null&&v!==""&&isFinite(Number(v)))?Number(v):null;
       const pt={ t:when.toISOString(), lat, lon, spd:num(q.speed), batt:num(q.batt!=null?q.batt:q.battery), acc:num(q.accuracy) };
-      try{ const gf=await getGeofence(); const d=haversineM(lat,lon,gf.lat,gf.lon); pt.dist_m=Math.round(d); pt.on_site=(d<=gf.radius_m); }catch(e){}
+      try{ const zones=await getZones(); const c=classifyPoint(lat,lon,zones); pt.zone=c.zone; pt.dist_m=c.dist_m; pt.on_site=(c.zone!=="off"); if(c.nearest) pt.nearest=c.nearest; }catch(e){}
       try{ if(redis){ const k="parkside:gps:"+device; await redis.rpush(k, JSON.stringify(pt)); await redis.ltrim(k,-5000,-1); await redis.set("parkside:gps_last:"+device, pt); } }
       catch(e){ res.status(500); return res.end("db error"); }
       res.status(200); return res.end("ok");
@@ -1059,19 +1068,19 @@ module.exports=async(req,res)=>{
       let last=null, count=0, trail=[];
       try{ if(redis){ last=await redis.get("parkside:gps_last:"+device); const k="parkside:gps:"+device; count=await redis.llen(k);
         const raw=await redis.lrange(k,-50,-1); trail=(raw||[]).map(x=>{ try{ return typeof x==="string"?JSON.parse(x):x; }catch{ return null; } }).filter(Boolean); } }catch(e){}
-      const gf=await getGeofence();
-      const onNow=(last&&typeof last.on_site==='boolean')?last.on_site:null;
-      const trailOn=trail.filter(x=>x&&x.on_site===true).length, trailOff=trail.filter(x=>x&&x.on_site===false).length;
-      return res.status(200).json({ device, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, on_site:onNow, geofence:gf, trailOnSite:trailOn, trailOffSite:trailOff, trail });
+      const zones=await getZones();
+      const zoneNow=(last&&last.zone)?last.zone:null;
+      const byZone={}; for(const x of trail){ if(!x) continue; const z=x.zone||'off'; byZone[z]=(byZone[z]||0)+1; }
+      return res.status(200).json({ device, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, zone:zoneNow, on_site:(zoneNow&&zoneNow!=='off'), zones, trailByZone:byZone, trail });
     }
-    // Get/set the resort geofence (password-gated). POST {lat,lon,radius_m} to tune.
-    if(action==="gps_geofence"){
+    // Get/set the named zones (password-gated). POST {zones:[{name,lat,lon,radius_m},...]} to replace them.
+    if(action==="gps_zones"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
-        const lat=Number(b.lat), lon=Number(b.lon), rad=Number(b.radius_m);
-        if(!isFinite(lat)||!isFinite(lon)||!isFinite(rad)||rad<=0) return res.status(400).json({error:"need numeric lat, lon, radius_m>0"});
-        const g={lat,lon,radius_m:Math.round(rad)}; if(redis) await redis.set('parkside:geofence',g); return res.status(200).json({ok:true, geofence:g}); }
-      return res.status(200).json({ geofence: await getGeofence() });
+        const arr=Array.isArray(b.zones)?b.zones:null; if(!arr) return res.status(400).json({error:"need zones:[{name,lat,lon,radius_m}]"});
+        const clean=arr.map(z=>({name:String(z.name||'zone').slice(0,32),lat:Number(z.lat),lon:Number(z.lon),radius_m:Math.round(Number(z.radius_m))})).filter(z=>isFinite(z.lat)&&isFinite(z.lon)&&z.radius_m>0);
+        if(!clean.length) return res.status(400).json({error:"no valid zones"}); if(redis) await redis.set('parkside:zones',clean); return res.status(200).json({ok:true, zones:clean}); }
+      return res.status(200).json({ zones: await getZones() });
     }
     if(action==="go" || ((!action) && req.query && req.query.c)){
       res.setHeader("Content-Type","text/html; charset=utf-8");
