@@ -154,12 +154,14 @@ function buildAgg(booked,start,days){
     for(const u of UNITS){ if(!unitAgg[u.orp][mk])unitAgg[u.orp][mk]=[{b:0,t:0},{b:0,t:0}];
       unitAgg[u.orp][mk][dt].t++; poolAgg[mk][dt].t++; if(booked.byUnit[u.orp][ds]){ unitAgg[u.orp][mk][dt].b++; poolAgg[mk][dt].b++; nb++; } }
     nightPool[ds]=nb/UNITS.length; }
-  // Per-unit orphan/short-gap detection: maximal runs of OPEN nights trapped (booked on BOTH sides) within the horizon.
+  // Per-unit orphan/short-gap detection: maximal runs of OPEN nights capped by a booking on the FAR side and
+  // by a booking OR today (start of horizon) on the NEAR side — today is a hard wall (past nights can't be sold).
   const gaps={}; for(const u of UNITS)gaps[u.orp]={};
   const dsAt=i=>{const d=new Date(s);d.setUTCDate(d.getUTCDate()+i);return d.toISOString().slice(0,10);};
   for(const u of UNITS){ const B=x=>!!booked.byUnit[u.orp][x]; let i=0;
     while(i<days){ if(B(dsAt(i))){i++;continue;} let j=i; const run=[]; while(j<days&&!B(dsAt(j))){run.push(dsAt(j));j++;}
-      const trapped = i>0 && B(dsAt(i-1)) && j<days && B(dsAt(j)); const runLen=run.length;
+      const nearWall=(i===0)||B(dsAt(i-1)); // today (i===0) counts as a wall, same as a preceding booking
+      const trapped = nearWall && j<days && B(dsAt(j)); const runLen=run.length;
       const hasWeekend=run.some(x=>WEEKEND_DAYS.includes(new Date(x+"T00:00:00Z").getUTCDay()));
       if(trapped && runLen<=3){ for(const x of run) gaps[u.orp][x]={runLen,hasWeekend}; }
       i=j; } }
