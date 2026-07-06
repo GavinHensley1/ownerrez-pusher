@@ -429,10 +429,24 @@ function isInternalArtifact(s){
   if(/^\s*(q\s*\d+|y|yes|n|no|ok|okay|send|approve|approved|reject|skip)\s*$/i.test(s)) return true; // bare command
   return false;
 }
+// Strip STRAY/unbalanced wrapping quotation marks the model occasionally leaves on a reply
+// (e.g. it wrapped the whole message in quotes and only the closing one survived: ...for you.")
+// Only removes a fully-wrapping matched pair or a single unbalanced edge quote; internal quotes are kept.
+function tidyQuotes(s){
+  s=String(s==null?"":s).trim();
+  for(const pr of [['\"','\"'],['\u201C','\u201D']]){ const o=pr[0], c=pr[1];
+    if(s.length>1 && s[0]===o && s[s.length-1]===c){ const inner=s.slice(1,-1);
+      if(inner.indexOf(o)===-1 && inner.indexOf(c)===-1){ s=inner.trim(); break; } } }
+  if(((s.match(/\"/g)||[]).length%2)===1 && s.endsWith('\"')) s=s.slice(0,-1).trim();   // lone unbalanced straight quote
+  if(s.endsWith('\u201D') && s.indexOf('\u201C')===-1) s=s.slice(0,-1).trim();          // lone curly close-quote
+  if(s.endsWith('\u2019') && s.indexOf('\u2018')===-1) s=s.slice(0,-1).trim();
+  return s.trim();
+}
 async function sendGuestReply(enabled, ids, body){
   const cfg=await getNotifyConfig(); const tokenLen=(cfg.ownerrezOauth||"").length;
   // ==== GUEST-SEND HARD GUARD (single choke-point) ====
   body=stripInternalArtifacts(body);
+  body=tidyQuotes(body);
   if(isInternalArtifact(body)){
     const rec={sent:false, blocked:true, staged:false, reason:"BLOCKED: body looked like an internal approval/label, not a guest reply \u2014 nothing was sent to the guest"};
     try{ if(cfg.smsUrl&&cfg.smsTo) await sendSmsGateway(cfg, "\u26A0\uFE0F Blocked a guest send that looked like an internal label/command. Nothing went to the guest."); }catch(e){}
@@ -902,7 +916,7 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
   try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:350,temperature:0.2,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return {known:"none", answer:holdingMessage(guestName), error:JSON.stringify(j).slice(0,200)};
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
-    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; let answer=scrubContact(String(o.answer||"").trim()); if(!answer) answer=holdingMessage(guestName); return {known, answer}; }
+    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; let answer=tidyQuotes(scrubContact(String(o.answer||"").trim())); if(!answer) answer=holdingMessage(guestName); return {known, answer}; }
     catch{ return {known:"none", answer:holdingMessage(guestName)}; }
   }catch(e){ return {known:"none", answer:holdingMessage(guestName), error:String(e.message||e)}; }
 }
