@@ -1023,6 +1023,11 @@ async function reviseFromSms(req, item, extraInfo){
   return {proposed, known};
 }
 
+// ===== Resort geofence (on-site detection for Victor) =====
+// Default center = midpoint of office (1110 Rocky Creek Way) and tepees (204 Big Sky Way); radius covers the property.
+const GEO_DEFAULT={ lat:35.768083, lon:-83.573789, radius_m:700 };
+async function getGeofence(){ try{ if(redis){ const g=await redis.get('parkside:geofence'); if(g && g.lat!=null && g.lon!=null && g.radius_m) return {lat:Number(g.lat),lon:Number(g.lon),radius_m:Number(g.radius_m)}; } }catch(e){} return GEO_DEFAULT; }
+function haversineM(lat1,lon1,lat2,lon2){ const R=6371000, r=x=>x*Math.PI/180; const dLat=r(lat2-lat1), dLon=r(lon2-lon1); const a=Math.sin(dLat/2)**2 + Math.cos(r(lat1))*Math.cos(r(lat2))*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.min(1,Math.sqrt(a))); }
 module.exports=async(req,res)=>{
   try{
     res.setHeader("Cache-Control","no-store, max-age=0, must-revalidate"); res.setHeader("CDN-Cache-Control","no-store"); res.setHeader("Vercel-CDN-Cache-Control","no-store");
@@ -1041,6 +1046,7 @@ module.exports=async(req,res)=>{
       if(isFinite(tsRaw)){ const d=new Date(tsRaw>1e12?tsRaw:tsRaw*1000); if(isFinite(d.getTime())) when=d; }
       const num=v=>(v!=null&&v!==""&&isFinite(Number(v)))?Number(v):null;
       const pt={ t:when.toISOString(), lat, lon, spd:num(q.speed), batt:num(q.batt!=null?q.batt:q.battery), acc:num(q.accuracy) };
+      try{ const gf=await getGeofence(); const d=haversineM(lat,lon,gf.lat,gf.lon); pt.dist_m=Math.round(d); pt.on_site=(d<=gf.radius_m); }catch(e){}
       try{ if(redis){ const k="parkside:gps:"+device; await redis.rpush(k, JSON.stringify(pt)); await redis.ltrim(k,-5000,-1); await redis.set("parkside:gps_last:"+device, pt); } }
       catch(e){ res.status(500); return res.end("db error"); }
       res.status(200); return res.end("ok");
@@ -1053,7 +1059,19 @@ module.exports=async(req,res)=>{
       let last=null, count=0, trail=[];
       try{ if(redis){ last=await redis.get("parkside:gps_last:"+device); const k="parkside:gps:"+device; count=await redis.llen(k);
         const raw=await redis.lrange(k,-50,-1); trail=(raw||[]).map(x=>{ try{ return typeof x==="string"?JSON.parse(x):x; }catch{ return null; } }).filter(Boolean); } }catch(e){}
-      return res.status(200).json({ device, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, trail });
+      const gf=await getGeofence();
+      const onNow=(last&&typeof last.on_site==='boolean')?last.on_site:null;
+      const trailOn=trail.filter(x=>x&&x.on_site===true).length, trailOff=trail.filter(x=>x&&x.on_site===false).length;
+      return res.status(200).json({ device, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, on_site:onNow, geofence:gf, trailOnSite:trailOn, trailOffSite:trailOff, trail });
+    }
+    // Get/set the resort geofence (password-gated). POST {lat,lon,radius_m} to tune.
+    if(action==="gps_geofence"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+        const lat=Number(b.lat), lon=Number(b.lon), rad=Number(b.radius_m);
+        if(!isFinite(lat)||!isFinite(lon)||!isFinite(rad)||rad<=0) return res.status(400).json({error:"need numeric lat, lon, radius_m>0"});
+        const g={lat,lon,radius_m:Math.round(rad)}; if(redis) await redis.set('parkside:geofence',g); return res.status(200).json({ok:true, geofence:g}); }
+      return res.status(200).json({ geofence: await getGeofence() });
     }
     if(action==="go" || ((!action) && req.query && req.query.c)){
       res.setHeader("Content-Type","text/html; charset=utf-8");
