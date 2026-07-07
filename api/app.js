@@ -1111,6 +1111,18 @@ module.exports=async(req,res)=>{
       devices.sort(function(a,b){ return String(b.lastTs||"").localeCompare(String(a.lastTs||"")); });
       return res.status(200).json({devices});
     }
+    // WebWork API probe (Gavin-gated) — pass ?path=/workspaces etc. Returns raw JSON to validate token + learn shapes.
+    if(action==="webwork_raw"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const tok=String(process.env.WEBWORK_TOKEN||""); if(!tok) return res.status(503).json({error:"WEBWORK_TOKEN not set"});
+      const base="https://api.webwork-tracker.com/api/v2";
+      const path=String((req.query&&req.query.path)||"/workspaces");
+      const qs=String((req.query&&req.query.qs)||"");
+      try{ const r=await fetch(base+path+(qs?("?"+qs):""), {headers:{Authorization:"Bearer "+tok, Accept:"application/json"}});
+        const t=await r.text(); let j=null; try{ j=JSON.parse(t); }catch(e){}
+        return res.status(200).json({status:r.status, url:base+path+(qs?("?"+qs):""), json:j, raw:(j?null:t.slice(0,1500))}); }
+      catch(e){ return res.status(200).json({error:String(e.message||e)}); }
+    }
     if(action==="gps_zones"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x") && (req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
       if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
