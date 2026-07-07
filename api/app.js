@@ -1989,17 +1989,49 @@ module.exports=async(req,res)=>{
     // PUBLIC provider webhook: Victor replies YES/NO via text. Provider-agnostic body parse.
     // ===== StayDeck phone intake: Victor calls the number once/day to report; Twilio records + transcribes =====
     if(action==="voice"){
-      // Twilio Voice webhook ("A call comes in"). Returns TwiML that records the caller + sends the transcript back.
+      // Twilio Voice webhook ("A call comes in"). RECORD ONLY (no paid Twilio transcription); we transcribe the
+      // recording ourselves for free via Groq Whisper in the voice_recording callback.
       const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
       const tokQ=(req.query&&req.query.token)?("&amp;token="+encodeURIComponent(req.query.token)):"";
-      const cb=origin+"/api/app?action=voice_transcription"+tokQ;
+      const cb=origin+"/api/app?action=voice_recording"+tokQ;
       const xml='<?xml version="1.0" encoding="UTF-8"?>'
         +'<Response>'
         +'<Say voice="alice">Hi, you have reached Parkside Tepees. Please leave your daily update after the tone, then hang up when you are done.</Say>'
-        +'<Record maxLength="120" playBeep="true" transcribe="true" transcribeCallback="'+cb+'" />'
+        +'<Record maxLength="120" playBeep="true" recordingStatusCallback="'+cb+'" recordingStatusCallbackEvent="completed" />'
         +'<Say voice="alice">Thanks. Goodbye.</Say>'
         +'</Response>';
       res.setHeader("Content-Type","text/xml"); res.status(200); return res.end(xml);
+    }
+    if(action==="voice_recording"){
+      // Twilio recording-complete callback. Fetch the audio and transcribe it FREE via Groq Whisper (no Twilio
+      // transcription charge). Stores transcript to the call log and, for Victor, into the daily scorecard report.
+      const cfg=await getNotifyConfig();
+      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+      const tok=(req.query&&req.query.token)||""; if(cfg.secret && tok && tok!==cfg.secret){ res.status(200); return res.end(""); }
+      const from=String(b.From||b.from||"").trim();
+      const recUrl=String(b.RecordingUrl||b.recording_url||"").trim();
+      const date=etDate(new Date().toISOString());
+      const vn=cfg.smsTo||victorNumber();
+      const isVictor=!!(vn && from && from.replace(/\D/g,"").slice(-10)===vn.replace(/\D/g,"").slice(-10));
+      let transcript="";
+      try{
+        const groqKey=process.env.GROQ_API_KEY;
+        const twSid=process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID;
+        const twTok=process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN;
+        if(groqKey && twSid && twTok && recUrl){
+          const audioRes=await fetch(recUrl+".mp3",{headers:{Authorization:"Basic "+Buffer.from(twSid+":"+twTok).toString("base64")}});
+          const audioBuf=await audioRes.arrayBuffer();
+          const fd=new FormData(); fd.append("file", new Blob([audioBuf],{type:"audio/mpeg"}), "call.mp3"); fd.append("model","whisper-large-v3"); fd.append("response_format","json");
+          const gr=await fetch("https://api.groq.com/openai/v1/audio/transcriptions",{method:"POST",headers:{Authorization:"Bearer "+groqKey},body:fd});
+          const gj=await gr.json(); transcript=(gj&&gj.text)?String(gj.text).trim():"";
+        }
+      }catch(e){}
+      try{ if(redis){
+        const entry={ from, date, text:transcript, recordingUrl:recUrl, status:(transcript?"transcribed":"recorded"), isVictor, at:new Date().toISOString() };
+        const log=(await redis.get("parkside:calllog"))||[]; log.unshift(entry); await redis.set("parkside:calllog", log.slice(0,500));
+        if(isVictor && transcript){ const prev=(await redis.get("parkside:report:"+date))||""; const merged=(prev && prev.indexOf(transcript)===-1)?(prev+"\n\n[call] "+transcript):transcript; await redis.set("parkside:report:"+date, merged); }
+      } }catch(e){}
+      res.setHeader("Content-Type","text/xml"); res.status(200); return res.end('<?xml version="1.0" encoding="UTF-8"?><Response/>');
     }
     if(action==="voice_transcription"){
       // Twilio transcription callback (POST urlencoded): TranscriptionText, RecordingUrl, From, TranscriptionStatus.
