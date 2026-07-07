@@ -331,6 +331,19 @@
       <h2>Zone summary (recent trail)</h2>
       <div id="monZones" class="legend"></div>
     </div>
+    <div class="card">
+      <h2>📋 Daily scorecard <span class="muted" style="font-weight:400;text-transform:none">— hours + truthfulness for the selected device &amp; day</span></h2>
+      <div id="scHours" class="legend" style="margin-bottom:6px">…</div>
+      <div id="scZones" class="legend" style="margin-bottom:12px"></div>
+      <label class="muted" style="font-size:12px;display:block;margin-bottom:4px">What Victor said he did (self-report) — the phone intake will fill this automatically later:</label>
+      <textarea id="scReport" class="full" style="min-height:70px" placeholder="Type or paste his report for this day…"></textarea>
+      <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;align-items:center">
+        <button onclick="saveReport()">Save report</button>
+        <button onclick="runScore()">⚖️ Score this day</button>
+        <span id="scStatus" class="muted" style="align-self:center"></span>
+      </div>
+      <div id="scResult" style="margin-top:12px"></div>
+    </div>
     <div class="card" style="border-color:#3a2a1a">
       <h2>🎚 Pricing tuning <span class="muted" style="font-weight:400;text-transform:none">— moved here from the main tab; changes pricing (Gavin-only)</span></h2>
     </div>
@@ -756,7 +769,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -766,10 +779,10 @@ async function populateDays(){ try{ const dev=(document.getElementById('monDevic
   const sel=document.getElementById('monDate'); if(!sel) return; const days=j.days||[];
   sel.innerHTML='<option value="">Today (live)</option>'+days.map(function(d){return '<option value="'+d+'">'+d+'</option>';}).join('');
 }catch(e){} }
-async function onDeviceChange(){ await populateDays(); loadMonitor(); }
+async function onDeviceChange(){ await populateDays(); loadMonitor(); loadScorecard(); }
 function onDateChange(){ const d=(document.getElementById('monDate')||{}).value; const auto=document.getElementById('monAuto');
   if(d){ if(auto){auto.checked=false; auto.disabled=true;} if(MON_TIMER){clearInterval(MON_TIMER); MON_TIMER=null;} }
-  else { if(auto){auto.disabled=false;} monAutoToggle(); } loadMonitor(); }
+  else { if(auto){auto.disabled=false;} monAutoToggle(); } loadMonitor(); loadScorecard(); }
 async function populateDevices(){
   try{ const r=await fetch(api('gps_devices')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
     const sel=document.getElementById('monDevice'); if(!sel) return; const cur=sel.value;
@@ -778,6 +791,33 @@ async function populateDevices(){
     sel.innerHTML=all.map(function(d){ return '<option value="'+d+'">'+d+(devs.indexOf(d)===-1?' (no pings)':'')+'</option>'; }).join('');
     if(j.devices&&j.devices.length){ sel.value=j.devices[0].device; } else if(all.indexOf(cur)!==-1){ sel.value=cur; }
   }catch(e){}
+}
+async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const date=(document.getElementById('monDate')||{}).value||'';
+  try{ const r=await fetch(api('scorecard')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
+    const h=j.hours||{}; document.getElementById('scHours').innerHTML = h.available ? ('<b>Hours worked (WebWork):</b> '+h.hours+'h &middot; '+h.active_pct+'% active ('+h.active_min+' of '+h.tracked_min+' min)') : ('<b>Hours worked:</b> <span class="muted">no WebWork data yet'+(h.error?(' ('+esc(h.error)+')'):'')+'</span>');
+    const z=j.zones||{}; const bz=z.byZoneMin||{};
+    document.getElementById('scZones').innerHTML = '<b>On-site:</b> '+(z.on_site_min||0)+' of '+(z.total_min||0)+' tracked min &nbsp;&middot;&nbsp; office '+(bz.office||0)+' &middot; tepees '+(bz.tepees||0)+' &middot; maintenance '+(bz.maintenance||0)+' &middot; resort '+(bz.resort||0)+' &middot; off '+(bz.off||0)+' (min)';
+    const ta=document.getElementById('scReport'); if(document.activeElement!==ta) ta.value=j.report||'';
+    if(j.score) renderScore(j.score); else document.getElementById('scResult').innerHTML='';
+  }catch(e){ const el=document.getElementById('scHours'); if(el) el.textContent='Error: '+e.message; }
+}
+async function saveReport(){ const date=(document.getElementById('monDate')||{}).value||''; const st=document.getElementById('scStatus'); st.textContent='Saving…';
+  try{ const r=await fetch(api('scorecard_report')+(date?('&date='+encodeURIComponent(date)):''),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({report:document.getElementById('scReport').value})}); const j=await r.json(); st.textContent=j.ok?'Saved ✓':'Save failed'; }catch(e){ st.textContent='Error: '+e.message; } }
+async function runScore(){ const date=(document.getElementById('monDate')||{}).value||''; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const st=document.getElementById('scStatus'); st.textContent='Saving report + scoring…';
+  try{ await fetch(api('scorecard_report')+(date?('&date='+encodeURIComponent(date)):''),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({report:document.getElementById('scReport').value})});
+    const r=await fetch(api('score_day')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
+    if(j.error){ st.textContent=j.error; return; } st.textContent='Scored ✓'; renderScore(j);
+  }catch(e){ st.textContent='Error: '+e.message; } }
+function renderScore(sc){ const el=document.getElementById('scResult'); if(!el) return; if(!sc||sc.truth_score==null){ el.innerHTML=''; return; }
+  const ts=Math.max(0,Math.min(100,Number(sc.truth_score)||0)); const col= ts>=75?'#4ade80':ts>=45?'#f4b942':'#f87171';
+  const list=function(arr,c){ return (arr&&arr.length)?('<ul style="margin:4px 0 8px 18px;color:'+c+'">'+arr.map(function(x){return '<li>'+esc(x)+'</li>';}).join('')+'</ul>'):''; };
+  el.innerHTML='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">'
+    +'<div style="font-size:34px;font-weight:800;color:'+col+'">'+ts+'<span style="font-size:16px;color:var(--mut)">/100</span></div>'
+    +'<div><div style="font-weight:600">Truthfulness score</div><div class="muted" style="font-size:12px">'+esc(sc.summary||'')+'</div></div></div>'
+    +(sc.hours_worked!=null?('<div class="legend" style="margin-top:8px"><b>Hours worked (assessed):</b> '+esc(String(sc.hours_worked))+'h</div>'):'')
+    +(sc.matches&&sc.matches.length?('<div style="margin-top:8px;font-size:13px"><b style="color:#4ade80">✓ Matches</b>'+list(sc.matches,'#a7d9b5')):'')
+    +(sc.discrepancies&&sc.discrepancies.length?('<div style="margin-top:4px;font-size:13px"><b style="color:#f87171">⚠ Discrepancies</b>'+list(sc.discrepancies,'#e6a5a5')):'')
+    +(sc.scored_at?('<div class="muted" style="font-size:11px;margin-top:6px">Scored '+fmtWhen(sc.scored_at)+'</div>'):'');
 }
 function initMonMap(){ if(MON_MAP) return;
   MON_MAP=L.map('monMap',{zoomControl:true}).setView([35.7678,-83.5730],15);
