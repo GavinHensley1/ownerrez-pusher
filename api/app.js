@@ -1029,11 +1029,12 @@ async function reviseFromSms(req, item, extraInfo){
 // 'resort' is the loose catch-all covering the whole property. Coords: office=1110 Rocky Creek Way,
 // tepees=204 Big Sky Way, maintenance=960 Little Cove Rd. Radii are first-pass — tune from real pins.
 const ZONES_DEFAULT=[
-  { name:'office',      lat:35.76542,   lon:-83.57381,   radius_m:60 },
-  { name:'tepees',      lat:35.7707455, lon:-83.5737728, radius_m:140 },
-  { name:'maintenance', lat:35.7648343, lon:-83.5715715, radius_m:70 },
+  { name:'office',      lat:35.76582,   lon:-83.57381,   radius_m:60 },
+  { name:'tepees',      lat:35.7711455, lon:-83.5737728, radius_m:140 },
+  { name:'maintenance', lat:35.7652343, lon:-83.5715715, radius_m:70 },
   { name:'resort',      lat:35.7678,    lon:-83.5730,    radius_m:800 }
 ];
+function etDate(iso){ try{ return new Date(iso).toLocaleDateString('en-CA',{timeZone:'America/New_York'}); }catch(e){ return new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'}); } }
 async function getZones(){ try{ if(redis){ const z=await redis.get('parkside:zones'); if(Array.isArray(z)&&z.length) return z.map(x=>({name:String(x.name||'zone'),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)})).filter(x=>isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0); } }catch(e){} return ZONES_DEFAULT; }
 function haversineM(lat1,lon1,lat2,lon2){ const R=6371000, r=x=>x*Math.PI/180; const dLat=r(lat2-lat1), dLon=r(lon2-lon1); const a=Math.sin(dLat/2)**2 + Math.cos(r(lat1))*Math.cos(r(lat2))*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.min(1,Math.sqrt(a))); }
 function classifyPoint(lat,lon,zones){ let best=null; for(const z of zones){ const d=haversineM(lat,lon,z.lat,z.lon); if(d<=z.radius_m){ return {zone:z.name, dist_m:Math.round(d)}; } if(best===null||d<best.dist_m){ best={zone:'off', dist_m:Math.round(d), nearest:z.name}; } } return best||{zone:'off', dist_m:null}; }
@@ -1056,7 +1057,12 @@ module.exports=async(req,res)=>{
       const num=v=>(v!=null&&v!==""&&isFinite(Number(v)))?Number(v):null;
       const pt={ t:when.toISOString(), lat, lon, spd:num(q.speed), batt:num(q.batt!=null?q.batt:q.battery), acc:num(q.accuracy) };
       try{ const zones=await getZones(); const c=classifyPoint(lat,lon,zones); pt.zone=c.zone; pt.dist_m=c.dist_m; pt.on_site=(c.zone!=="off"); if(c.nearest) pt.nearest=c.nearest; }catch(e){}
-      try{ if(redis){ const k="parkside:gps:"+device; await redis.rpush(k, JSON.stringify(pt)); await redis.ltrim(k,-5000,-1); await redis.set("parkside:gps_last:"+device, pt); } }
+      try{ if(redis){ const pj=JSON.stringify(pt);
+        const dstr=etDate(pt.t); const dk="parkside:gpsday:"+device+":"+dstr;
+        await redis.rpush(dk, pj); await redis.expire(dk, 60*60*24*120);            // full day history, kept ~120 days
+        try{ await redis.zadd("parkside:gpsdays:"+device, {score:Number(dstr.replace(/-/g,"")), member:dstr}); }catch(e){} // index of days that have data
+        const k="parkside:gps:"+device; await redis.rpush(k, pj); await redis.ltrim(k,-500,-1);  // rolling recent for live view
+        await redis.set("parkside:gps_last:"+device, pt); } }
       catch(e){ res.status(500); return res.end("db error"); }
       res.status(200); return res.end("ok");
     }
@@ -1070,16 +1076,37 @@ module.exports=async(req,res)=>{
     if(action==="gps_status"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
       const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const date=String((req.query&&req.query.date)||"").trim();
       const sec=String(process.env.GPS_INGEST_SECRET||""); const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
+      const _parse=raw=>(raw||[]).map(x=>{ try{ return typeof x==="string"?JSON.parse(x):x; }catch{ return null; } }).filter(Boolean);
       let last=null, count=0, trail=[];
-      try{ if(redis){ last=await redis.get("parkside:gps_last:"+device); const k="parkside:gps:"+device; count=await redis.llen(k);
-        const raw=await redis.lrange(k,-300,-1); trail=(raw||[]).map(x=>{ try{ return typeof x==="string"?JSON.parse(x):x; }catch{ return null; } }).filter(Boolean); } }catch(e){}
+      try{ if(redis){
+        if(date){ const dk="parkside:gpsday:"+device+":"+date; trail=_parse(await redis.lrange(dk,0,-1)); count=trail.length; last=trail.length?trail[trail.length-1]:null; }
+        else { last=await redis.get("parkside:gps_last:"+device); const k="parkside:gps:"+device; count=await redis.llen(k); trail=_parse(await redis.lrange(k,-300,-1)); }
+      } }catch(e){}
       const zones=await getZones();
       const zoneNow=(last&&last.zone)?last.zone:null;
       const byZone={}; for(const x of trail){ if(!x) continue; const z=x.zone||'off'; byZone[z]=(byZone[z]||0)+1; }
-      return res.status(200).json({ device, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, zone:zoneNow, on_site:(zoneNow&&zoneNow!=='off'), zones, trailByZone:byZone, trail });
+      return res.status(200).json({ device, date:date||null, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, zone:zoneNow, on_site:(zoneNow&&zoneNow!=='off'), zones, trailByZone:byZone, trail });
     }
     // Get/set the named zones (password-gated). POST {zones:[{name,lat,lon,radius_m},...]} to replace them.
+    // List days that have GPS history for a device (Gavin-gated) — powers the date scrubber.
+    if(action==="gps_days"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      let days=[]; try{ if(redis){ const z=await redis.zrange("parkside:gpsdays:"+device,0,-1); days=(z||[]).slice().reverse(); } }catch(e){}
+      return res.status(200).json({device, days});
+    }
+    // List devices that have reported GPS (Gavin-gated) so the UI can auto-discover the phone.
+    if(action==="gps_devices"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let devices=[];
+      try{ if(redis){ const keys=await redis.keys("parkside:gps_last:*");
+        for(const k of (keys||[])){ const dev=k.replace("parkside:gps_last:",""); const last=await redis.get(k); let count=0; try{ count=await redis.llen("parkside:gps:"+dev); }catch(e){}
+          devices.push({device:dev, count, lastZone:(last&&last.zone)||null, lastTs:(last&&last.t)||null}); } } }catch(e){}
+      devices.sort(function(a,b){ return String(b.lastTs||"").localeCompare(String(a.lastTs||"")); });
+      return res.status(200).json({devices});
+    }
     if(action==="gps_zones"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x") && (req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
       if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};

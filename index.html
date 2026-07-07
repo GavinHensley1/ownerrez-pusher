@@ -328,7 +328,8 @@
   <div id="gavinBody" style="display:none">
     <div class="card">
       <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
-        <div><b>Device</b> <select id="monDevice" onchange="loadMonitor()" style="width:auto"><option value="victor">victor</option><option value="test">test</option></select></div>
+        <div><b>Device</b> <select id="monDevice" onchange="onDeviceChange()" style="width:auto"><option value="victor">victor</option><option value="test">test</option></select></div>
+        <div><b>Day</b> <select id="monDate" onchange="onDateChange()" style="width:auto"><option value="">Today (live)</option></select></div>
         <div id="monNow" class="legend" style="margin:0">Loading…</div>
         <span style="flex:1"></span>
         <label class="muted" style="font-size:12px"><input type="checkbox" id="monAuto" checked onchange="monAutoToggle()"> auto-refresh</label>
@@ -753,10 +754,28 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); loadMonitor(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
+}
+async function populateDays(){ try{ const dev=(document.getElementById('monDevice')||{}).value||'victor';
+  const r=await fetch(api('gps_days')+'&id='+encodeURIComponent(dev)+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
+  const sel=document.getElementById('monDate'); if(!sel) return; const days=j.days||[];
+  sel.innerHTML='<option value="">Today (live)</option>'+days.map(function(d){return '<option value="'+d+'">'+d+'</option>';}).join('');
+}catch(e){} }
+async function onDeviceChange(){ await populateDays(); loadMonitor(); }
+function onDateChange(){ const d=(document.getElementById('monDate')||{}).value; const auto=document.getElementById('monAuto');
+  if(d){ if(auto){auto.checked=false; auto.disabled=true;} if(MON_TIMER){clearInterval(MON_TIMER); MON_TIMER=null;} }
+  else { if(auto){auto.disabled=false;} monAutoToggle(); } loadMonitor(); }
+async function populateDevices(){
+  try{ const r=await fetch(api('gps_devices')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
+    const sel=document.getElementById('monDevice'); if(!sel) return; const cur=sel.value;
+    const devs=(j.devices||[]).map(function(d){return d.device;});
+    const all=Array.from(new Set(devs.concat(['victor','test'])));
+    sel.innerHTML=all.map(function(d){ return '<option value="'+d+'">'+d+(devs.indexOf(d)===-1?' (no pings)':'')+'</option>'; }).join('');
+    if(j.devices&&j.devices.length){ sel.value=j.devices[0].device; } else if(all.indexOf(cur)!==-1){ sel.value=cur; }
+  }catch(e){}
 }
 function initMonMap(){ if(MON_MAP) return;
   MON_MAP=L.map('monMap',{zoomControl:true}).setView([35.7678,-83.5730],15);
@@ -766,8 +785,8 @@ function initMonMap(){ if(MON_MAP) return;
 }
 function monAutoToggle(){ const el=document.getElementById('monAuto'); const on=el?el.checked:true; if(MON_TIMER){clearInterval(MON_TIMER);MON_TIMER=null;} if(on&&GPW) MON_TIMER=setInterval(loadMonitor,45000); }
 function fmtWhen(t){ try{ return new Date(t).toLocaleString(); }catch(e){ return t||''; } }
-async function loadMonitor(){ if(!GPW) return; const dev=(document.getElementById('monDevice')||{}).value||'victor';
-  try{ const r=await fetch(api('gps_status')+'&id='+encodeURIComponent(dev)+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}});
+async function loadMonitor(){ if(!GPW) return; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const date=(document.getElementById('monDate')||{}).value||'';
+  try{ const r=await fetch(api('gps_status')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}});
     if(r.status===401){ document.getElementById('monNow').textContent='Session expired — re-enter Gavin password.'; return; }
     const j=await r.json(); renderMonitor(j); }
   catch(e){ document.getElementById('monNow').textContent='Error: '+e.message; }
@@ -783,7 +802,8 @@ function renderMonitor(j){ if(!MON_MAP) initMonMap(); MON_LAYERS.clearLayers();
   const last=j.last; if(last&&isFinite(last.lat)){ const c=ZONE_COLORS[last.zone||'off']||'#f87171';
     L.circleMarker([last.lat,last.lon],{radius:8,color:'#fff',fillColor:c,fillOpacity:1,weight:2}).addTo(MON_LAYERS).bindPopup('LATEST · '+(last.zone||'off')+' · '+fmtWhen(last.t)).openPopup(); MON_MAP.panTo([last.lat,last.lon]); }
   const zoneNow=j.zone||(last&&last.zone)||null;
-  document.getElementById('monNow').innerHTML = last ? ('Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> · '+fmtWhen(last.t)+' · '+(j.count||0)+' points') : 'No pings yet for this device.';
+  if(j.date){ document.getElementById('monNow').innerHTML = last ? ('<b>'+j.date+'</b> — '+(j.count||0)+' points · ended in <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> at '+fmtWhen(last.t)) : ('<b>'+j.date+'</b> — no points that day.'); }
+  else { document.getElementById('monNow').innerHTML = last ? ('Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> · '+fmtWhen(last.t)+' · '+(j.count||0)+' points') : 'No pings yet for this device.'; }
   const by=j.trailByZone||{}; const order=['office','tepees','maintenance','resort','off']; let h='';
   for(const z of order){ if(by[z]) h+='<span class="pill" style="background:'+(ZONE_COLORS[z]||'#333')+';color:#0b1220;margin-right:8px">'+z+': '+by[z]+'</span>'; }
   document.getElementById('monZones').innerHTML = h||'<span class="muted">No recent points.</span>';
