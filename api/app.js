@@ -274,7 +274,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
         gsNext[gkey]=steppedDemand; // gsState tracks the eased DEMAND mult only (perishable discounts never corrupt it)
         easedDemand=(mode==="step" && farW<0.5)?steppedDemand:desiredC; // far out (farW>=0.5): apply the stable far-out demand directly, no glide lag-swings
         let mult=easedDemand*(1-lm); // last-minute — immediate
-        if(gapApplied){ mult=mult*(1-gapDisc); minNights=gapTier; } // gap STACKS on top — also immediate
+        if(gapApplied){ mult=mult*(1-gapDisc); } // gap STACKS on top — also immediate (min-stay handled separately, below)
         applied=Math.max(floorMult,Math.min(ceilMult,mult));
         amount=Math.max(K.floor,Math.min(ceil,Math.round(base*applied)));
       }
@@ -282,6 +282,10 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
       // panel calendar, the breakdown, and the OwnerRez push all show the same capped price. Manual overrides untouched.
       let gap1Capped=false; const preCapAmount=amount;
       if(!overridden && gapTier===1 && amount>GAP1_CAP){ amount=GAP1_CAP; gap1Capped=true; }
+      // Availability min-stay (decoupled from gap DISCOUNTING): an isolated single-night orphan gap (gapTier===1)
+      // drops to a 1-night minimum so it can actually be booked; every other night keeps the 2-night minimum
+      // (OwnerRez property default + the gap-reset pass restores 2 on nights that stop being single-night gaps).
+      if(!overridden) minNights = (gapTier===1) ? 1 : null;
       out.push({property_id:u.orp,unit:u.name,date:ds,amount,currency:"USD",base,overridden,peak,minNights,gapApplied,gap1Capped,preCapAmount:Number(preCapAmount),
         gapTier,gapHasWeekend:gapHasWe,gapDisc:Number(gapDisc.toFixed(3)),effDisc:Number(effDisc.toFixed(3)),discSource,
         poolOcc:poolOcc==null?null:Number(poolOcc.toFixed(3)),unitOcc:unitOcc==null?null:Number(unitOcc.toFixed(3)),ref:Number(ref.toFixed(3)),
@@ -1374,7 +1378,7 @@ module.exports=async(req,res)=>{
         if(redis){ // min-stay bookkeeping: set min on active gap nights; restore default on nights that stopped being gaps
           const prevSet=(await redis.get("parkside:gapmin"))||[]; const nowSet=[]; const rIx={};
           for(const r of rates) rIx[r.property_id+"|"+r.date]=r;
-          for(const r of rates){ if(r.gapApplied && r.minNights!=null) nowSet.push(r.property_id+"|"+r.date); }
+          for(const r of rates){ if(r.minNights===1) nowSet.push(r.property_id+"|"+r.date); }
           const nowKeys=new Set(nowSet);
           for(const k of prevSet){ if(!nowKeys.has(k)){ const r=rIx[k]; if(r && !r.overridden){ r.minNights=GAP_RESET_MIN; r._gapReset=true; } } }
           await redis.set("parkside:gapmin",nowSet);
@@ -1468,7 +1472,7 @@ module.exports=async(req,res)=>{
         const lmTxt=live.lm>0?('lead '+live.lead+'d → proximity ('+K.lmWindow+'−'+live.lead+')/'+K.lmWindow+'^'+K.lmSteep+' × max '+Math.round(K.lmMax*100)+'%  →  ×(1 − '+live.lm.toFixed(3)+') = −'+Math.round(live.lm*100)+'% (perishable, still open)'):('lead '+live.lead+'d, outside '+K.lmWindow+'d window  →  ×1.00 (none)');
         if(isGapActive){
           steps.push({label:'Last-minute', math:lmTxt, ...eff(base*(live.easedDemandMult!=null?live.easedDemandMult:live.desiredBaseMult)*(1-(live.lm||0)))});
-          steps.push({label:'Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (wknd × '+K.gapWeekend+')':' (mid-week)')+'  →  ×(1 − '+withGap.gapDisc.toFixed(3)+') = −'+Math.round(withGap.gapDisc*100)+'%  (STACKS with last-minute)  ·  min-stay '+withGap.minNights, ...eff(live.gap1Capped?live.preCapAmount:live.amount)});
+          steps.push({label:'Gap night', math:withGap.gapTier+'-night gap'+(withGap.gapHasWeekend?' (wknd × '+K.gapWeekend+')':' (mid-week)')+'  →  ×(1 − '+withGap.gapDisc.toFixed(3)+') = −'+Math.round(withGap.gapDisc*100)+'%  (STACKS with last-minute)  ·  min-stay '+(withGap.minNights||GAP_RESET_MIN), ...eff(live.gap1Capped?live.preCapAmount:live.amount)});
         } else {
           steps.push({label:'Last-minute', math:lmTxt, ...eff(live.amount)});
           steps.push({label:'Gap night', math:(gapOn?'no orphan gap on this night':'gap discounting OFF')+(withGap.gapTier>0?('  — if active: '+withGap.gapTier+'-night −'+Math.round(withGap.gapDisc*100)+'%'):'')+'  →  ×1.00 (none)', ...eff(run)});
