@@ -378,6 +378,14 @@
       <div class="legend" style="margin-bottom:6px">Receipts texted via MMS to the StayDeck number will land here automatically once phone intake is live.</div>
       <div id="fraudReceipts"></div>
     </div>
+    <div class="card" id="callsCard">
+      <h2>📞 Daily call transcripts <span class="muted" style="font-weight:400;text-transform:none">— Victor’s phoned-in updates; also feeds the scorecard</span></h2>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+        <button class="ghost" onclick="loadCalls()">Refresh</button>
+        <span id="callsStatus" class="muted"></span>
+      </div>
+      <div id="callsList" class="legend">…</div>
+    </div>
     <div class="card" style="border-color:#3a2a1a">
       <h2>🎚 Pricing tuning <span class="muted" style="font-weight:400;text-transform:none">— moved here from the main tab; changes pricing (Gavin-only)</span></h2>
     </div>
@@ -817,7 +825,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCalls(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1132,6 +1140,22 @@ async function fraudRunCheck(){ const st=document.getElementById('frChkStatus');
 async function fraudAddReceipt(){ const vendor=document.getElementById('frRcVendor').value; const amount=document.getElementById('frRcAmount').value; const date=document.getElementById('frRcDate').value; const note=document.getElementById('frRcNote').value; if(!vendor&&!amount) return; await fraudPost({op:'addReceipt',vendor,amount,date,note,source:'manual'}); ['frRcVendor','frRcAmount','frRcDate','frRcNote'].forEach(id=>document.getElementById(id).value=''); }
 async function fraudDeleteReceipt(id){ if(!confirm('Delete this receipt?')) return; await fraudPost({op:'deleteReceipt',id}); }
 async function fraudResolve(id){ await fraudPost({op:'resolveAlert',id}); }
+// ===== Daily call transcripts (Gavin-only) =====
+async function loadCalls(){
+  if(!GPW) return;
+  try{ const r=await fetch(api('calls_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; const j=await r.json(); renderCalls(j.calls||[]); }catch(e){}
+}
+function renderCalls(calls){
+  const el=document.getElementById('callsList'); if(!el) return;
+  if(!calls.length){ el.innerHTML='<span class="muted">No calls logged yet. Victor\u2019s daily call transcript will appear here once phone intake is wired.</span>'; return; }
+  el.innerHTML=calls.slice(0,50).map(function(c){
+    var who=c.isVictor?'<b style="color:#4ade80">Victor</b>':('<span class="muted">'+frEsc(c.from||'unknown')+'</span>');
+    var when=frEsc((c.at||'').slice(0,16).replace('T',' '));
+    var txt=frEsc(c.text||'(no transcript captured)');
+    var rec=c.recordingUrl?(' · <a href="'+frEsc(c.recordingUrl)+'" target="_blank">audio</a>'):'';
+    return '<div style="border-bottom:1px solid #22303c;padding:8px 0"><div style="margin-bottom:2px">'+who+' <span class="muted">'+frEsc(c.date||'')+' '+when+'</span>'+rec+'</div><div>'+txt+'</div></div>';
+  }).join('');
+}
 // ===== Bonus tab (visible to Victor later; no Gavin login) =====
 function loadBonus(){ /* v1 placeholder — weekly score/bonus surfaces here once the formula is set */ }
 </script></body></html>
