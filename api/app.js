@@ -1049,13 +1049,17 @@ module.exports=async(req,res)=>{
       const need=String(process.env.GPS_INGEST_SECRET||"");
       if(!need){ res.status(503); return res.end("gps secret not configured"); }
       if(String((req.query&&req.query.secret)||"")!==need){ res.status(401); return res.end("unauthorized"); }
-      const q=req.query||{}; const lat=parseFloat(q.lat), lon=parseFloat(q.lon);
+      // Read params from BOTH the URL query AND the POST body (Traccar iOS puts them in the body).
+      const q=req.query||{};
+      let bd=req.body; if(typeof bd==="string"){ try{ bd=JSON.parse(bd); }catch(e){ try{ bd=Object.fromEntries(new URLSearchParams(bd)); }catch(e2){ bd={}; } } } if(!bd||typeof bd!=="object") bd={};
+      const g=function(){ for(let i=0;i<arguments.length;i++){ const k=arguments[i]; if(q[k]!=null&&q[k]!=="") return q[k]; if(bd[k]!=null&&bd[k]!=="") return bd[k]; } return undefined; };
+      const lat=parseFloat(g("lat","latitude")), lon=parseFloat(g("lon","longitude"));
       if(!isFinite(lat)||!isFinite(lon)){ res.status(400); return res.end("missing coords"); }
-      const device=String(q.id||q.deviceid||q.device_id||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
-      let when=new Date(); const tsRaw=q.timestamp!=null?Number(q.timestamp):NaN;
+      const device=String(g("id","deviceid","device_id")||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      let when=new Date(); const _ts=g("timestamp"); const tsRaw=_ts!=null?Number(_ts):NaN;
       if(isFinite(tsRaw)){ const d=new Date(tsRaw>1e12?tsRaw:tsRaw*1000); if(isFinite(d.getTime())) when=d; }
       const num=v=>(v!=null&&v!==""&&isFinite(Number(v)))?Number(v):null;
-      const pt={ t:when.toISOString(), lat, lon, spd:num(q.speed), batt:num(q.batt!=null?q.batt:q.battery), acc:num(q.accuracy) };
+      const pt={ t:when.toISOString(), lat, lon, spd:num(g("speed")), batt:num(g("batt")!=null?g("batt"):g("battery")), acc:num(g("accuracy")) };
       try{ const zones=await getZones(); const c=classifyPoint(lat,lon,zones); pt.zone=c.zone; pt.dist_m=c.dist_m; pt.on_site=(c.zone!=="off"); if(c.nearest) pt.nearest=c.nearest; }catch(e){}
       try{ if(redis){ const pj=JSON.stringify(pt);
         const dstr=etDate(pt.t); const dk="parkside:gpsday:"+device+":"+dstr;
