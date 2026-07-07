@@ -1169,6 +1169,55 @@ module.exports=async(req,res)=>{
       devices.sort(function(a,b){ return String(b.lastTs||"").localeCompare(String(a.lastTs||"")); });
       return res.status(200).json({devices});
     }
+    // ===== Fraud Alert (Gavin-only): payout-account integrity + receipt reconciliation =====
+    // Storage blob parkside:fraud = { accounts:{channel:{...}}, checks:[], receipts:[], alerts:[] }
+    if(action==="fraud_get"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      let blob=null; try{ if(redis) blob=await redis.get("parkside:fraud"); }catch(e){}
+      blob=blob||{accounts:{},checks:[],receipts:[],alerts:[]};
+      return res.status(200).json(blob);
+    }
+    if(action==="fraud_post"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      let body=req.body; if(typeof body==="string"){ try{ body=JSON.parse(body); }catch(e){ try{ body=Object.fromEntries(new URLSearchParams(body)); }catch(e2){ body={}; } } } if(!body||typeof body!=="object") body={};
+      let blob=null; try{ if(redis) blob=await redis.get("parkside:fraud"); }catch(e){}
+      blob=blob||{accounts:{},checks:[],receipts:[],alerts:[]};
+      blob.accounts=blob.accounts||{}; blob.checks=blob.checks||[]; blob.receipts=blob.receipts||[]; blob.alerts=blob.alerts||[];
+      const now=new Date().toISOString(); const op=String(body.op||"");
+      const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+      const norm=v=>String(v==null?"":v).trim();
+      const digits=v=>norm(v).replace(/[^0-9]/g,"");
+      if(op==="setAccount"){
+        const ch=norm(body.channel).toLowerCase(); if(!ch) return res.status(400).json({error:"channel required"});
+        blob.accounts[ch]={ channel:ch, label:norm(body.label)||ch, bank:norm(body.bank), last4:digits(body.last4).slice(-4), routing_last4:digits(body.routing_last4).slice(-4), note:norm(body.note), updated:now };
+      } else if(op==="removeAccount"){
+        delete blob.accounts[norm(body.channel).toLowerCase()];
+      } else if(op==="runCheck"){
+        const ch=norm(body.channel).toLowerCase(); const base=blob.accounts[ch];
+        const obsBank=norm(body.observed_bank), obsLast4=digits(body.observed_last4).slice(-4);
+        let status="ok", reasons=[];
+        if(!base){ status="no-baseline"; reasons.push("No baseline set for this channel"); }
+        else {
+          if(base.last4 && obsLast4 && base.last4!==obsLast4){ status="MISMATCH"; reasons.push("Account last4 "+obsLast4+" != baseline "+base.last4); }
+          if(base.bank && obsBank && base.bank.toLowerCase()!==obsBank.toLowerCase()){ status="MISMATCH"; reasons.push('Bank "'+obsBank+'" != baseline "'+base.bank+'"'); }
+          if(status==="ok") reasons.push("Matches baseline "+(base.bank?base.bank+" ":"")+(base.last4?"*"+base.last4:""));
+        }
+        const rec={ id:uid(), channel:ch, observed_bank:obsBank, observed_last4:obsLast4, status, reasons, at:now };
+        blob.checks.unshift(rec); blob.checks=blob.checks.slice(0,300);
+        if(status==="MISMATCH"){ blob.alerts.unshift({ id:uid(), kind:"payout-mismatch", channel:ch, msg:"["+ch.toUpperCase()+"] "+reasons.join("; "), at:now, resolved:false }); blob.alerts=blob.alerts.slice(0,300); }
+      } else if(op==="addReceipt"){
+        blob.receipts.unshift({ id:uid(), source:norm(body.source)||"manual", vendor:norm(body.vendor), amount:norm(body.amount), date:norm(body.date)||now.slice(0,10), ref:norm(body.ref), category:norm(body.category), note:norm(body.note), media:norm(body.media), status:norm(body.status)||"unreviewed", at:now });
+        blob.receipts=blob.receipts.slice(0,2000);
+      } else if(op==="setReceiptStatus"){
+        const id=norm(body.id), st=norm(body.status); blob.receipts=blob.receipts.map(r=>r.id===id?{...r,status:st}:r);
+      } else if(op==="deleteReceipt"){
+        const id=norm(body.id); blob.receipts=blob.receipts.filter(r=>r.id!==id);
+      } else if(op==="resolveAlert"){
+        const id=norm(body.id); blob.alerts=blob.alerts.map(a=>a.id===id?{...a,resolved:true,resolvedAt:now}:a);
+      } else { return res.status(400).json({error:"unknown op: "+op}); }
+      try{ if(redis) await redis.set("parkside:fraud", blob); }catch(e){}
+      return res.status(200).json(blob);
+    }
     // WebWork API probe (Gavin-gated) — pass ?path=/workspaces etc. Returns raw JSON to validate token + learn shapes.
     if(action==="webwork_raw"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});

@@ -85,6 +85,7 @@
     <button id="tabPricing" class="seg on" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
     <button id="tabMon" class="seg" onclick="switchView('monitoring')">Gavin</button>
+    <button id="tabBonus" class="seg" onclick="switchView('bonus')">Bonus</button>
   </div>
   <span class="muted" id="horizon"></span>
   <span class="sp"></span>
@@ -344,6 +345,39 @@
       </div>
       <div id="scResult" style="margin-top:12px"></div>
     </div>
+    <div class="card" id="fraudCard" style="border-color:#5a2a2a">
+      <h2>🛡️ Fraud Alert <span class="muted" style="font-weight:400;text-transform:none">— payout-account integrity + receipts (Gavin-only)</span></h2>
+      <div class="legend" style="margin-bottom:10px">Records the <b>correct payout bank account</b> for each channel, then flags if a checked value ever differs. Also logs receipts (Amazon, MMS) for reconciliation. Victor can’t see this tab.</div>
+      <div id="fraudAlerts" style="margin-bottom:12px"></div>
+      <h3 style="margin:8px 0 4px">Payout accounts (baselines)</h3>
+      <div id="fraudAccounts" class="legend" style="margin-bottom:8px"></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
+        <select id="frAccCh" style="width:auto"><option value="airbnb">Airbnb</option><option value="ownerrez">OwnerRez / Stripe</option><option value="vrbo">Vrbo</option><option value="bookingcom">Booking.com</option><option value="direct">Direct</option></select>
+        <input id="frAccBank" placeholder="Bank name" style="width:150px">
+        <input id="frAccLast4" placeholder="Acct last4" maxlength="4" style="width:100px">
+        <button onclick="fraudSetAccount()">Save baseline</button>
+      </div>
+      <h3 style="margin:8px 0 4px">Verify a payout account</h3>
+      <div class="legend" style="margin-bottom:6px">Enter what a channel’s payout settings currently show; the system compares to the baseline and raises an alert on any mismatch.</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <select id="frChkCh" style="width:auto"><option value="airbnb">Airbnb</option><option value="ownerrez">OwnerRez / Stripe</option><option value="vrbo">Vrbo</option><option value="bookingcom">Booking.com</option><option value="direct">Direct</option></select>
+        <input id="frChkBank" placeholder="Observed bank" style="width:150px">
+        <input id="frChkLast4" placeholder="Observed last4" maxlength="4" style="width:120px">
+        <button onclick="fraudRunCheck()">Check now</button>
+        <span id="frChkStatus" class="muted" style="font-weight:600"></span>
+      </div>
+      <div id="fraudChecks" class="legend" style="margin-bottom:14px"></div>
+      <h3 style="margin:8px 0 4px">Receipts</h3>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <input id="frRcVendor" placeholder="Vendor (e.g. Amazon)" style="width:150px">
+        <input id="frRcAmount" placeholder="$ amount" style="width:90px">
+        <input id="frRcDate" placeholder="YYYY-MM-DD" style="width:120px">
+        <input id="frRcNote" placeholder="note / item" style="width:170px">
+        <button onclick="fraudAddReceipt()">Log receipt</button>
+      </div>
+      <div class="legend" style="margin-bottom:6px">Receipts texted via MMS to the StayDeck number will land here automatically once phone intake is live.</div>
+      <div id="fraudReceipts"></div>
+    </div>
     <div class="card" style="border-color:#3a2a1a">
       <h2>🎚 Pricing tuning <span class="muted" style="font-weight:400;text-transform:none">— moved here from the main tab; changes pricing (Gavin-only)</span></h2>
     </div>
@@ -358,6 +392,17 @@
       <span id="tuneStatus" class="muted" style="align-self:center"></span>
     </div>
   </div>
+  </div>
+</div>
+
+<div class="wrap" id="bonusMain" style="display:none">
+  <div class="card">
+    <h2>🏆 Bonus</h2>
+    <div class="legend" style="margin-bottom:10px">Your weekly performance bonus. Updates automatically from tracked hours and how well your daily check-in matches the data. No extra login — this tab is yours.</div>
+    <div id="bonusBody" class="legend">
+      <p><b>Coming online.</b> Once the weekly scoring formula is finalized, this tab will show your current-week score, hours logged, and the bonus earned so far — updated through the week.</p>
+      <p style="margin-top:8px">It will factor in: hours worked (from the time tracker), how closely your daily check-in matches what actually happened, and your bonus tier for the week.</p>
+    </div>
   </div>
 </div>
 
@@ -750,13 +795,16 @@ async function loadLearning(){
 }
 let MSG_BUILT=false; let KB={format:"",items:[]};
 function switchView(v){
-  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring';
+  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus';
   document.getElementById('main').style.display=isP?'block':'none';
   document.getElementById('msgMain').style.display=isM?'block':'none';
   document.getElementById('monMain').style.display=isMon?'block':'none';
+  const bm=document.getElementById('bonusMain'); if(bm) bm.style.display=isB?'block':'none';
   document.getElementById('tabPricing').className='seg'+(isP?' on':'');
   document.getElementById('tabMsg').className='seg'+(isM?' on':'');
   const tm=document.getElementById('tabMon'); if(tm) tm.className='seg'+(isMon?' on':'');
+  const tb=document.getElementById('tabBonus'); if(tb) tb.className='seg'+(isB?' on':'');
+  if(isB) loadBonus();
   document.getElementById('horizon').style.display=isP?'':'none';
   document.getElementById('syncWrap').style.display=isP?'':'none';
   if(isP) setSyncUI();
@@ -769,7 +817,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1050,4 +1098,40 @@ async function registerSmsWebhook(){
       else { msg.style.color='#f4b942'; msg.textContent='Could not enable: '+(j.error||j.reason||('HTTP '+(j.status||'?'))); } }
   }catch(e){ if(msg){ msg.style.color='#f4b942'; msg.textContent='Failed: '+e.message; } }
 }
+
+// ===== Fraud Alert (Gavin-only) =====
+let FRAUD=null;
+function frHead(){ return {'Content-Type':'application/json','x-gavin-password':GPW}; }
+function frEsc(v){ return String(v==null?'':v).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+async function loadFraud(){
+  if(!GPW) return;
+  try{ const r=await fetch(api('fraud_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; FRAUD=await r.json(); renderFraud(); }catch(e){}
+}
+function renderFraud(){
+  if(!FRAUD) return;
+  const A=FRAUD.alerts||[], acc=FRAUD.accounts||{}, ch=FRAUD.checks||[], rc=FRAUD.receipts||[];
+  const open=A.filter(a=>!a.resolved);
+  var ea=document.getElementById('fraudAlerts'); if(ea) ea.innerHTML = open.length
+    ? open.map(a=>'<div style="background:#3a1a1a;border:1px solid #7a2a2a;border-radius:8px;padding:8px 10px;margin-bottom:6px"><b style="color:#f87171">⚠️ '+frEsc(a.msg)+'</b> <span class="muted">'+frEsc((a.at||'').slice(0,16).replace("T"," "))+'</span> <button class="ghost" style="float:right" onclick="fraudResolve(\''+a.id+'\')">Resolve</button></div>').join('')
+    : '<div class="legend" style="color:#2ecc71">✓ No open payout alerts.</div>';
+  const keys=Object.keys(acc);
+  var fa=document.getElementById('fraudAccounts'); if(fa) fa.innerHTML = keys.length
+    ? '<table style="width:100%"><tr><th style="text-align:left">Channel</th><th style="text-align:left">Bank</th><th>Acct</th><th>Updated</th><th></th></tr>'+keys.map(k=>{const a=acc[k];return '<tr><td><b>'+frEsc(a.label||k)+'</b></td><td>'+frEsc(a.bank||'—')+'</td><td style="text-align:center">'+(a.last4?'*'+frEsc(a.last4):'—')+'</td><td class="muted" style="text-align:center">'+frEsc((a.updated||'').slice(0,10))+'</td><td><button class="ghost" onclick="fraudRemoveAccount(\''+k+'\')">✕</button></td></tr>';}).join('')+'</table>'
+    : '<span class="muted">No baselines yet. Add the correct payout bank + last4 for each channel above.</span>';
+  var fc=document.getElementById('fraudChecks'); if(fc) fc.innerHTML = ch.length
+    ? '<b>Recent checks:</b><br>'+ch.slice(0,8).map(c=>{const col=c.status==='MISMATCH'?'#f87171':(c.status==='ok'?'#2ecc71':'#f4b942');return '<span style="color:'+col+'">['+frEsc(c.channel)+'] '+frEsc(c.status)+'</span> — '+frEsc((c.reasons||[]).join('; '))+' <span class="muted">'+frEsc((c.at||'').slice(0,16).replace("T"," "))+'</span>';}).join('<br>')
+    : '';
+  var fr=document.getElementById('fraudReceipts'); if(fr) fr.innerHTML = rc.length
+    ? '<table style="width:100%"><tr><th style="text-align:left">Date</th><th style="text-align:left">Vendor</th><th>Amt</th><th style="text-align:left">Note</th><th>Src</th><th>Status</th><th></th></tr>'+rc.slice(0,40).map(r=>'<tr><td>'+frEsc(r.date)+'</td><td>'+frEsc(r.vendor)+'</td><td style="text-align:right">'+frEsc(r.amount)+'</td><td>'+frEsc(r.note)+(r.media?' <a href="'+frEsc(r.media)+'" target="_blank">img</a>':'')+'</td><td class="muted" style="text-align:center">'+frEsc(r.source||'')+'</td><td style="text-align:center">'+frEsc(r.status||'')+'</td><td><button class="ghost" onclick="fraudDeleteReceipt(\''+r.id+'\')">✕</button></td></tr>').join('')+'</table>'
+    : '<span class="muted">No receipts logged yet.</span>';
+}
+async function fraudPost(payload){ try{ const r=await fetch(api('fraud_post'),{method:'POST',headers:frHead(),body:JSON.stringify(payload)}); if(r.ok){ FRAUD=await r.json(); renderFraud(); return true; } }catch(e){} return false; }
+async function fraudSetAccount(){ const sel=document.getElementById('frAccCh'); const channel=sel.value; const bank=document.getElementById('frAccBank').value; const last4=document.getElementById('frAccLast4').value; if(!bank&&!last4) return; await fraudPost({op:'setAccount',channel,label:sel.selectedOptions[0].text,bank,last4}); document.getElementById('frAccBank').value=''; document.getElementById('frAccLast4').value=''; }
+async function fraudRemoveAccount(ch){ if(!confirm('Remove baseline for '+ch+'?')) return; await fraudPost({op:'removeAccount',channel:ch}); }
+async function fraudRunCheck(){ const st=document.getElementById('frChkStatus'); st.textContent='…'; const channel=document.getElementById('frChkCh').value; const observed_bank=document.getElementById('frChkBank').value; const observed_last4=document.getElementById('frChkLast4').value; await fraudPost({op:'runCheck',channel,observed_bank,observed_last4}); const c=(FRAUD&&FRAUD.checks||[])[0]; if(c){ st.textContent=c.status; st.style.color=(c.status==='MISMATCH')?'#f87171':(c.status==='ok'?'#2ecc71':'#f4b942'); } }
+async function fraudAddReceipt(){ const vendor=document.getElementById('frRcVendor').value; const amount=document.getElementById('frRcAmount').value; const date=document.getElementById('frRcDate').value; const note=document.getElementById('frRcNote').value; if(!vendor&&!amount) return; await fraudPost({op:'addReceipt',vendor,amount,date,note,source:'manual'}); ['frRcVendor','frRcAmount','frRcDate','frRcNote'].forEach(id=>document.getElementById(id).value=''); }
+async function fraudDeleteReceipt(id){ if(!confirm('Delete this receipt?')) return; await fraudPost({op:'deleteReceipt',id}); }
+async function fraudResolve(id){ await fraudPost({op:'resolveAlert',id}); }
+// ===== Bonus tab (visible to Victor later; no Gavin login) =====
+function loadBonus(){ /* v1 placeholder — weekly score/bonus surfaces here once the formula is set */ }
 </script></body></html>
