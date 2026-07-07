@@ -1986,6 +1986,45 @@ module.exports=async(req,res)=>{
       return res.status(out.ok?200:400).json(out);
     }
     // PUBLIC provider webhook: Victor replies YES/NO via text. Provider-agnostic body parse.
+    // ===== StayDeck phone intake: Victor calls the number once/day to report; Twilio records + transcribes =====
+    if(action==="voice"){
+      // Twilio Voice webhook ("A call comes in"). Returns TwiML that records the caller + sends the transcript back.
+      const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
+      const tokQ=(req.query&&req.query.token)?("&amp;token="+encodeURIComponent(req.query.token)):"";
+      const cb=origin+"/api/app?action=voice_transcription"+tokQ;
+      const xml='<?xml version="1.0" encoding="UTF-8"?>'
+        +'<Response>'
+        +'<Say voice="alice">Hi, you have reached Parkside Tepees. Please leave your daily update after the tone, then hang up when you are done.</Say>'
+        +'<Record maxLength="120" playBeep="true" transcribe="true" transcribeCallback="'+cb+'" />'
+        +'<Say voice="alice">Thanks. Goodbye.</Say>'
+        +'</Response>';
+      res.setHeader("Content-Type","text/xml"); res.status(200); return res.end(xml);
+    }
+    if(action==="voice_transcription"){
+      // Twilio transcription callback (POST urlencoded): TranscriptionText, RecordingUrl, From, TranscriptionStatus.
+      const cfg=await getNotifyConfig();
+      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+      const tok=(req.query&&req.query.token)||""; if(cfg.secret && tok && tok!==cfg.secret){ res.status(200); return res.end(""); }
+      const from=String(b.From||b.from||"").trim();
+      const text=String(b.TranscriptionText||b.transcription_text||b.text||"").trim();
+      const rec=String(b.RecordingUrl||b.recording_url||"").trim();
+      const status=String(b.TranscriptionStatus||b.status||"").trim();
+      const date=etDate(new Date().toISOString());
+      const vn=cfg.smsTo||victorNumber();
+      const isVictor=!!(vn && from && from.replace(/\D/g,"").slice(-10)===vn.replace(/\D/g,"").slice(-10));
+      try{ if(redis){
+        const entry={ from, date, text, recordingUrl:rec, status, isVictor, at:new Date().toISOString() };
+        const log=(await redis.get("parkside:calllog"))||[]; log.unshift(entry); await redis.set("parkside:calllog", log.slice(0,500));
+        // Victor's daily verbal report -> auto-fills the scorecard self-report for that date (the AI truth-score then uses it)
+        if(isVictor && text){ const prev=(await redis.get("parkside:report:"+date))||""; const merged=(prev && prev.indexOf(text)===-1) ? (prev+"\n\n[call] "+text) : text; await redis.set("parkside:report:"+date, merged); }
+      } }catch(e){}
+      res.setHeader("Content-Type","text/xml"); res.status(200); return res.end('<?xml version="1.0" encoding="UTF-8"?><Response/>');
+    }
+    if(action==="calls_get"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      let log=[]; try{ if(redis) log=(await redis.get("parkside:calllog"))||[]; }catch(e){}
+      return res.status(200).json({calls:log.slice(0,100)});
+    }
     if(action==="sms_inbound"){
       const cfg=await getNotifyConfig();
       let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
@@ -1997,6 +2036,17 @@ module.exports=async(req,res)=>{
       const vn=cfg.smsTo||victorNumber();
       if(vn && from && from.replace(/\D/g,"").slice(-10)!==vn.replace(/\D/g,"").slice(-10))
         return res.status(200).json({ignored:true, reason:"sender is not the owner's number"});
+      // MMS receipt intake: Victor texts a photo of a receipt to the StayDeck number -> store in the Fraud Alert receipts.
+      const numMedia=parseInt(pl.NumMedia||b.NumMedia||b.num_media||0,10)||0; const mediaUrls=[];
+      if(numMedia>0){ for(let _i=0;_i<numMedia;_i++){ const mu=b["MediaUrl"+_i]||pl["MediaUrl"+_i]; if(mu) mediaUrls.push(String(mu)); } }
+      if(!mediaUrls.length){ const alt=pl.mediaUrl||b.mediaUrl||pl.media||b.media; if(alt){ if(Array.isArray(alt)) alt.forEach(x=>mediaUrls.push(String(x))); else mediaUrls.push(String(alt)); } }
+      if(mediaUrls.length){
+        try{ if(redis){ let blob=(await redis.get("parkside:fraud"))||{accounts:{},checks:[],receipts:[],alerts:[]}; blob.receipts=blob.receipts||[]; const now=new Date().toISOString();
+          for(const mu of mediaUrls){ blob.receipts.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,7), source:"mms", vendor:"", amount:"", date:etDate(now), ref:"", note:bodyRaw||"", media:mu, status:"unreviewed", at:now }); }
+          blob.receipts=blob.receipts.slice(0,2000); await redis.set("parkside:fraud",blob); } }catch(e){}
+        try{ await sendSmsGateway(cfg, "\uD83E\uDDFE Receipt received ("+mediaUrls.length+" image"+(mediaUrls.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
+        return res.status(200).json({receipt:true, count:mediaUrls.length});
+      }
       if(!bodyRaw) return res.status(200).json({ignored:true, reason:"empty"});
       const ackBack=async(t)=>{ if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false}; let _r=null; for(let _i=0;_i<3;_i++){ try{ _r=await sendSmsGateway(cfg, t); if(_r && _r.sent) return _r; }catch(e){ _r={sent:false, error:String(e.message||e)}; } if(_i<2) await new Promise(function(res){setTimeout(res,1200);}); } return _r||{sent:false}; };
       const list=await getApprovals(); const pend=list.filter(x=>x.status==="pending");
