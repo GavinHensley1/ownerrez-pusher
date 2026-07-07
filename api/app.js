@@ -2206,7 +2206,7 @@ module.exports=async(req,res)=>{
     }
 
     res.status(400).json({error:"unknown action"});
-  }catch(e){ res.status(500).json({error:String(e.message||e)}); }
+  }catch(e){ try{ console.error("[handler-500] action="+((req.query&&req.query.action)||"")+" err="+String((e&&e.stack)||(e&&e.message)||e)); }catch(_){} res.status(500).json({error:String(e.message||e)}); }
 };
 
 module.exports.__model={compute,paceMult,scarMult,gapGm,deriveLearned,interp,SENS,MODEL,UNIT_PREM,GAP_SEED,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
