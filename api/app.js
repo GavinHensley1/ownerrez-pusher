@@ -1993,11 +1993,11 @@ module.exports=async(req,res)=>{
       // recording ourselves for free via Groq Whisper in the voice_recording callback.
       const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
       const tokQ=(req.query&&req.query.token)?("&amp;token="+encodeURIComponent(req.query.token)):"";
-      const cb=origin+"/api/app?action=voice_recording"+tokQ;
+      const cb=origin+"/api/app?action=voice_transcription"+tokQ;
       const xml='<?xml version="1.0" encoding="UTF-8"?>'
         +'<Response>'
         +'<Say voice="alice">Hi, you have reached Parkside Tepees. Please leave your daily update after the tone, then hang up when you are done.</Say>'
-        +'<Record maxLength="120" playBeep="true" recordingStatusCallback="'+cb+'" recordingStatusCallbackEvent="completed" />'
+        +'<Record maxLength="120" playBeep="true" transcribe="true" transcribeCallback="'+cb+'" />'
         +'<Say voice="alice">Thanks. Goodbye.</Say>'
         +'</Response>';
       res.setHeader("Content-Type","text/xml"); res.status(200); return res.end(xml);
