@@ -2021,6 +2021,19 @@ module.exports=async(req,res)=>{
       } }catch(e){}
       res.setHeader("Content-Type","text/xml"); res.status(200); return res.end('<?xml version="1.0" encoding="UTF-8"?><Response/>');
     }
+    if(action==="signal_debug"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      const out={ hasKey:!!process.env.PRICELABS_API_KEY, refId:process.env.PRICELABS_REF_ID||"486915", refPms:process.env.PRICELABS_REF_PMS||"ownerrez", today:new Date().toISOString().slice(0,10) };
+      try{ if(redis){ const ov=await redis.get("parkside:signal_override"); out.signal_override=ov; const c=await redis.get("parkside:signal"); out.cache_day=c&&c.day; out.cache_map_size=c&&c.map?Object.keys(c.map).length:0; out.cache_sample=c&&c.map?Object.entries(c.map).slice(0,3):[]; } }catch(e){ out.redisErr=String(e.message||e); }
+      // live PriceLabs probe (does not write cache)
+      try{ const key=process.env.PRICELABS_API_KEY; if(key){ const t=new Date(), e2=new Date(); e2.setDate(e2.getDate()+30);
+        const rr=await fetch("https://api.pricelabs.co/v1/listing_prices",{method:"POST",headers:{"X-API-Key":key,"Content-Type":"application/json"},body:JSON.stringify({listings:[{id:out.refId,pms:out.refPms,dateFrom:t.toISOString().slice(0,10),dateTo:e2.toISOString().slice(0,10),reason:false}]})});
+        out.pl_status=rr.status; const dt=await rr.text(); let dj=null; try{ dj=JSON.parse(dt); }catch(_){}
+        if(dj){ const rows=(dj[0]&&dj[0].data)||[]; out.pl_rows=rows.length; out.pl_priceable=rows.filter(x=>x.date&&!x.booking_status&&!x.unbookable&&x.price>0).length; out.pl_row_sample=rows.slice(0,3); if(dj[0]&&dj[0].error) out.pl_listing_error=dj[0].error; if(!Array.isArray(dj)&&dj.error) out.pl_error=dj.error; }
+        else out.pl_body=dt.slice(0,300);
+      } else out.pl_note="no PRICELABS_API_KEY"; }catch(e){ out.pl_fetchErr=String(e.message||e); }
+      return res.status(200).json(out);
+    }
     if(action==="calls_get"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
       let log=[]; try{ if(redis) log=(await redis.get("parkside:calllog"))||[]; }catch(e){}
