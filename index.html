@@ -145,18 +145,6 @@
     <div class="legend">Click any day → full price breakdown + pin/override. 📌 purple = manual override (engine + cron never change it). Grey dashed = already booked. <span style="color:#e6b85c">GAP</span> = orphan-night discount.</div>
   </div>
 
-  <div class="card" id="tuneCard">
-    <h2>🎚 Filter tuning <span class="muted" style="font-weight:400;text-transform:none">— manual strength knobs now; the learning system will drive these automatically later</span></h2>
-    <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then click <b>Update prices</b> to recalculate them with the new settings and preview the result here in the calendar &amp; breakdown. <b>Nothing is sent to OwnerRez</b> — review the updated prices, then push separately when you&rsquo;re ready.</div>
-    <div id="tuneGrid"></div>
-    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center">
-      <button onclick="saveKnobs()">Save knobs</button>
-      <button onclick="updateKnobPrices()">⟳ Update prices</button>
-      <button class="ghost" onclick="resetKnobs()">Reset to defaults</button>
-      <span id="tuneStatus" class="muted" style="align-self:center"></span>
-    </div>
-  </div>
-
   <div class="card" id="advCard">
     <h2 style="cursor:pointer;user-select:none" onclick="toggleAdv()">⚙ Advanced / setup <span id="advCaret" style="color:var(--mut)">▸</span></h2>
     <div id="advBody" style="display:none">
@@ -343,6 +331,20 @@
       <h2>Zone summary (recent trail)</h2>
       <div id="monZones" class="legend"></div>
     </div>
+    <div class="card" style="border-color:#3a2a1a">
+      <h2>🎚 Pricing tuning <span class="muted" style="font-weight:400;text-transform:none">— moved here from the main tab; changes pricing (Gavin-only)</span></h2>
+    </div>
+  <div class="card" id="tuneCard">
+    <h2>🎚 Filter tuning <span class="muted" style="font-weight:400;text-transform:none">— manual strength knobs now; the learning system will drive these automatically later</span></h2>
+    <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then click <b>Update prices</b> to recalculate them with the new settings and preview the result here in the calendar &amp; breakdown. <b>Nothing is sent to OwnerRez</b> — review the updated prices, then push separately when you&rsquo;re ready.</div>
+    <div id="tuneGrid"></div>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center">
+      <button onclick="saveKnobs()">Save knobs</button>
+      <button onclick="updateKnobPrices()">⟳ Update prices</button>
+      <button class="ghost" onclick="resetKnobs()">Reset to defaults</button>
+      <span id="tuneStatus" class="muted" style="align-self:center"></span>
+    </div>
+  </div>
   </div>
 </div>
 
