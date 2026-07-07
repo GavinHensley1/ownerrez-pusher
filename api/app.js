@@ -1038,6 +1038,64 @@ function etDate(iso){ try{ return new Date(iso).toLocaleDateString('en-CA',{time
 async function getZones(){ try{ if(redis){ const z=await redis.get('parkside:zones'); if(Array.isArray(z)&&z.length) return z.map(x=>({name:String(x.name||'zone'),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)})).filter(x=>isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0); } }catch(e){} return ZONES_DEFAULT; }
 function haversineM(lat1,lon1,lat2,lon2){ const R=6371000, r=x=>x*Math.PI/180; const dLat=r(lat2-lat1), dLon=r(lon2-lon1); const a=Math.sin(dLat/2)**2 + Math.cos(r(lat1))*Math.cos(r(lat2))*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.min(1,Math.sqrt(a))); }
 function classifyPoint(lat,lon,zones){ let best=null; for(const z of zones){ const d=haversineM(lat,lon,z.lat,z.lon); if(d<=z.radius_m){ return {zone:z.name, dist_m:Math.round(d)}; } if(best===null||d<best.dist_m){ best={zone:'off', dist_m:Math.round(d), nearest:z.name}; } } return best||{zone:'off', dist_m:null}; }
+// ===== WebWork (Victor screen/activity) + daily scorecard =====
+const WW_BASE="https://api.webwork-tracker.com/api/v2";
+function wwWorkspace(){ return String(process.env.WEBWORK_WORKSPACE_ID||"506630"); }
+function wwVictor(){ return String(process.env.WEBWORK_VICTOR_USER_ID||"416481"); }
+async function wwFetch(path, qs){
+  const tok=String(process.env.WEBWORK_TOKEN||""); if(!tok) return {ok:false, error:"WEBWORK_TOKEN not set"};
+  try{ const r=await fetch(WW_BASE+path+(qs?("?"+qs):""), {headers:{Authorization:"Bearer "+tok, Accept:"application/json"}});
+    const j=await r.json().catch(function(){return null;}); return {ok:r.ok, status:r.status, json:j}; }
+  catch(e){ return {ok:false, error:String(e.message||e)}; }
+}
+async function wwHoursForDate(date){
+  const r=await wwFetch("/reports/tracked-hours","workspace_id="+wwWorkspace()+"&user_id="+wwVictor()+"&start_date="+date+"&end_date="+date);
+  if(!r.ok || !r.json || !r.json.data) return {available:false, error:r.error||("status "+r.status)};
+  const d=r.json.data; const tot=(d.total&&d.total.total_minutes)||0; const inact=(d.total&&d.total.inactive_minutes)||0;
+  const active=Math.max(0, tot-inact);
+  return { available:true, tracked_min:tot, inactive_min:inact, active_min:active, active_pct:(tot>0?Math.round(100*active/tot):0), hours:Number((tot/60).toFixed(2)) };
+}
+async function gpsZoneSummary(device, date){
+  let pts=[]; try{ if(redis){ const raw=await redis.lrange("parkside:gpsday:"+device+":"+date,0,-1); pts=(raw||[]).map(function(x){ try{ return typeof x==="string"?JSON.parse(x):x; }catch(e){ return null; } }).filter(Boolean); } }catch(e){}
+  const byZone={office:0,tepees:0,maintenance:0,resort:0,off:0}; let total=0;
+  for(let i=0;i<pts.length-1;i++){ const a=pts[i], b=pts[i+1];
+    let gap=(new Date(b.t)-new Date(a.t))/60000; if(!isFinite(gap)||gap<0) gap=0; if(gap>10) gap=10;
+    const z=(a.zone && (a.zone in byZone))?a.zone:"off"; byZone[z]+=gap; total+=gap; }
+  const round=function(o){ const r={}; for(const k in o) r[k]=Math.round(o[k]); return r; };
+  return { points:pts.length, total_min:Math.round(total), on_site_min:Math.round(total-byZone.off), byZoneMin:round(byZone), first:pts.length?pts[0].t:null, last:pts.length?pts[pts.length-1].t:null };
+}
+// Claude ranks Victor's self-report against the objective data. Returns + stores {truth_score, ...}.
+async function scoreDay(date, device){
+  const key=process.env.ANTHROPIC_API_KEY; if(!key) return {error:"ANTHROPIC_API_KEY not set"};
+  const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device, date);
+  let report=""; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; } }catch(e){}
+  if(!report || !String(report).trim()) return {error:"no self-report on file for "+date+" (nothing to score against)"};
+  const dataBlock=
+    "OBJECTIVE DATA for "+date+" (America/New_York):\n"+
+    "- WebWork hours: "+(hours.available?(hours.hours+"h tracked, "+hours.active_pct+"% active ("+hours.active_min+" active min of "+hours.tracked_min+")"):"no WebWork data")+"\n"+
+    "- GPS on-site time: "+zones.on_site_min+" min on resort grounds of "+zones.total_min+" min tracked\n"+
+    "- GPS time per zone (minutes): office "+zones.byZoneMin.office+", tepees "+zones.byZoneMin.tepees+", maintenance "+zones.byZoneMin.maintenance+", elsewhere-on-resort "+zones.byZoneMin.resort+", off-site "+zones.byZoneMin.off+"\n"+
+    "- First ping "+(zones.first||"n/a")+", last ping "+(zones.last||"n/a")+"\n";
+  const sys="You audit an employee's (Victor, maintenance/operations at Parkside Tepees resort) daily self-report against objective tracking data. "+
+    "Compare what he SAID he did to the GPS zone time and WebWork computer-activity data. "+
+    "Judge how well his claims match the data. Be fair: absence of GPS/WebWork data for a task does not always mean he lied (e.g., outdoor work with phone in pocket still shows GPS on-site; computer tasks show WebWork activity). "+
+    "Return ONLY a JSON object: {\"truth_score\":0-100, \"hours_worked\":<number, from the data>, \"matches\":[\"...\"], \"discrepancies\":[\"...\"], \"summary\":\"1-2 sentences\"}. "+
+    "truth_score = how well his report is corroborated by the data (100 = fully consistent, low = claims contradicted by the data).";
+  const userMsg=dataBlock+"\nVICTOR'S SELF-REPORT:\n"+String(report).slice(0,4000);
+  try{
+    const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},
+      body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:700,temperature:0,system:sys,messages:[{role:"user",content:userMsg}]})});
+    const j=await r.json(); if(!r.ok) return {error:"Anthropic error", detail:JSON.stringify(j).slice(0,200)};
+    let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim(); let o=null;
+    try{ const m=text.match(/\{[\s\S]*\}/); o=JSON.parse(m?m[0]:text); }catch(e){ o=null; }
+    if(!o) return {error:"could not parse AI response", raw:text.slice(0,300)};
+    const out={ date, scored_at:new Date().toISOString(), truth_score:Number(o.truth_score), hours_worked:Number(o.hours_worked!=null?o.hours_worked:(hours.hours||0)),
+      matches:Array.isArray(o.matches)?o.matches:[], discrepancies:Array.isArray(o.discrepancies)?o.discrepancies:[], summary:String(o.summary||""),
+      data:{hours, zones} };
+    try{ if(redis) await redis.set("parkside:score:"+date, out); }catch(e){}
+    return out;
+  }catch(e){ return {error:"request failed: "+String(e.message||e)}; }
+}
 module.exports=async(req,res)=>{
   try{
     res.setHeader("Cache-Control","no-store, max-age=0, must-revalidate"); res.setHeader("CDN-Cache-Control","no-store"); res.setHeader("Vercel-CDN-Cache-Control","no-store");
@@ -1122,6 +1180,33 @@ module.exports=async(req,res)=>{
         const t=await r.text(); let j=null; try{ j=JSON.parse(t); }catch(e){}
         return res.status(200).json({status:r.status, url:base+path+(qs?("?"+qs):""), json:j, raw:(j?null:t.slice(0,1500))}); }
       catch(e){ return res.status(200).json({error:String(e.message||e)}); }
+    }
+    // Daily scorecard: WebWork hours + GPS zone-time + stored report + stored score. (Gavin-gated)
+    if(action==="scorecard"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
+      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device,date);
+      let report="", score=null; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; score=await redis.get("parkside:score:"+date); } }catch(e){}
+      return res.status(200).json({ date, device, hours, zones, report, score });
+    }
+    // Get/set Victor's self-report text for a date. (Gavin-gated)
+    if(action==="scorecard_report"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
+      if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+        const txt=String(b.report||"").slice(0,8000); try{ if(redis) await redis.set("parkside:report:"+date, txt); }catch(e){}
+        return res.status(200).json({ok:true, date, report:txt}); }
+      let report=""; try{ if(redis) report=(await redis.get("parkside:report:"+date))||""; }catch(e){}
+      return res.status(200).json({ date, report });
+    }
+    // Run the Claude truth-score for a date (Gavin-gated OR cron secret).
+    if(action==="score_day"){
+      const okAuth=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x")) || ((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__y")) || ((req.query&&req.query.token)===(process.env.CRON_SECRET||"__z"));
+      if(!okAuth) return res.status(401).json({error:"unauthorized"});
+      const date=String((req.query&&req.query.date)||"")||etDate(new Date(Date.now()-86400000).toISOString());
+      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const out=await scoreDay(date, device); return res.status(200).json(out);
     }
     if(action==="gps_zones"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x") && (req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
