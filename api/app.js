@@ -125,14 +125,14 @@ function signalFallback(sig,ds){ const k=Object.keys(sig); if(!k.length)return 0
   s=k.filter(x=>new Date(x+"T00:00:00Z").getUTCDay()===dw).map(x=>sig[x]); if(s.length)return med(s); return med(k.map(x=>sig[x])); }
 async function getSignal(){
   if(redis){ const ov=await redis.get("parkside:signal_override"); if(ov!=null&&Number(ov)>0){ const v=Math.round(Number(ov)); const m={}; const _t=new Date(); for(let _i=0;_i<400;_i++){ const _d=new Date(_t); _d.setUTCDate(_d.getUTCDate()+_i); m[_d.toISOString().slice(0,10)]=v; } return m; } }
-  if(redis){ const c=await redis.get("parkside:signal"); if(c&&c.day===new Date().toISOString().slice(0,10)) return c.map; }
+  if(redis){ const c=await redis.get("parkside:signal"); if(c&&c.day===new Date().toISOString().slice(0,10)&&c.map&&Object.keys(c.map).length) return c.map; }
   const key=process.env.PRICELABS_API_KEY; if(!key) throw new Error("PRICELABS_API_KEY not set");
   const id=process.env.PRICELABS_REF_ID||"486915", pms=process.env.PRICELABS_REF_PMS||"ownerrez";
   const t=new Date(), e=new Date(); e.setDate(e.getDate()+365);
   const r=await fetch("https://api.pricelabs.co/v1/listing_prices",{method:"POST",headers:{"X-API-Key":key,"Content-Type":"application/json"},body:JSON.stringify({listings:[{id,pms,dateFrom:t.toISOString().slice(0,10),dateTo:e.toISOString().slice(0,10),reason:false}]})});
   const data=await r.json(); const rows=(data[0]&&data[0].data)||[]; const map={};
   for(const x of rows){ if(x.date&&!x.booking_status&&!x.unbookable&&x.price>0) map[x.date.slice(0,10)]=Math.round(x.price); }
-  if(redis) await redis.set("parkside:signal",{day:new Date().toISOString().slice(0,10),map}); return map;
+  if(redis && Object.keys(map).length) await redis.set("parkside:signal",{day:new Date().toISOString().slice(0,10),map}); return map;
 }
 function parseIcs(text){ const out=[]; const blocks=String(text).split("BEGIN:VEVENT").slice(1);
   for(const b of blocks){ const a=(b.match(/DTSTART[^:\n]*:(\d{8})/)||[])[1]; const c=(b.match(/DTEND[^:\n]*:(\d{8})/)||[])[1]; if(a&&c) out.push([a,c]); } return out; }
