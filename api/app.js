@@ -1363,8 +1363,9 @@ module.exports=async(req,res)=>{
       if(redis) await redis.set("parkside:signal_override",_v); return res.status(200).json({ok:true,override:_v,note:"TEMP flat base override active - clear with {clear:true} once PriceLabs reflects the new base"});
     }
     if(action==="run"){
-      const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x")) || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__x"));
+      const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x")) || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__x")) || ((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__zzz"));
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
+      try{ console.error("[run] start model-check auto_sync-check begin"); }catch(_){}
       const st=await getState(); const model=(st.pricing_model==="glide")?"glide":"legacy"; const sig=await getSignal();
       const od=await getOccData(st,today,days,false); const booked=od.booked;
       const occ={hasData:booked.total>0, agg:od.agg};
@@ -1389,7 +1390,7 @@ module.exports=async(req,res)=>{
         if(st.learning_enabled!==false) logged=await logPhase1(rates,booked,today);
       }
       if(!st.auto_sync) return res.status(200).json({mode:"COMPUTED_NO_SYNC",pricing_model:model,auto_sync:false,computed:rates.length,wrote:false,bookedNights:booked.total,logged,note:"auto-sync OFF — nothing written to OwnerRez"});
-      const r=await pushOwnerRez(rates,K);
+      let r; try{ r=await pushOwnerRez(rates,K); }catch(_pe){ try{ console.error("[run] pushOwnerRez threw: "+String((_pe&&_pe.stack)||_pe)); }catch(_){} return res.status(500).json({error:"pushOwnerRez failed: "+String((_pe&&_pe.message)||_pe)}); }
       if(redis&&r.ownerrezOk){ const _gn=rates.filter(x=>x.gapApplied).length; try{ await redis.set("parkside:last_run",{ts:Date.now(),at:new Date().toISOString(),sent:r.sent,gapNights:_gn}); }catch(_x){} }
       return res.status(r.ownerrezOk?200:502).json({mode:"LIVE_SYNC",pricing_model:model,auto_sync:true,bookedNights:booked.total,logged,overrides:rates.filter(x=>x.overridden).length,gapNights:rates.filter(x=>x.gapApplied).length,...r});
     }
