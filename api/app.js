@@ -1256,7 +1256,8 @@ module.exports=async(req,res)=>{
     // Single OwnerRez call: GET /v2/bookings?...&include_agreements=true. A booking whose agreements[] has a dated
     // signed lease = "completed"; empty = "needed". Drives the dashboard "Rental agreement completed / needed" card.
     if(action==="agreements_status"){
-      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      // Reception-facing (main dashboard): low-sensitivity operational data. Accept the main app password OR the Gavin password.
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       if(!orBasicHeader() && !(await orOauthHeader())) return res.status(503).json({error:"OwnerRez API credentials not set (need OWNERREZ_API_USER + OWNERREZ_API_TOKEN)"});
       const etToday=etDate(new Date().toISOString());
       if(!(req.query&&req.query.nocache) && redis){ try{ const c=await redis.get("parkside:agreements"); if(c&&c.today===etToday&&(Date.now()-c.ts)<180000) return res.status(200).json(c.payload); }catch(e){} }

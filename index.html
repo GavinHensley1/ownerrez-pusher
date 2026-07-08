@@ -146,6 +146,15 @@
     <div class="legend">Click any day → full price breakdown + pin/override. 📌 purple = manual override (engine + cron never change it). Grey dashed = already booked. <span style="color:#e6b85c">GAP</span> = orphan-night discount.</div>
   </div>
 
+  <div class="card" id="agreementsCard" style="border-color:#2a3a5a">
+    <h2>📋 Rental agreements <span class="muted" style="font-weight:400;text-transform:none">— which upcoming guests have signed vs still need to</span></h2>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+      <button class="ghost" onclick="loadAgreements(true)">Refresh</button>
+      <span id="agreementsStatus" class="muted"></span>
+    </div>
+    <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings. <b style="color:#2ecc71">Rental agreement</b> = signed lease on file. <b style="color:#2ecc71">Contact info</b> = a mailing address is on file (guests get one only after completing the portal\u2019s \u201cConfirm Contact Info\u201d step). Upcoming active bookings only.</div>
+    <div id="agreementsList" class="legend">…</div>
+  </div>
   <div class="card" id="advCard">
     <h2 style="cursor:pointer;user-select:none" onclick="toggleAdv()">⚙ Advanced / setup <span id="advCaret" style="color:var(--mut)">▸</span></h2>
     <div id="advBody" style="display:none">
@@ -388,15 +397,6 @@
         <span id="callsStatus" class="muted"></span>
       </div>
       <div id="callsList" class="legend">…</div>
-    </div>
-    <div class="card" id="agreementsCard" style="border-color:#2a3a5a">
-      <h2>📋 Rental agreements <span class="muted" style="font-weight:400;text-transform:none">— which upcoming guests have signed vs still need to</span></h2>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
-        <button class="ghost" onclick="loadAgreements(true)">Refresh</button>
-        <span id="agreementsStatus" class="muted"></span>
-      </div>
-      <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings. <b style="color:#2ecc71">Rental agreement</b> = signed lease on file. <b style="color:#2ecc71">Contact info</b> = a mailing address is on file (guests get one only after completing the portal\u2019s \u201cConfirm Contact Info\u201d step). Upcoming active bookings only.</div>
-      <div id="agreementsList" class="legend">…</div>
     </div>
     <div class="card" style="border-color:#3a2a1a">
       <h2>🎚 Pricing tuning <span class="muted" style="font-weight:400;text-transform:none">— moved here from the main tab; changes pricing (Gavin-only)</span></h2>
@@ -860,7 +860,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadAgreements(); loadCalls(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -991,7 +991,7 @@ function boot(){
   HMIN=sY*12+sM; HMAX=eY*12+eM;
   document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611c`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
-  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning(); loadGoLiveStatus(); loadKnobs(); loadRecommendations();
+  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning(); loadGoLiveStatus(); loadKnobs(); loadRecommendations(); loadAgreements();
 }
 
 // ===== Public inquiry + Victor's gate toggles =====
@@ -1152,8 +1152,8 @@ async function loadFraud(){
 }
 async function loadCleaning(){ if(!GPW) return;
   try{ const r=await fetch(api('cleaning_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; const j=await r.json(); renderCleaning(j); }catch(e){} }
-async function loadAgreements(force){ if(!GPW) return; const st=document.getElementById('agreementsStatus'); if(st) st.textContent='…';
-  try{ const r=await fetch(api('agreements_status')+(force?'&nocache=1':'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(!r.ok){ if(st) st.textContent=(j&&j.error)||('error '+r.status); const el=document.getElementById('agreementsList'); if(el) el.innerHTML='<span class="muted">'+frEsc((j&&j.error)||'Could not load bookings.')+'</span>'; return; } renderAgreements(j); }catch(e){ if(st) st.textContent='error'; } }
+async function loadAgreements(force){ const st=document.getElementById('agreementsStatus'); if(st) st.textContent='…';
+  try{ const _h=PW?{'x-app-password':PW}:(GPW?{'x-gavin-password':GPW}:{}); const r=await fetch(api('agreements_status')+(force?'&nocache=1':'')+'&cb='+Date.now(),{headers:_h}); const j=await r.json(); if(!r.ok){ if(st) st.textContent=(j&&j.error)||('error '+r.status); const el=document.getElementById('agreementsList'); if(el) el.innerHTML='<span class="muted">'+frEsc((j&&j.error)||'Could not load bookings.')+'</span>'; return; } renderAgreements(j); }catch(e){ if(st) st.textContent='error'; } }
 function renderAgreements(j){ const el=document.getElementById('agreementsList'); const st=document.getElementById('agreementsStatus'); if(!el) return;
   const b=(j&&j.bookings)||[];
   if(st) st.textContent=(j.needed>0? ('\u26A0 '+j.needed+' need agreement') : '\u2713 all signed')+' \u00B7 '+(j.contactNeeded>0?('\u26A0 '+j.contactNeeded+' need contact info'):'\u2713 contact info complete')+' \u00B7 '+(j.total||0)+' upcoming';
