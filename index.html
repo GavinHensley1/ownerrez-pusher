@@ -389,6 +389,15 @@
       </div>
       <div id="callsList" class="legend">…</div>
     </div>
+    <div class="card" id="agreementsCard" style="border-color:#2a3a5a">
+      <h2>📋 Rental agreements <span class="muted" style="font-weight:400;text-transform:none">— which upcoming guests have signed vs still need to</span></h2>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+        <button class="ghost" onclick="loadAgreements(true)">Refresh</button>
+        <span id="agreementsStatus" class="muted"></span>
+      </div>
+      <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings (signed lease on file = <b style="color:#2ecc71">completed</b>; none yet = <b style="color:#f4b942">needed</b>). Upcoming active bookings only.</div>
+      <div id="agreementsList" class="legend">…</div>
+    </div>
     <div class="card" style="border-color:#3a2a1a">
       <h2>🎚 Pricing tuning <span class="muted" style="font-weight:400;text-transform:none">— moved here from the main tab; changes pricing (Gavin-only)</span></h2>
     </div>
@@ -828,7 +837,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadAgreements(); loadCalls(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1120,6 +1129,20 @@ async function loadFraud(){
 }
 async function loadCleaning(){ if(!GPW) return;
   try{ const r=await fetch(api('cleaning_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; const j=await r.json(); renderCleaning(j); }catch(e){} }
+async function loadAgreements(force){ if(!GPW) return; const st=document.getElementById('agreementsStatus'); if(st) st.textContent='…';
+  try{ const r=await fetch(api('agreements_status')+(force?'&nocache=1':'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(!r.ok){ if(st) st.textContent=(j&&j.error)||('error '+r.status); const el=document.getElementById('agreementsList'); if(el) el.innerHTML='<span class="muted">'+frEsc((j&&j.error)||'Could not load bookings.')+'</span>'; return; } renderAgreements(j); }catch(e){ if(st) st.textContent='error'; } }
+function renderAgreements(j){ const el=document.getElementById('agreementsList'); const st=document.getElementById('agreementsStatus'); if(!el) return;
+  const b=(j&&j.bookings)||[];
+  if(st) st.textContent=(j.needed>0? ('\u26A0 '+j.needed+' need signing') : '\u2713 all signed')+' \u00B7 '+j.completed+'/'+j.total+' completed';
+  if(!b.length){ el.innerHTML='<span class="muted">No upcoming active bookings.</span>'; return; }
+  el.innerHTML='<table style="width:100%"><tr><th style="text-align:left">Arrival</th><th style="text-align:left">Unit</th><th style="text-align:left">Guest</th><th style="text-align:left">Rental agreement</th></tr>'+
+    b.map(function(x){ const ok=x.agreementSigned;
+      const cell = ok
+        ? '<span style="color:#2ecc71">\u2713 Completed</span>'+(x.agreementDate?(' <span class="muted">'+frEsc(x.agreementDate)+'</span>'):'')+(x.agreementUrl?(' \u00B7 <a href="'+frEsc(x.agreementUrl)+'" target="_blank">view</a>'):'')
+        : '<span style="color:#f4b942;font-weight:600">\u26A0 Needed</span>';
+      const hi = ok? '' : ' style="background:#3a2f1a"';
+      return '<tr'+hi+'><td>'+frEsc(x.arrival||'')+'</td><td>'+frEsc(x.unit||'')+'</td><td>'+frEsc(x.guest||'\u2014')+(x.listing_site?(' <span class="muted">('+frEsc(x.listing_site)+')</span>'):'')+'</td><td>'+cell+'</td></tr>'; }).join('')+'</table>';
+}
 function renderCleaning(j){ const el=document.getElementById('fraudCleaning'); if(!el) return; const days=(j&&j.days)||[];
   if(!days.length){ el.innerHTML='<span class="muted">No booking data available.</span>'; return; }
   el.innerHTML='<table style="width:100%"><tr><th style="text-align:left">Date</th><th>Occupied</th><th>Checkouts = cleanings needed</th><th style="text-align:left">Units to clean</th><th>Arrivals</th></tr>'+

@@ -1203,6 +1203,34 @@ module.exports=async(req,res)=>{
       devices.sort(function(a,b){ return String(b.lastTs||"").localeCompare(String(a.lastTs||"")); });
       return res.status(200).json({devices});
     }
+    // ===== Rental agreement status (Gavin-only): which upcoming bookings have a SIGNED lease vs still NEEDED =====
+    // Single OwnerRez call: GET /v2/bookings?...&include_agreements=true. A booking whose agreements[] has a dated
+    // signed lease = "completed"; empty = "needed". Drives the dashboard "Rental agreement completed / needed" card.
+    if(action==="agreements_status"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      if(!orBasicHeader() && !(await orOauthHeader())) return res.status(503).json({error:"OwnerRez API credentials not set (need OWNERREZ_API_USER + OWNERREZ_API_TOKEN)"});
+      const etToday=etDate(new Date().toISOString());
+      if(!(req.query&&req.query.nocache) && redis){ try{ const c=await redis.get("parkside:agreements"); if(c&&c.today===etToday&&(Date.now()-c.ts)<180000) return res.status(200).json(c.payload); }catch(e){} }
+      const pids=UNITS.map(function(u){return u.orp;}).join(",");
+      const nameOf={}; for(const u of UNITS) nameOf[u.orp]=u.name;
+      const url="https://api.ownerrez.com/v2/bookings?property_ids="+pids+"&from="+etToday+"&status=active&include_agreements=true&include_guest=true&limit=100";
+      let r,data;
+      try{ r=await orFetch(url,{prefer:"basic",headers:{Accept:"application/json"}}); data=await r.json(); }
+      catch(e){ return res.status(502).json({error:"OwnerRez fetch failed: "+String(e.message||e)}); }
+      if(!r||!r.ok) return res.status((r&&r.status)||502).json({error:"OwnerRez bookings "+((r&&r.status)||"error"), detail:JSON.stringify(data).slice(0,300)});
+      const items=(data.items||[]).filter(function(b){return !b.is_block && (b.type==="booking"||!b.type);}).map(function(b){
+        const ags=Array.isArray(b.agreements)?b.agreements:[];
+        const signed=ags.find(function(a){return a&&a.date;});
+        return { bookingId:b.id, unit:nameOf[b.property_id]||(b.property&&b.property.name)||("#"+b.property_id), property_id:b.property_id,
+          guest: b.guest? ((b.guest.first_name||"")+" "+(b.guest.last_name||"")).trim() : "",
+          arrival:(b.arrival||"").slice(0,10), departure:(b.departure||"").slice(0,10), listing_site:b.listing_site||"",
+          agreementSigned: !!signed, agreementName: signed?String(signed.name||""):"", agreementDate: signed?String(signed.date||"").slice(0,10):"", agreementUrl: signed?String(signed.url||""):"" };
+      }).sort(function(a,b){return (a.arrival||"").localeCompare(b.arrival||"");});
+      const needed=items.filter(function(x){return !x.agreementSigned;}).length;
+      const payload={ today:etToday, total:items.length, completed:items.length-needed, needed:needed, bookings:items };
+      if(redis){ try{ await redis.set("parkside:agreements",{today:etToday,ts:Date.now(),payload}); }catch(e){} }
+      return res.status(200).json(payload);
+    }
     // ===== Cleaning ground-truth (Gavin-only): actual checkouts/day = units that truly needed a turnover clean =====
     if(action==="cleaning_get"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
