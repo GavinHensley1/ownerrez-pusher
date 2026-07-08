@@ -377,6 +377,9 @@
       </div>
       <div class="legend" style="margin-bottom:6px">Receipts texted via MMS to the StayDeck number will land here automatically once phone intake is live.</div>
       <div id="fraudReceipts"></div>
+      <h3 style="margin:16px 0 4px">🧹 Cleaning ground-truth <span class="muted" style="font-weight:400;text-transform:none">— actual checkouts per day = units that truly needed a turnover clean</span></h3>
+      <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings. Sanity-check Victor’s cleaning claims &amp; supply receipts against this: a unit only needs a full clean when a guest checked <b>out</b> that day.</div>
+      <div id="fraudCleaning" class="legend">…</div>
     </div>
     <div class="card" id="callsCard">
       <h2>📞 Daily call transcripts <span class="muted" style="font-weight:400;text-transform:none">— Victor’s phoned-in updates; also feeds the scorecard</span></h2>
@@ -825,7 +828,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCalls(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1114,6 +1117,14 @@ function frEsc(v){ return String(v==null?'':v).replace(/[&<>]/g,c=>({'&':'&amp;'
 async function loadFraud(){
   if(!GPW) return;
   try{ const r=await fetch(api('fraud_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; FRAUD=await r.json(); renderFraud(); }catch(e){}
+}
+async function loadCleaning(){ if(!GPW) return;
+  try{ const r=await fetch(api('cleaning_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; const j=await r.json(); renderCleaning(j); }catch(e){} }
+function renderCleaning(j){ const el=document.getElementById('fraudCleaning'); if(!el) return; const days=(j&&j.days)||[];
+  if(!days.length){ el.innerHTML='<span class="muted">No booking data available.</span>'; return; }
+  el.innerHTML='<table style="width:100%"><tr><th style="text-align:left">Date</th><th>Occupied</th><th>Checkouts = cleanings needed</th><th style="text-align:left">Units to clean</th><th>Arrivals</th></tr>'+
+    days.slice().reverse().map(function(d){ const hi=d.isToday?' style="background:#12233a"':(d.future?' style="opacity:.55"':''); const c=d.cleaningsNeeded; const cc=c>0?'<b style="color:#f4b942">'+c+'</b>':'<span class="muted">0</span>';
+      return '<tr'+hi+'><td>'+frEsc(d.date)+(d.isToday?' <span class="muted">(today)</span>':(d.future?' <span class="muted">(upcoming)</span>':''))+'</td><td style="text-align:center">'+d.occupied+'/'+(j.unitCount||10)+'</td><td style="text-align:center">'+cc+'</td><td>'+frEsc((d.checkoutUnits||[]).join(', ')||'—')+'</td><td style="text-align:center">'+d.arrivals+'</td></tr>'; }).join('')+'</table>';
 }
 function renderFraud(){
   if(!FRAUD) return;

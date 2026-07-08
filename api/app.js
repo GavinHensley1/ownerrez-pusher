@@ -147,6 +147,33 @@ async function getBooked(state,start,days,useCache=true){
     }catch{} } }
   if(redis) await redis.set("parkside:booked2",{ts:Date.now(),byUnit:out,total,channels}); return {byUnit:out,total,channels};
 }
+// ===== Turnover / cleaning ground-truth (reservation boundaries from OwnerRez iCal) =====
+// getBooked flattens nights; for "who needs a clean" we need reservation END dates (a checkout = a turnover clean).
+async function getUnitEvents(useCache=true){
+  if(useCache&&redis){ try{ const c=await redis.get("parkside:evcache"); if(c&&(Date.now()-c.ts)<3600000) return c.byUnit; }catch(e){} }
+  const byUnit={};
+  for(const u of UNITS){ byUnit[u.orp]=[]; const url=OWNERREZ_ICAL[u.orp]; if(!url) continue;
+    try{ const r=await fetch(url,{headers:{"User-Agent":"parkside-control/1.0"}}); if(!r.ok) continue; const t=await r.text();
+      for(const [a,c] of parseIcs(t)){ const st=a.slice(0,4)+"-"+a.slice(4,6)+"-"+a.slice(6,8); const en=c.slice(0,4)+"-"+c.slice(4,6)+"-"+c.slice(6,8); byUnit[u.orp].push([st,en]); }
+    }catch(e){} }
+  if(redis){ try{ await redis.set("parkside:evcache",{ts:Date.now(),byUnit}); }catch(e){} }
+  return byUnit;
+}
+// Per date in [fromDate .. fromDate+days): which units are occupied that night, which CHECK OUT that day (=need a
+// turnover clean), and which arrive. Date strings compare lexicographically (YYYY-MM-DD).
+async function getTurnovers(fromDate,days,useCache=true){
+  const byUnit=await getUnitEvents(useCache); const nameOf={}; for(const u of UNITS) nameOf[u.orp]=u.name;
+  const out={}; const s=new Date(fromDate+"T00:00:00Z");
+  for(let i=0;i<days;i++){ const d=new Date(s); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10);
+    const occ=[],co=[],arr=[];
+    for(const u of UNITS){ const nm=nameOf[u.orp]; for(const [st,en] of (byUnit[u.orp]||[])){
+      if(st<=ds && ds<en && occ.indexOf(nm)<0) occ.push(nm);
+      if(en===ds && co.indexOf(nm)<0) co.push(nm);
+      if(st===ds && arr.indexOf(nm)<0) arr.push(nm); } }
+    out[ds]={ occupied:occ, checkouts:co, arrivals:arr }; }
+  return out;
+}
+
 function buildAgg(booked,start,days){
   const s=new Date(start+"T00:00:00Z"); const unitAgg={},poolAgg={},nightPool={}; for(const u of UNITS)unitAgg[u.orp]={};
   for(let i=0;i<days;i++){ const d=new Date(s); d.setUTCDate(d.getUTCDate()+i); const ds=d.toISOString().slice(0,10); const mk=ds.slice(0,7); const dt=isWe(d)?1:0; let nb=0;
@@ -1074,15 +1101,18 @@ async function scoreDay(date, device){
   const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device, date);
   let report=""; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; } }catch(e){}
   if(!report || !String(report).trim()) return {error:"no self-report on file for "+date+" (nothing to score against)"};
+  let turn=null; try{ const tv=await getTurnovers(date,1,true); turn=tv[date]; }catch(e){}
   const dataBlock=
     "OBJECTIVE DATA for "+date+" (America/New_York):\n"+
     "- WebWork hours: "+(hours.available?(hours.hours+"h tracked, "+hours.active_pct+"% active ("+hours.active_min+" active min of "+hours.tracked_min+")"):"no WebWork data")+"\n"+
     "- GPS on-site time: "+zones.on_site_min+" min on resort grounds of "+zones.total_min+" min tracked\n"+
     "- GPS time per zone (minutes): office "+zones.byZoneMin.office+", tepees "+zones.byZoneMin.tepees+", maintenance "+zones.byZoneMin.maintenance+", elsewhere-on-resort "+zones.byZoneMin.resort+", off-site "+zones.byZoneMin.off+"\n"+
-    "- First ping "+(zones.first||"n/a")+", last ping "+(zones.last||"n/a")+"\n";
+    "- First ping "+(zones.first||"n/a")+", last ping "+(zones.last||"n/a")+"\n"+
+    (turn? ("- Bookings/cleaning ground-truth: "+turn.occupied.length+" of "+UNITS.length+" units occupied that night; "+turn.checkouts.length+" checkout(s) that day \u2192 "+turn.checkouts.length+" unit(s) required a turnover clean"+(turn.checkouts.length?(" ("+turn.checkouts.join(", ")+")"):"")+"; "+turn.arrivals.length+" arrival(s)"+(turn.arrivals.length?(" ("+turn.arrivals.join(", ")+")"):"")+".\n") : "");
   const sys="You audit an employee's (Victor, maintenance/operations at Parkside Tepees resort) daily self-report against objective tracking data. "+
     "Compare what he SAID he did to the GPS zone time and WebWork computer-activity data. "+
     "Judge how well his claims match the data. Be fair: absence of GPS/WebWork data for a task does not always mean he lied (e.g., outdoor work with phone in pocket still shows GPS on-site; computer tasks show WebWork activity). "+
+    "Cross-check any CLEANING claims against the bookings/cleaning ground-truth: a unit needs a full turnover clean when a guest checked OUT that day. If he claims he cleaned MORE units than there were checkouts, flag the excess as unverified in discrepancies; markedly fewer cleanings than checkouts may mean turnovers were skipped. "+
     "Return ONLY a JSON object: {\"truth_score\":0-100, \"hours_worked\":<number, from the data>, \"matches\":[\"...\"], \"discrepancies\":[\"...\"], \"summary\":\"1-2 sentences\"}. "+
     "truth_score = how well his report is corroborated by the data (100 = fully consistent, low = claims contradicted by the data).";
   const userMsg=dataBlock+"\nVICTOR'S SELF-REPORT:\n"+String(report).slice(0,4000);
@@ -1172,6 +1202,15 @@ module.exports=async(req,res)=>{
           devices.push({device:dev, count, lastZone:(last&&last.zone)||null, lastTs:(last&&last.t)||null}); } } }catch(e){}
       devices.sort(function(a,b){ return String(b.lastTs||"").localeCompare(String(a.lastTs||"")); });
       return res.status(200).json({devices});
+    }
+    // ===== Cleaning ground-truth (Gavin-only): actual checkouts/day = units that truly needed a turnover clean =====
+    if(action==="cleaning_get"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      const etToday=etDate(new Date().toISOString());
+      const start=new Date(etToday+"T00:00:00Z"); start.setUTCDate(start.getUTCDate()-9); const from=start.toISOString().slice(0,10);
+      let tv={}; try{ tv=await getTurnovers(from,12,true); }catch(e){ return res.status(200).json({error:"booking feed unavailable",days:[]}); }
+      const rows=Object.keys(tv).sort().map(function(ds){ const t=tv[ds]; return { date:ds, occupied:t.occupied.length, cleaningsNeeded:t.checkouts.length, checkoutUnits:t.checkouts, arrivals:t.arrivals.length, isToday:ds===etToday, future:ds>etToday }; });
+      return res.status(200).json({ today:etToday, unitCount:UNITS.length, days:rows });
     }
     // ===== Fraud Alert (Gavin-only): payout-account integrity + receipt reconciliation =====
     // Storage blob parkside:fraud = { accounts:{channel:{...}}, checks:[], receipts:[], alerts:[] }
