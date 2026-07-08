@@ -2087,6 +2087,22 @@ module.exports=async(req,res)=>{
       try{ if(redis){ let log=(await redis.get("parkside:calllog"))||[]; const before=log.length; log=log.filter(c=>String(c.id||"")!==String(key) && String(c.at||"")!==String(key)); await redis.set("parkside:calllog", log); return res.status(200).json({deleted:before-log.length, remaining:log.length}); } }catch(e){ return res.status(500).json({error:String(e.message||e)}); }
       return res.status(200).json({deleted:0});
     }
+    if(action==="mms_media"){
+      const gp=(req.query&&req.query.gp)||(req.headers["x-gavin-password"]||"");
+      if(gp!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).end("unauthorized");
+      const rid=(req.query&&req.query.rid)||"";
+      let blob={}; try{ if(redis) blob=(await redis.get("parkside:fraud"))||{}; }catch(e){}
+      const rc=(blob.receipts||[]).find(function(r){return String(r.id)===String(rid);});
+      if(!rc||!rc.media) return res.status(404).end("not found");
+      const url=String(rc.media);
+      const sid=process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID;
+      const tok=process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN;
+      const headers={}; if(/twilio\.com/i.test(url)&&sid&&tok) headers.Authorization="Basic "+Buffer.from(sid+":"+tok).toString("base64");
+      try{ const rr=await fetch(url,{headers,redirect:"follow"}); if(!rr.ok) return res.status(502).end("fetch "+rr.status);
+        const ct=rr.headers.get("content-type")||"image/jpeg"; const buf=Buffer.from(await rr.arrayBuffer());
+        res.setHeader("Content-Type",ct); res.setHeader("Cache-Control","private, max-age=86400"); return res.status(200).end(buf);
+      }catch(e){ return res.status(502).end("err "+String(e.message||e)); }
+    }
     if(action==="sms_inbound"){
       const cfg=await getNotifyConfig();
       let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
