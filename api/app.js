@@ -1221,13 +1221,24 @@ module.exports=async(req,res)=>{
       const items=(data.items||[]).filter(function(b){return !b.is_block && (b.type==="booking"||!b.type);}).map(function(b){
         const ags=Array.isArray(b.agreements)?b.agreements:[];
         const signed=ags.find(function(a){return a&&a.date;});
-        return { bookingId:b.id, unit:nameOf[b.property_id]||(b.property&&b.property.name)||("#"+b.property_id), property_id:b.property_id,
+        return { bookingId:b.id, guest_id:b.guest_id||null, unit:nameOf[b.property_id]||(b.property&&b.property.name)||("#"+b.property_id), property_id:b.property_id,
           guest: b.guest? ((b.guest.first_name||"")+" "+(b.guest.last_name||"")).trim() : "",
           arrival:(b.arrival||"").slice(0,10), departure:(b.departure||"").slice(0,10), listing_site:b.listing_site||"",
-          agreementSigned: !!signed, agreementName: signed?String(signed.name||""):"", agreementDate: signed?String(signed.date||"").slice(0,10):"", agreementUrl: signed?String(signed.url||""):"" };
+          agreementSigned: !!signed, agreementName: signed?String(signed.name||""):"", agreementDate: signed?String(signed.date||"").slice(0,10):"", agreementUrl: signed?String(signed.url||""):"", contactInfo:false };
       }).sort(function(a,b){return (a.arrival||"").localeCompare(b.arrival||"");});
+      // Contact-info heuristic: a guest only gets a mailing ADDRESS on file after completing the portal "Confirm Contact Info" step
+      // (OTAs like Airbnb pass a name/email but no street address), so address-on-file ~= contact info completed.
+      const _gc=items.slice(0,60);
+      await Promise.all(_gc.map(async function(it){
+        if(!it.guest_id) return;
+        try{ const gr=await orFetch("https://api.ownerrez.com/v2/guests/"+it.guest_id,{prefer:"basic",headers:{Accept:"application/json"}});
+          if(gr&&gr.ok){ const g=await gr.json(); const addrs=Array.isArray(g.addresses)?g.addresses:[];
+            it.contactInfo=addrs.some(function(a){return a && (String(a.street||a.street1||a.address1||"").trim()||String(a.city||"").trim());}); }
+        }catch(e){}
+      }));
       const needed=items.filter(function(x){return !x.agreementSigned;}).length;
-      const payload={ today:etToday, total:items.length, completed:items.length-needed, needed:needed, bookings:items };
+      const contactNeeded=items.filter(function(x){return !x.contactInfo;}).length;
+      const payload={ today:etToday, total:items.length, completed:items.length-needed, needed:needed, contactOnFile:items.length-contactNeeded, contactNeeded:contactNeeded, bookings:items };
       if(redis){ try{ await redis.set("parkside:agreements",{today:etToday,ts:Date.now(),payload}); }catch(e){} }
       return res.status(200).json(payload);
     }
@@ -2178,6 +2189,9 @@ module.exports=async(req,res)=>{
       const bodyRaw=String(pl.message||pl.text||b.Body||b.body||b.text||b.message||"").trim();
       const tok=(req.query&&req.query.token)||"";
       if(cfg.secret && tok && tok!==cfg.secret) return res.status(200).json({ignored:true, reason:"bad token"});
+      // Duplicate-webhook guard: Twilio can POST the same MMS twice (the number AND its Messaging Service). Dedup by MessageSid.
+      const _msgSid=String(pl.MessageSid||b.MessageSid||pl.SmsMessageSid||b.SmsMessageSid||pl.SmsSid||b.SmsSid||pl.messageId||b.messageId||"").trim();
+      if(_msgSid && redis){ try{ const _fresh=await redis.set("parkside:mms_seen:"+_msgSid,"1",{nx:true,ex:900}); if(_fresh===null||_fresh===false) return res.status(200).json({ok:true,dedup:true,reason:"duplicate webhook",sid:_msgSid}); }catch(e){} }
       // ROBUST MMS/media intake \u2014 runs BEFORE the sender filter so a receipt photo from ANY number (incl. Gavin's own tests) is captured into the Fraud tab.
       { const media=[]; const seen={};
         const isImg=x=>typeof x==="string"&&x.length<4000&&(/^https?:\/\/[^\s]+\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?)(\?|#|$)/i.test(x)||/^data:image\//i.test(x)||/^https?:\/\/[^\s]*(mediaurl|media\/|\/mms|attachment|\/image|\/photo|cloudinary|amazonaws|blob)/i.test(x));
@@ -2186,7 +2200,7 @@ module.exports=async(req,res)=>{
         const nm=parseInt(pl.NumMedia||b.NumMedia||b.num_media||0,10)||0; for(let _i=0;_i<nm;_i++){ const mu=b["MediaUrl"+_i]||pl["MediaUrl"+_i]; if(mu) push(mu); }
         if(media.length){
           try{ if(redis){ let blob=(await redis.get("parkside:fraud"))||{accounts:{},checks:[],receipts:[],alerts:[]}; blob.receipts=blob.receipts||[]; const now=new Date().toISOString();
-            for(const mu of media){ blob.receipts.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,7), source:"mms", vendor:"", amount:"", date:etDate(now), ref:"", note:bodyRaw||"", media:mu, from, status:"unreviewed", at:now }); }
+            for(const mu of media){ blob.receipts.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,7), source:"mms", vendor:"", amount:"", date:etDate(now), ref:"", note:bodyRaw||"", media:mu, from, sid:_msgSid||"", status:"unreviewed", at:now }); }
             blob.receipts=blob.receipts.slice(0,2000); await redis.set("parkside:fraud",blob); } }catch(e){}
           try{ await sendSmsGateway(cfg, "\uD83E\uDDFE Receipt received ("+media.length+" image"+(media.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
           return res.status(200).json({receipt:true, count:media.length, via:"robust"});
@@ -2201,7 +2215,7 @@ module.exports=async(req,res)=>{
       if(!mediaUrls.length){ const alt=pl.mediaUrl||b.mediaUrl||pl.media||b.media; if(alt){ if(Array.isArray(alt)) alt.forEach(x=>mediaUrls.push(String(x))); else mediaUrls.push(String(alt)); } }
       if(mediaUrls.length){
         try{ if(redis){ let blob=(await redis.get("parkside:fraud"))||{accounts:{},checks:[],receipts:[],alerts:[]}; blob.receipts=blob.receipts||[]; const now=new Date().toISOString();
-          for(const mu of mediaUrls){ blob.receipts.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,7), source:"mms", vendor:"", amount:"", date:etDate(now), ref:"", note:bodyRaw||"", media:mu, status:"unreviewed", at:now }); }
+          for(const mu of mediaUrls){ blob.receipts.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,7), source:"mms", vendor:"", amount:"", date:etDate(now), ref:"", note:bodyRaw||"", media:mu, sid:_msgSid||"", status:"unreviewed", at:now }); }
           blob.receipts=blob.receipts.slice(0,2000); await redis.set("parkside:fraud",blob); } }catch(e){}
         try{ await sendSmsGateway(cfg, "\uD83E\uDDFE Receipt received ("+mediaUrls.length+" image"+(mediaUrls.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
         return res.status(200).json({receipt:true, count:mediaUrls.length});

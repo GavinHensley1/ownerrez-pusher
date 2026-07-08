@@ -395,7 +395,7 @@
         <button class="ghost" onclick="loadAgreements(true)">Refresh</button>
         <span id="agreementsStatus" class="muted"></span>
       </div>
-      <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings (signed lease on file = <b style="color:#2ecc71">completed</b>; none yet = <b style="color:#f4b942">needed</b>). Upcoming active bookings only.</div>
+      <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings. <b style="color:#2ecc71">Rental agreement</b> = signed lease on file. <b style="color:#2ecc71">Contact info</b> = a mailing address is on file (guests get one only after completing the portal\u2019s \u201cConfirm Contact Info\u201d step). Upcoming active bookings only.</div>
       <div id="agreementsList" class="legend">…</div>
     </div>
     <div class="card" style="border-color:#3a2a1a">
@@ -1133,15 +1133,18 @@ async function loadAgreements(force){ if(!GPW) return; const st=document.getElem
   try{ const r=await fetch(api('agreements_status')+(force?'&nocache=1':'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(!r.ok){ if(st) st.textContent=(j&&j.error)||('error '+r.status); const el=document.getElementById('agreementsList'); if(el) el.innerHTML='<span class="muted">'+frEsc((j&&j.error)||'Could not load bookings.')+'</span>'; return; } renderAgreements(j); }catch(e){ if(st) st.textContent='error'; } }
 function renderAgreements(j){ const el=document.getElementById('agreementsList'); const st=document.getElementById('agreementsStatus'); if(!el) return;
   const b=(j&&j.bookings)||[];
-  if(st) st.textContent=(j.needed>0? ('\u26A0 '+j.needed+' need signing') : '\u2713 all signed')+' \u00B7 '+j.completed+'/'+j.total+' completed';
+  if(st) st.textContent=(j.needed>0? ('\u26A0 '+j.needed+' need agreement') : '\u2713 all signed')+' \u00B7 '+(j.contactNeeded>0?('\u26A0 '+j.contactNeeded+' need contact info'):'\u2713 contact info complete')+' \u00B7 '+(j.total||0)+' upcoming';
   if(!b.length){ el.innerHTML='<span class="muted">No upcoming active bookings.</span>'; return; }
-  el.innerHTML='<table style="width:100%"><tr><th style="text-align:left">Arrival</th><th style="text-align:left">Unit</th><th style="text-align:left">Guest</th><th style="text-align:left">Rental agreement</th></tr>'+
-    b.map(function(x){ const ok=x.agreementSigned;
-      const cell = ok
+  const okBadge=function(){return '<span style="color:#2ecc71">\u2713</span>';};
+  const needBadge=function(){return '<span style="color:#f4b942;font-weight:600">\u26A0 Needed</span>';};
+  el.innerHTML='<table style="width:100%"><tr><th style="text-align:left">Arrival</th><th style="text-align:left">Unit</th><th style="text-align:left">Guest</th><th style="text-align:left">Contact info</th><th style="text-align:left">Rental agreement</th></tr>'+
+    b.map(function(x){ const ok=x.agreementSigned; const cok=!!x.contactInfo;
+      const agrCell = ok
         ? '<span style="color:#2ecc71">\u2713 Completed</span>'+(x.agreementDate?(' <span class="muted">'+frEsc(x.agreementDate)+'</span>'):'')+(x.agreementUrl?(' \u00B7 <a href="'+frEsc(x.agreementUrl)+'" target="_blank">view</a>'):'')
-        : '<span style="color:#f4b942;font-weight:600">\u26A0 Needed</span>';
-      const hi = ok? '' : ' style="background:#3a2f1a"';
-      return '<tr'+hi+'><td>'+frEsc(x.arrival||'')+'</td><td>'+frEsc(x.unit||'')+'</td><td>'+frEsc(x.guest||'\u2014')+(x.listing_site?(' <span class="muted">('+frEsc(x.listing_site)+')</span>'):'')+'</td><td>'+cell+'</td></tr>'; }).join('')+'</table>';
+        : needBadge();
+      const conCell = cok ? '<span style="color:#2ecc71">\u2713 On file</span>' : needBadge();
+      const hi = (ok&&cok)? '' : ' style="background:#3a2f1a"';
+      return '<tr'+hi+'><td>'+frEsc(x.arrival||'')+'</td><td>'+frEsc(x.unit||'')+'</td><td>'+frEsc(x.guest||'\u2014')+(x.listing_site?(' <span class="muted">('+frEsc(x.listing_site)+')</span>'):'')+'</td><td>'+conCell+'</td><td>'+agrCell+'</td></tr>'; }).join('')+'</table>';
 }
 function renderCleaning(j){ const el=document.getElementById('fraudCleaning'); if(!el) return; const days=(j&&j.days)||[];
   if(!days.length){ el.innerHTML='<span class="muted">No booking data available.</span>'; return; }
