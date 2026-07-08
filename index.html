@@ -424,6 +424,29 @@
       <p style="margin-top:8px">It will factor in: hours worked (from the time tracker), how closely your daily check-in matches what actually happened, and your bonus tier for the week.</p>
     </div>
   </div>
+
+  <div class="card">
+    <h2>🧹 Cleans this month <span class="muted" style="font-weight:400;text-transform:none">— your running total, resets automatically each month</span></h2>
+    <div id="cleansTotal" style="font-size:34px;font-weight:800;margin:6px 0 2px">0</div>
+    <div class="legend" id="cleansMonth" style="margin-bottom:12px">—</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <input id="cleanNote" type="text" placeholder="Which unit / note (optional)" style="flex:1;min-width:160px">
+      <button onclick="addClean()">+ Log a clean</button>
+      <button class="ghost" onclick="undoClean()">Undo last</button>
+    </div>
+    <div id="cleansLog" class="legend"></div>
+  </div>
+
+  <div class="card">
+    <h2>💵 Refunds you gave <span class="muted" style="font-weight:400;text-transform:none">— report a refund: amount + what happened (this month)</span></h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:10px">
+      <input id="refundAmt" type="number" step="0.01" min="0" placeholder="Amount $" style="width:120px">
+      <input id="refundDesc" type="text" placeholder="What happened?" style="flex:1;min-width:180px">
+      <button onclick="addRefund()">Report refund</button>
+    </div>
+    <div class="legend" id="refundsTotal" style="margin-bottom:8px">—</div>
+    <div id="refundsList"></div>
+  </div>
 </div>
 
 <script>
@@ -1208,5 +1231,31 @@ async function deleteCall(key){
   loadCalls();
 }
 // ===== Bonus tab (visible to Victor later; no Gavin login) =====
-function loadBonus(){ /* v1 placeholder — weekly score/bonus surfaces here once the formula is set */ }
+function bEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+async function loadBonus(){ loadCleans(); loadRefunds(); }
+async function loadCleans(){
+  try{ const r=await fetch(api('cleans_get')+'&cb='+Date.now()); const j=await r.json();
+    const t=document.getElementById('cleansTotal'); if(t) t.textContent=(j.count||0);
+    const m=document.getElementById('cleansMonth'); if(m) m.textContent='Month: '+(j.month||'');
+    const el=document.getElementById('cleansLog'); if(el){ const log=(j.log||[]).slice().reverse();
+      el.innerHTML = log.length ? '<table style="width:100%"><tr><th style="text-align:left">Date</th><th>#</th><th style="text-align:left">Note</th></tr>'
+        + log.map(e=>'<tr><td>'+bEsc(e.date||'')+'</td><td style="text-align:center">'+bEsc(e.n||1)+'</td><td>'+bEsc(e.note||'')+'</td></tr>').join('')+'</table>'
+        : '<span class="muted">No cleans logged yet this month.</span>'; }
+  }catch(e){}
+}
+async function cleansPost(payload){ try{ const r=await fetch(api('cleans_post'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); if(r.ok){ await loadCleans(); return true; } }catch(e){} return false; }
+async function addClean(){ const note=(document.getElementById('cleanNote')||{}).value||''; await cleansPost({op:'add', n:1, note}); const ci=document.getElementById('cleanNote'); if(ci) ci.value=''; }
+async function undoClean(){ if(!confirm('Undo your most recent logged clean?')) return; await cleansPost({op:'undo'}); }
+async function loadRefunds(){
+  try{ const r=await fetch(api('refunds_get')+'&cb='+Date.now()); const j=await r.json();
+    const tt=document.getElementById('refundsTotal'); if(tt) tt.textContent=(j.count||0)+' refund(s) this month · $'+(j.total||0).toFixed(2)+' total';
+    const el=document.getElementById('refundsList'); if(el){ const list=(j.refunds||[]);
+      el.innerHTML = list.length ? '<table style="width:100%"><tr><th style="text-align:left">Date</th><th>Amount</th><th style="text-align:left">What happened</th><th></th></tr>'
+        + list.map(x=>'<tr><td>'+bEsc(x.date||'')+'</td><td style="text-align:right">$'+(Number(x.amount)||0).toFixed(2)+'</td><td>'+bEsc(x.desc||'')+'</td><td><button class="ghost" onclick="delRefund(\''+bEsc(x.id)+'\')">✕</button></td></tr>').join('')+'</table>'
+        : '<span class="muted">No refunds reported yet this month.</span>'; }
+  }catch(e){}
+}
+async function refundsPost(payload){ try{ const r=await fetch(api('refunds_post'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); if(r.ok){ await loadRefunds(); return true; } }catch(e){} return false; }
+async function addRefund(){ const amt=(document.getElementById('refundAmt')||{}).value||''; const desc=(document.getElementById('refundDesc')||{}).value||''; if(!amt && !desc.trim()){ alert('Enter an amount or a description.'); return; } await refundsPost({op:'add', amount:amt, desc}); const a=document.getElementById('refundAmt'); if(a) a.value=''; const d=document.getElementById('refundDesc'); if(d) d.value=''; }
+async function delRefund(id){ if(!confirm('Delete this refund entry?')) return; await refundsPost({op:'delete', id}); }
 </script></body></html>

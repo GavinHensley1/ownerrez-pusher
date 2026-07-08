@@ -718,6 +718,50 @@ function htmlPage(title, msg){
     +'<h1 style="margin:0 0 8px 0;font-size:22px">'+escHtml(title)+'</h1>'
     +'<p style="color:#9fb0c0;margin:0">'+escHtml(msg)+'</p></div></body></html>';
 }
+// ===== Victor daily verification-call reminder =====
+// Victor is supposed to EITHER complete a daily verification phone call (logged in
+// parkside:calllog with isVictor=true) OR have email verification turned on. If, on a
+// MONITORED day (Wed-Sat, America/New_York), he did NEITHER, email him once that we could
+// not verify. Never runs Sun/Mon/Tue. Guarded against double-send by a per-day dedup key.
+async function victorVerifyConfig(){
+  let v=null; try{ if(redis) v=await redis.get("parkside:victor_verify"); }catch(e){}
+  v=v||{};
+  // emailEnabled: Victor's "email verification is on" flag (env fallback VICTOR_EMAIL_VERIFY=1)
+  const envOn=String(process.env.VICTOR_EMAIL_VERIFY||"").trim();
+  return { emailEnabled: (v.emailEnabled===true) || envOn==="1" || envOn.toLowerCase()==="true" };
+}
+async function victorCalledOn(date){ // did Victor complete a verification call on this ET date?
+  try{ if(!redis) return false; const log=(await redis.get("parkside:calllog"))||[];
+    return log.some(c=>c && c.isVictor===true && String(c.date||"")===date); }catch(e){ return false; }
+}
+async function sendVictorVerifyReminderEmail(){
+  const cfg=await getNotifyConfig();
+  const to=cfg.to; // Victor's email (victorEmail / VICTOR_EMAIL)
+  const subject="Parkside — we could not verify you today ⚠️";
+  const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#0f172a">'
+    +'<h2 style="margin:0 0 10px">We were unable to verify you today</h2>'
+    +'<p style="font-size:14px;line-height:1.5">We did not receive your daily verification call, and email verification is not turned on for your account.</p>'
+    +'<p style="font-size:14px;line-height:1.5">Please complete your verification phone call, or turn on email verification, so we can confirm you today.</p>'
+    +'<p style="color:#94a3b8;font-size:12px">Automated reminder from the Parkside engine.</p></div>';
+  const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to, subject, html});
+  return {...result, to, subject};
+}
+// Core check — safe to call from a cron or heartbeat. Returns what it did.
+async function runVictorVerifyReminder(nowIso){
+  const iso=nowIso||new Date().toISOString();
+  const date=etDate(iso); const wd=etWeekday(iso);
+  // Only Wed(3)-Sat(6). Sun(0)/Mon(1)/Tue(2) are NOT monitored — never send.
+  if(!(wd>=3 && wd<=6)) return {sent:false, skipped:"not a monitored day (Wed-Sat only)", date, weekday:wd};
+  const cfg=await victorVerifyConfig();
+  if(cfg.emailEnabled) return {sent:false, skipped:"email verification enabled", date};
+  if(await victorCalledOn(date)) return {sent:false, skipped:"verification call completed", date};
+  // Dedup: one reminder per day max.
+  const dk="parkside:verify_reminder_sent:"+date;
+  try{ if(redis){ const already=await redis.get(dk); if(already) return {sent:false, skipped:"already reminded today", date, at:already}; } }catch(e){}
+  const r=await sendVictorVerifyReminderEmail();
+  try{ if(redis) await redis.set(dk, new Date().toISOString()); }catch(e){}
+  return {sent:!!(r&&r.sent===true), date, weekday:wd, email:r};
+}
 function editPageHtml(it, token, unit, guestName, errMsg){
   const action='/api/app?action=edit_approval&id='+encodeURIComponent(it.id)+'&token='+encodeURIComponent(token||'');
   return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Write the reply</title></head>'
@@ -1066,6 +1110,11 @@ const ZONES_DEFAULT=[
   { name:'resort',      lat:35.7678,    lon:-83.5730,    radius_m:800 }
 ];
 function etDate(iso){ try{ return new Date(iso).toLocaleDateString('en-CA',{timeZone:'America/New_York'}); }catch(e){ return new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'}); } }
+// Weekday (0=Sun..6=Sat) in America/New_York for a given iso (or now). Used to gate the
+// daily verification-call reminder to Wed-Sat only (Sun/Mon/Tue are not monitored).
+function etWeekday(iso){ try{ var d=iso?new Date(iso):new Date(); var wd=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',weekday:'short'}).format(d); return {Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6}[wd]; }catch(e){ return new Date().getUTCDay(); } }
+// Current YYYY-MM in America/New_York (month key for cleans/refunds tallies).
+function etMonth(iso){ return etDate(iso||new Date().toISOString()).slice(0,7); }
 async function getZones(){ try{ if(redis){ const z=await redis.get('parkside:zones'); if(Array.isArray(z)&&z.length) return z.map(x=>({name:String(x.name||'zone'),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)})).filter(x=>isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0); } }catch(e){} return ZONES_DEFAULT; }
 function haversineM(lat1,lon1,lat2,lon2){ const R=6371000, r=x=>x*Math.PI/180; const dLat=r(lat2-lat1), dLon=r(lon2-lon1); const a=Math.sin(dLat/2)**2 + Math.cos(r(lat1))*Math.cos(r(lat2))*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.min(1,Math.sqrt(a))); }
 function classifyPoint(lat,lon,zones){ let best=null; for(const z of zones){ const d=haversineM(lat,lon,z.lat,z.lon); if(d<=z.radius_m){ return {zone:z.name, dist_m:Math.round(d)}; } if(best===null||d<best.dist_m){ best={zone:'off', dist_m:Math.round(d), nearest:z.name}; } } return best||{zone:'off', dist_m:null}; }
@@ -1299,6 +1348,87 @@ module.exports=async(req,res)=>{
       } else { return res.status(400).json({error:"unknown op: "+op}); }
       try{ if(redis) await redis.set("parkside:fraud", blob); }catch(e){}
       return res.status(200).json(blob);
+    }
+    // ===== Victor daily verification-call reminder =====
+    // Cron-eligible: emails Victor if he did NOT complete his verification call AND email
+    // verification is off — ONLY on monitored days (Wed-Sat, America/New_York). Auth: cron
+    // secret OR Gavin password (for manual/diagnostic runs).
+    if(action==="verify_reminder"){
+      const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x"))
+        || ((req.query&&req.query.token)===(process.env.CRON_SECRET||"__y"))
+        || ((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__z"));
+      if(!okAuth) return res.status(401).json({error:"unauthorized"});
+      const out=await runVictorVerifyReminder(new Date().toISOString());
+      return res.status(200).json(out);
+    }
+    // Victor email-verification toggle. GET reads current status (ungated read); POST sets it.
+    // POST is Gavin-gated OR app-password (owner action).
+    if(action==="victor_verify"){
+      if(req.method==="POST"){
+        const okAuth=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x")) || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__y"));
+        if(!okAuth) return res.status(401).json({error:"unauthorized"});
+        let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+        let v=null; try{ if(redis) v=await redis.get("parkside:victor_verify"); }catch(e){} v=v||{};
+        v.emailEnabled=!!b.emailEnabled; v.updated=new Date().toISOString();
+        try{ if(redis) await redis.set("parkside:victor_verify", v); }catch(e){}
+        return res.status(200).json({ok:true, ...(await victorVerifyConfig())});
+      }
+      const date=etDate(new Date().toISOString());
+      return res.status(200).json({ ...(await victorVerifyConfig()), calledToday:await victorCalledOn(date), date, weekday:etWeekday(new Date().toISOString()) });
+    }
+    // ===== Victor portal (Bonus tab): monthly cleans tally =====
+    // Victor-accessible (no login), matching the Bonus tab. Keyed parkside:cleans:<YYYY-MM>;
+    // auto-resets each month because the month is part of the key.
+    if(action==="cleans_get"){
+      const month=String((req.query&&req.query.month)||"")||etMonth();
+      let rec=null; try{ if(redis) rec=await redis.get("parkside:cleans:"+month); }catch(e){}
+      rec=rec||{count:0, log:[]};
+      return res.status(200).json({ month, count:Number(rec.count||0), log:(rec.log||[]).slice(-50) });
+    }
+    if(action==="cleans_post"){
+      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+      const month=etMonth(); const op=String(b.op||"add");
+      let rec=null; try{ if(redis) rec=await redis.get("parkside:cleans:"+month); }catch(e){}
+      rec=rec||{count:0, log:[]}; rec.log=rec.log||[];
+      if(op==="add"){
+        const n=Math.max(1, Math.min(50, parseInt(b.n,10)||1));
+        const note=String(b.note||"").slice(0,200); const now=new Date().toISOString();
+        rec.count=Number(rec.count||0)+n;
+        rec.log.push({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), n, note, at:now, date:etDate(now) });
+        rec.log=rec.log.slice(-200);
+      } else if(op==="undo"){
+        const last=rec.log.pop(); if(last) rec.count=Math.max(0, Number(rec.count||0)-Number(last.n||1));
+      } else { return res.status(400).json({error:"unknown op: "+op}); }
+      try{ if(redis) await redis.set("parkside:cleans:"+month, rec); }catch(e){}
+      return res.status(200).json({ ok:true, month, count:Number(rec.count||0), log:rec.log.slice(-50) });
+    }
+    // ===== Victor portal (Bonus tab): refunds report =====
+    // Victor-accessible. Keyed parkside:refunds:<YYYY-MM> (list per month).
+    if(action==="refunds_get"){
+      const month=String((req.query&&req.query.month)||"")||etMonth();
+      let list=null; try{ if(redis) list=await redis.get("parkside:refunds:"+month); }catch(e){}
+      list=Array.isArray(list)?list:[];
+      const total=list.reduce((a,r)=>a+(Number(r.amount)||0),0);
+      return res.status(200).json({ month, count:list.length, total:Math.round(total*100)/100, refunds:list.slice(0,100) });
+    }
+    if(action==="refunds_post"){
+      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+      const month=etMonth(); const op=String(b.op||"add");
+      let list=null; try{ if(redis) list=await redis.get("parkside:refunds:"+month); }catch(e){}
+      list=Array.isArray(list)?list:[];
+      if(op==="add"){
+        const amount=Math.round((parseFloat(b.amount)||0)*100)/100;
+        const desc=String(b.desc||b.description||"").slice(0,1000);
+        if(!(amount>0) && !desc) return res.status(400).json({error:"need an amount or description"});
+        const now=new Date().toISOString();
+        list.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), amount, desc, at:now, date:etDate(now) });
+        list=list.slice(0,500);
+      } else if(op==="delete"){
+        const id=String(b.id||""); list=list.filter(r=>String(r.id)!==id);
+      } else { return res.status(400).json({error:"unknown op: "+op}); }
+      try{ if(redis) await redis.set("parkside:refunds:"+month, list); }catch(e){}
+      const total=list.reduce((a,r)=>a+(Number(r.amount)||0),0);
+      return res.status(200).json({ ok:true, month, count:list.length, total:Math.round(total*100)/100, refunds:list.slice(0,100) });
     }
     // WebWork API probe (Gavin-gated) — pass ?path=/workspaces etc. Returns raw JSON to validate token + learn shapes.
     if(action==="webwork_raw"){
@@ -1847,7 +1977,8 @@ module.exports=async(req,res)=>{
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
       const out=await runPollMessages(req);
       const esc=await escalateStaleApprovals(req);
-      return res.status(200).json(Object.assign(out||{}, {escalation:esc}));
+      let verify=null; try{ verify=await runVictorVerifyReminder(new Date().toISOString()); }catch(e){ verify={error:String(e.message||e)}; }
+      return res.status(200).json(Object.assign(out||{}, {escalation:esc, verifyReminder:verify}));
     }
     // PUBLIC plan-free heartbeat: hit by an external free cron (cron-job.org/UptimeRobot)
     // or by page loads. Token-gated by the approve-link secret. Drives intake without
