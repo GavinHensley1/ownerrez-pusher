@@ -2005,8 +2005,8 @@ module.exports=async(req,res)=>{
       const cb=origin+"/api/app?action=voice_transcription"+tokQ;
       const xml='<?xml version="1.0" encoding="UTF-8"?>'
         +'<Response>'
-        +'<Say voice="alice">Hi, you have reached Parkside Tepees. Please leave your daily update after the tone, then hang up when you are done.</Say>'
-        +'<Record maxLength="120" playBeep="true" transcribe="true" transcribeCallback="'+cb+'" />'
+        +'<Say voice="alice">Hi, you have reached Parkside Tepees. After the tone, please walk me through your whole day hour by hour \u2014 what you worked on and roughly when, from start to finish. Then hang up when you are done.</Say>'
+        +'<Record maxLength="180" playBeep="true" transcribe="true" transcribeCallback="'+cb+'" />'
         +'<Say voice="alice">Thanks. Goodbye.</Say>'
         +'</Response>';
       res.setHeader("Content-Type","text/xml"); res.status(200); return res.end(xml);
@@ -2036,7 +2036,7 @@ module.exports=async(req,res)=>{
         }
       }catch(e){}
       try{ if(redis){
-        const entry={ from, date, text:transcript, recordingUrl:recUrl, status:(transcript?"transcribed":"recorded"), isVictor, at:new Date().toISOString() };
+        const entry={ id:"c"+Date.now().toString(36)+Math.random().toString(36).slice(2,7), from, date, text:transcript, recordingUrl:recUrl, status:(transcript?"transcribed":"recorded"), isVictor, at:new Date().toISOString() };
         const log=(await redis.get("parkside:calllog"))||[]; log.unshift(entry); await redis.set("parkside:calllog", log.slice(0,500));
         if(isVictor && transcript){ const prev=(await redis.get("parkside:report:"+date))||""; const merged=(prev && prev.indexOf(transcript)===-1)?(prev+"\n\n[call] "+transcript):transcript; await redis.set("parkside:report:"+date, merged); }
       } }catch(e){}
@@ -2055,7 +2055,7 @@ module.exports=async(req,res)=>{
       const vn=cfg.smsTo||victorNumber();
       const isVictor=!!(vn && from && from.replace(/\D/g,"").slice(-10)===vn.replace(/\D/g,"").slice(-10));
       try{ if(redis){
-        const entry={ from, date, text, recordingUrl:rec, status, isVictor, at:new Date().toISOString() };
+        const entry={ id:"c"+Date.now().toString(36)+Math.random().toString(36).slice(2,7), from, date, text, recordingUrl:rec, status, isVictor, at:new Date().toISOString() };
         const log=(await redis.get("parkside:calllog"))||[]; log.unshift(entry); await redis.set("parkside:calllog", log.slice(0,500));
         // Victor's daily verbal report -> auto-fills the scorecard self-report for that date (the AI truth-score then uses it)
         if(isVictor && text){ const prev=(await redis.get("parkside:report:"+date))||""; const merged=(prev && prev.indexOf(text)===-1) ? (prev+"\n\n[call] "+text) : text; await redis.set("parkside:report:"+date, merged); }
@@ -2080,6 +2080,13 @@ module.exports=async(req,res)=>{
       let log=[]; try{ if(redis) log=(await redis.get("parkside:calllog"))||[]; }catch(e){}
       return res.status(200).json({calls:log.slice(0,100)});
     }
+    if(action==="calls_delete"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      const key=(req.query&&(req.query.id||req.query.at))||(req.body&&(req.body.id||req.body.at))||"";
+      if(!key) return res.status(400).json({error:"need id"});
+      try{ if(redis){ let log=(await redis.get("parkside:calllog"))||[]; const before=log.length; log=log.filter(c=>String(c.id||"")!==String(key) && String(c.at||"")!==String(key)); await redis.set("parkside:calllog", log); return res.status(200).json({deleted:before-log.length, remaining:log.length}); } }catch(e){ return res.status(500).json({error:String(e.message||e)}); }
+      return res.status(200).json({deleted:0});
+    }
     if(action==="sms_inbound"){
       const cfg=await getNotifyConfig();
       let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
@@ -2088,6 +2095,20 @@ module.exports=async(req,res)=>{
       const bodyRaw=String(pl.message||pl.text||b.Body||b.body||b.text||b.message||"").trim();
       const tok=(req.query&&req.query.token)||"";
       if(cfg.secret && tok && tok!==cfg.secret) return res.status(200).json({ignored:true, reason:"bad token"});
+      // ROBUST MMS/media intake \u2014 runs BEFORE the sender filter so a receipt photo from ANY number (incl. Gavin's own tests) is captured into the Fraud tab.
+      { const media=[]; const seen={};
+        const isImg=x=>typeof x==="string"&&x.length<4000&&(/^https?:\/\/[^\s]+\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?)(\?|#|$)/i.test(x)||/^data:image\//i.test(x)||/^https?:\/\/[^\s]*(mediaurl|media\/|\/mms|attachment|\/image|\/photo|cloudinary|amazonaws|blob)/i.test(x));
+        const push=u=>{ u=String(u); if(u&&!seen[u]){ seen[u]=1; media.push(u); } };
+        (function walk(o,depth){ if(o==null||depth>6) return; if(typeof o==="string"){ if(isImg(o)) push(o); return; } if(Array.isArray(o)){ o.forEach(function(x){walk(x,depth+1);}); return; } if(typeof o==="object"){ for(const k in o){ const v=o[k]; if(/attach|media|image|photo|file|url/i.test(k)&&typeof v==="string"){ if(isImg(v)||/^https?:\/\//i.test(v)) push(v); } else walk(v,depth+1); } } })(b,0);
+        const nm=parseInt(pl.NumMedia||b.NumMedia||b.num_media||0,10)||0; for(let _i=0;_i<nm;_i++){ const mu=b["MediaUrl"+_i]||pl["MediaUrl"+_i]; if(mu) push(mu); }
+        if(media.length){
+          try{ if(redis){ let blob=(await redis.get("parkside:fraud"))||{accounts:{},checks:[],receipts:[],alerts:[]}; blob.receipts=blob.receipts||[]; const now=new Date().toISOString();
+            for(const mu of media){ blob.receipts.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,7), source:"mms", vendor:"", amount:"", date:etDate(now), ref:"", note:bodyRaw||"", media:mu, from, status:"unreviewed", at:now }); }
+            blob.receipts=blob.receipts.slice(0,2000); await redis.set("parkside:fraud",blob); } }catch(e){}
+          try{ await sendSmsGateway(cfg, "\uD83E\uDDFE Receipt received ("+media.length+" image"+(media.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
+          return res.status(200).json({receipt:true, count:media.length, via:"robust"});
+        }
+      }
       const vn=cfg.smsTo||victorNumber();
       if(vn && from && from.replace(/\D/g,"").slice(-10)!==vn.replace(/\D/g,"").slice(-10))
         return res.status(200).json({ignored:true, reason:"sender is not the owner's number"});

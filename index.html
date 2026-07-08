@@ -1147,14 +1147,28 @@ async function loadCalls(){
 }
 function renderCalls(calls){
   const el=document.getElementById('callsList'); if(!el) return;
-  if(!calls.length){ el.innerHTML='<span class="muted">No calls logged yet. Victor\u2019s daily call transcript will appear here once phone intake is wired.</span>'; return; }
-  el.innerHTML=calls.slice(0,50).map(function(c){
-    var who=c.isVictor?'<b style="color:#4ade80">Victor</b>':('<span class="muted">'+frEsc(c.from||'unknown')+'</span>');
-    var when=frEsc((c.at||'').slice(0,16).replace('T',' '));
-    var txt=frEsc(c.text||'(no transcript captured)');
-    var rec=c.recordingUrl?(' · <a href="'+frEsc(c.recordingUrl)+'" target="_blank">audio</a>'):'';
-    return '<div style="border-bottom:1px solid #22303c;padding:8px 0"><div style="margin-bottom:2px">'+who+' <span class="muted">'+frEsc(c.date||'')+' '+when+'</span>'+rec+'</div><div>'+txt+'</div></div>';
-  }).join('');
+  if(!calls.length){ el.innerHTML='<span class="muted">No calls logged yet. Victor’s daily call transcript will appear here once phone intake is wired.</span>'; return; }
+  var groups={}, order=[];
+  calls.forEach(function(c){ var d=c.date||((c.at||'').slice(0,10))||'(no date)'; if(!groups[d]){groups[d]=[];order.push(d);} groups[d].push(c); });
+  var html='';
+  order.forEach(function(d){
+    html+='<div style="margin:16px 0 6px;font-weight:700;color:#8ab4f8;border-bottom:1px solid #2a3a4a;padding-bottom:4px">📅 '+frEsc(d)+' <span class="muted" style="font-weight:400;text-transform:none">('+groups[d].length+' call'+(groups[d].length>1?'s':'')+')</span></div>';
+    groups[d].forEach(function(c){
+      var who=c.isVictor?'<b style="color:#4ade80">Victor</b>':('<span class="muted">'+frEsc(c.from||'unknown')+'</span>');
+      var when=frEsc((c.at||'').slice(11,16));
+      var txt=frEsc(c.text||'(no transcript captured)');
+      var rec=c.recordingUrl?(' · <a href="'+frEsc(c.recordingUrl)+'" target="_blank">audio</a>'):'';
+      var key=frEsc(c.id||c.at||'');
+      var del=key?(' · <a href="#" onclick="deleteCall(\''+key+'\');return false" style="color:#ff8f6b">delete</a>'):'';
+      html+='<div style="border-bottom:1px solid #22303c;padding:8px 0 8px 10px"><div style="margin-bottom:2px">'+who+' <span class="muted">'+when+'</span>'+rec+del+'</div><div>'+txt+'</div></div>';
+    });
+  });
+  el.innerHTML=html;
+}
+async function deleteCall(key){
+  if(!GPW||!key) return; if(!confirm('Delete this transcript? (for removing test calls)')) return;
+  try{ await fetch(api('calls_delete')+'&id='+encodeURIComponent(key),{method:'POST',headers:{'x-gavin-password':GPW}}); }catch(e){}
+  loadCalls();
 }
 // ===== Bonus tab (visible to Victor later; no Gavin login) =====
 function loadBonus(){ /* v1 placeholder — weekly score/bonus surfaces here once the formula is set */ }
