@@ -1385,7 +1385,7 @@ module.exports=async(req,res)=>{
       const g=function(){ for(let i=0;i<arguments.length;i++){ const k=arguments[i]; if(q[k]!=null&&q[k]!=="") return q[k]; if(bd[k]!=null&&bd[k]!=="") return bd[k]; } return undefined; };
       const lat=parseFloat(g("lat","latitude")), lon=parseFloat(g("lon","longitude"));
       if(!isFinite(lat)||!isFinite(lon)){ res.status(400); return res.end("missing coords"); }
-      const device=String(g("id","deviceid","device_id")||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const device=String(g("id","deviceid","device_id")||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       let when=new Date(); const _ts=g("timestamp"); const tsRaw=_ts!=null?Number(_ts):NaN;
       if(isFinite(tsRaw)){ const d=new Date(tsRaw>1e12?tsRaw:tsRaw*1000); if(isFinite(d.getTime())) when=d; }
       const num=v=>(v!=null&&v!==""&&isFinite(Number(v)))?Number(v):null;
@@ -1409,7 +1409,7 @@ module.exports=async(req,res)=>{
     }
     if(action==="gps_status"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
-      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const date=String((req.query&&req.query.date)||"").trim();
       const sec=String(process.env.GPS_INGEST_SECRET||""); const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
       const _parse=raw=>(raw||[]).map(x=>{ try{ return typeof x==="string"?JSON.parse(x):x; }catch{ return null; } }).filter(Boolean);
@@ -1427,7 +1427,7 @@ module.exports=async(req,res)=>{
     // List days that have GPS history for a device (Gavin-gated) — powers the date scrubber.
     if(action==="gps_days"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
-      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       let days=[]; try{ if(redis){ const z=await redis.zrange("parkside:gpsdays:"+device,0,-1); days=(z||[]).slice().reverse(); } }catch(e){}
       return res.status(200).json({device, days});
     }
@@ -1648,7 +1648,7 @@ module.exports=async(req,res)=>{
     // Connection check (Gavin-gated): is WebWork + Traccar/GPS data ACTUALLY reaching the engine right now?
     if(action==="conn_check"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
-      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const today=etDate(new Date().toISOString()); const yday=etDateAddDays(today,-1);
       // WebWork
       const wwTok=!!String(process.env.WEBWORK_TOKEN||"");
@@ -1675,7 +1675,7 @@ module.exports=async(req,res)=>{
     if(action==="scorecard"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
-      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device,date); const screen=await wwScreenActivity(date);
       let report="", score=null, todo=null, grade=null, graded_count=0; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; score=await redis.get("parkside:score:"+date); grade=await redis.get("parkside:grade:"+date); const gz=await redis.zrange("parkside:grades_index",0,-1); graded_count=(gz||[]).length; } }catch(e){} try{ todo=await getTodo(); }catch(e){}
       return res.status(200).json({ date, device, hours, zones, screen, report, score, todo, grade, graded_count });
@@ -1695,7 +1695,7 @@ module.exports=async(req,res)=>{
       const okAuth=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x")) || ((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__y")) || ((req.query&&req.query.token)===(process.env.CRON_SECRET||"__z"));
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
       const date=String((req.query&&req.query.date)||"")||etDate(new Date(Date.now()-86400000).toISOString());
-      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const out=await scoreDay(date, device); return res.status(200).json(out);
     }
     // WebWork screen-activity (Gavin-gated): what Victor was doing on the computer for a date.
@@ -1756,7 +1756,7 @@ module.exports=async(req,res)=>{
     if(action==="grade_set"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
-      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
       if(b.grade===""||b.grade==null){ if(redis){ try{ await redis.del("parkside:grade:"+date); await redis.zrem("parkside:grades_index",date); }catch(e){} } return res.status(200).json({ok:true, cleared:true, date}); }
       const g=Number(b.grade); if(!isFinite(g)) return res.status(400).json({error:"grade must be a number 0-100"});
