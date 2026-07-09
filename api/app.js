@@ -764,7 +764,28 @@ async function runVictorVerifyReminder(nowIso){
   return {sent:!!(r&&r.sent===true), date, weekday:wd, email:r};
 }
 // ===== Shared living to-do list (Gavin + Victor + engine all read/write one doc) =====
-async function getTodo(){ try{ if(redis){ const t=await redis.get("parkside:todo"); if(t&&typeof t==="object") return {text:String(t.text||""), updated_at:t.updated_at||null, updated_by:t.updated_by||null}; if(typeof t==="string") return {text:t, updated_at:null, updated_by:null}; } }catch(e){} return {text:"", updated_at:null, updated_by:null}; }
+async function fetchDocText(url){
+  try{ let u=String(url||"").trim(); if(!u) return "";
+    const m=u.match(/docs\.google\.com\/document\/d\/([A-Za-z0-9_-]+)/);
+    if(m) u="https://docs.google.com/document/d/"+m[1]+"/export?format=txt";
+    const r=await fetch(u,{redirect:"follow"}); if(!r||!r.ok) return "";
+    let t=await r.text();
+    if(/<html|<!doctype/i.test(t.slice(0,300))){ t=t.replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<\/(p|div|h[1-6]|li|tr)>/gi,"\n").replace(/<[^>]+>/g," ").replace(/&nbsp;/g," ").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&#39;/g,"'").replace(/&quot;/g,'"'); }
+    return t.replace(/\r/g,"").replace(/[ \t]+\n/g,"\n").replace(/\n{3,}/g,"\n\n").trim().slice(0,20000);
+  }catch(e){ return ""; }
+}
+async function getTodoDocUrl(){ try{ if(redis){ const u=await redis.get("parkside:todo_doc_url"); if(u) return String(u); } }catch(e){} return String(process.env.TODO_DOC_URL||""); }
+async function getTodo(){
+  const url=await getTodoDocUrl();
+  if(url){
+    try{ if(redis){ const c=await redis.get("parkside:todo_doc_cache"); if(c && c.url===url && (Date.now()-c.at)<600000) return {text:String(c.text||""), source:"doc", source_url:url, updated_at:new Date(c.at).toISOString()}; } }catch(e){}
+    const text=await fetchDocText(url);
+    try{ if(redis) await redis.set("parkside:todo_doc_cache",{url,text,at:Date.now()}); }catch(e){}
+    return {text, source:"doc", source_url:url, updated_at:new Date().toISOString()};
+  }
+  try{ if(redis){ const t=await redis.get("parkside:todo"); if(t&&typeof t==="object") return {text:String(t.text||""), source:"stored", updated_at:t.updated_at||null, updated_by:t.updated_by||null}; if(typeof t==="string") return {text:t, source:"stored"}; } }catch(e){}
+  return {text:"", source:"none"};
+}
 async function setTodo(text, by){ const doc={text:String(text||"").slice(0,20000), updated_at:new Date().toISOString(), updated_by:String(by||"").slice(0,40)}; try{ if(redis) await redis.set("parkside:todo", doc); }catch(e){} return doc; }
 // ===== Daily auto-grade + data-gap alert (recipients configurable in the panel / SCORE_ALERT_EMAILS) =====
 function scoreAlertRecipients(cfg){
@@ -1551,25 +1572,38 @@ module.exports=async(req,res)=>{
     if(action==="cleans_get"){
       const month=String((req.query&&req.query.month)||"")||etMonth();
       let rec=null; try{ if(redis) rec=await redis.get("parkside:cleans:"+month); }catch(e){}
-      rec=rec||{count:0, log:[]};
-      return res.status(200).json({ month, count:Number(rec.count||0), log:(rec.log||[]).slice(-50) });
+      rec=rec||{};
+      if(!rec.monday && !rec.other && (rec.count!=null||rec.log)) rec={ other:{count:Number(rec.count||0), log:Array.isArray(rec.log)?rec.log:[]} };
+      const mon=rec.monday||{count:0,log:[]}, oth=rec.other||{count:0,log:[]};
+      return res.status(200).json({ month,
+        monday:{count:Number(mon.count||0), log:(mon.log||[]).slice(-50)},
+        other:{count:Number(oth.count||0), log:(oth.log||[]).slice(-50)},
+        count:Number(mon.count||0)+Number(oth.count||0) });
     }
     if(action==="cleans_post"){
       let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
       const month=etMonth(); const op=String(b.op||"add");
+      const type=(String(b.type||"other")==="monday")?"monday":"other";
       let rec=null; try{ if(redis) rec=await redis.get("parkside:cleans:"+month); }catch(e){}
-      rec=rec||{count:0, log:[]}; rec.log=rec.log||[];
+      rec=rec||{};
+      if(!rec.monday && !rec.other && (rec.count!=null||rec.log)) rec={ other:{count:Number(rec.count||0), log:Array.isArray(rec.log)?rec.log:[]} };
+      rec.monday=rec.monday||{count:0,log:[]}; rec.other=rec.other||{count:0,log:[]};
+      rec.monday.log=rec.monday.log||[]; rec.other.log=rec.other.log||[];
+      const bucket=rec[type];
       if(op==="add"){
         const n=Math.max(1, Math.min(50, parseInt(b.n,10)||1));
         const note=String(b.note||"").slice(0,200); const now=new Date().toISOString();
-        rec.count=Number(rec.count||0)+n;
-        rec.log.push({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), n, note, at:now, date:etDate(now) });
-        rec.log=rec.log.slice(-200);
+        bucket.count=Number(bucket.count||0)+n;
+        bucket.log.push({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), n, note, at:now, date:etDate(now) });
+        bucket.log=bucket.log.slice(-200);
       } else if(op==="undo"){
-        const last=rec.log.pop(); if(last) rec.count=Math.max(0, Number(rec.count||0)-Number(last.n||1));
+        const last=bucket.log.pop(); if(last) bucket.count=Math.max(0, Number(bucket.count||0)-Number(last.n||1));
       } else { return res.status(400).json({error:"unknown op: "+op}); }
       try{ if(redis) await redis.set("parkside:cleans:"+month, rec); }catch(e){}
-      return res.status(200).json({ ok:true, month, count:Number(rec.count||0), log:rec.log.slice(-50) });
+      return res.status(200).json({ ok:true, month, type,
+        monday:{count:Number(rec.monday.count||0), log:rec.monday.log.slice(-50)},
+        other:{count:Number(rec.other.count||0), log:rec.other.log.slice(-50)},
+        count:Number(rec.monday.count||0)+Number(rec.other.count||0) });
     }
     // ===== Victor portal (Bonus tab): refunds report =====
     // Victor-accessible. Keyed parkside:refunds:<YYYY-MM> (list per month).
@@ -1652,6 +1686,16 @@ module.exports=async(req,res)=>{
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
       const doc=await setTodo(String(b.text||""), gv?"gavin":(ap?"victor":"panel"));
       return res.status(200).json(Object.assign({ok:true}, doc));
+    }
+    // Gavin sets the to-do DOCUMENT url (his docX). GET returns url+pulled text; POST {url} saves it.
+    if(action==="todo_doc"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+        const url=String(b.url||"").trim().slice(0,500);
+        try{ if(redis){ await redis.set("parkside:todo_doc_url", url); await redis.del("parkside:todo_doc_cache"); } }catch(e){}
+        const t=await getTodo(); return res.status(200).json({ok:true, url, text:t.text, chars:(t.text||"").length});
+      }
+      const url=await getTodoDocUrl(); const t=await getTodo(); return res.status(200).json({url, text:t.text, chars:(t.text||"").length, source:t.source});
     }
     // Daily auto-grade (cron secret OR Gavin). Grades yesterday if data complete; else emails the data-gap alert.
     if(action==="daily_score"){
@@ -2130,7 +2174,7 @@ module.exports=async(req,res)=>{
       const now=new Date(); const from=new Date(now); from.setUTCDate(from.getUTCDate()-14); const to=new Date(now); to.setUTCDate(to.getUTCDate()+365);
       const pids=UNITS.map(u=>u.orp).join(",");
       const HBASE={"Content-Type":"application/json","User-Agent":"parkside-control/1.0"};
-      let url="https://api.ownerrez.com/v2/bookings?property_ids="+encodeURIComponent(pids)+"&from="+ymd(from)+"&to="+ymd(to)+"&limit=50";
+      let url="https://api.ownerrez.com/v2/bookings?property_ids="+encodeURIComponent(pids)+"&from="+ymd(from)+"&to="+ymd(to)+"&include_agreements=true&limit=50";
       let items=[], pages=0;
       try{ while(url&&pages<30){ const r=await orFetch(url,{headers:HBASE, prefer:"basic"}); if(!r||!r.ok){ const t=r?await r.text():""; 
             return res.status(200).json({configured:true, bookings:[], error:"OwnerRez bookings "+(r?r.status:"no-response"), detail:t.slice(0,200), note:"tried Basic PAT + OAuth; both rejected for /v2/bookings"}); }
@@ -2154,9 +2198,11 @@ module.exports=async(req,res)=>{
       const gPhone=g=>{ if(!g) return ""; if(Array.isArray(g.phones)&&g.phones.length){ const p=g.phones.find(x=>x.is_default)||g.phones[0]; return p.number||p.phone||""; } return g.phone||""; };
       const list=(items||[]).map(b=>{ const g=guests[gidOf(b)];
           const unit=(b.property&&b.property.name)||unitName[b.property_id]||String(b.property_id||"");
+          const _ags=Array.isArray(b.agreements)?b.agreements:[];
           return { arrival:b.arrival||"", departure:b.departure||"",
             name:gName(g), email:gEmail(g), phone:gPhone(g),
-            reference:b.title||"", unit, status:b.status||b.type||"" }; })
+            reference:b.title||"", unit, status:b.status||b.type||"",
+            agreementSigned: !!_ags.find(function(a){return a&&a.date;}) }; })
         .filter(x=>x.arrival);
       const totalBeforeFilter=list.length;
       // Only show real, live reservations — drop cancelled / void / declined / removed / inactive.

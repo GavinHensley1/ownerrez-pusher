@@ -146,15 +146,6 @@
     <div class="legend">Click any day → full price breakdown + pin/override. 📌 purple = manual override (engine + cron never change it). Grey dashed = already booked. <span style="color:#e6b85c">GAP</span> = orphan-night discount.</div>
   </div>
 
-  <div class="card" id="agreementsCard" style="border-color:#2a3a5a">
-    <h2>📋 Rental agreements <span class="muted" style="font-weight:400;text-transform:none">— which upcoming guests have signed vs still need to</span></h2>
-    <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
-      <button class="ghost" onclick="loadAgreements(true)">Refresh</button>
-      <span id="agreementsStatus" class="muted"></span>
-    </div>
-    <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings. <b style="color:#2ecc71">Rental agreement</b> = signed lease on file. <b style="color:#2ecc71">Contact info</b> = a mailing address is on file (guests get one only after completing the portal\u2019s \u201cConfirm Contact Info\u201d step). Upcoming active bookings only.</div>
-    <div id="agreementsList" class="legend">…</div>
-  </div>
   <div class="card" id="advCard">
     <h2 style="cursor:pointer;user-select:none" onclick="toggleAdv()">⚙ Advanced / setup <span id="advCaret" style="color:var(--mut)">▸</span></h2>
     <div id="advBody" style="display:none">
@@ -409,6 +400,26 @@
       </div>
       <div id="callsList" class="legend">…</div>
     </div>
+    <div class="card" id="monthlyCard">
+      <h2>🗓 Monthly report <span class="muted" style="font-weight:400;text-transform:none">— Victor\u2019s month of grades; auto-emailed to you + Victor on the 1st</span></h2>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+        <input id="monthlyMonth" type="month" style="width:auto">
+        <button class="ghost" onclick="loadMonthly()">View</button>
+        <button onclick="emailMonthly()">Email now to me + Victor</button>
+        <span id="monthlyStatus" class="muted"></span>
+      </div>
+      <div id="monthlyBody" class="legend">…</div>
+    </div>
+    <div class="card" id="todoDocCard">
+      <h2>📋 Victor\u2019s to-do document <span class="muted" style="font-weight:400;text-transform:none">— paste your doc link; the grader reads it</span></h2>
+      <div class="legend" style="margin-bottom:6px">Publish your Google Doc to the web (File \u2192 Share \u2192 Publish to web) or paste a share link. The engine pulls its text each day to know what Victor should be doing and grades against it.</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input id="todoDocUrl" type="text" placeholder="https://docs.google.com/document/d/\u2026" style="flex:1;min-width:220px">
+        <button onclick="saveTodoDoc()">Save</button>
+        <span id="todoDocStatus" class="muted"></span>
+      </div>
+      <div id="todoDocPreview" class="legend" style="white-space:pre-wrap;margin-top:8px;max-height:160px;overflow:auto"></div>
+    </div>
     <div class="card" style="border-color:#3a2a1a">
       <h2>🎚 Pricing tuning <span class="muted" style="font-weight:400;text-transform:none">— moved here from the main tab; changes pricing (Gavin-only)</span></h2>
     </div>
@@ -428,13 +439,10 @@
 
 <div class="wrap" id="bonusMain" style="display:none">
   <div class="card" id="todoCard">
-    <h2>📋 To-Do list <span class="muted" style="font-weight:400;text-transform:none">— shared with Gavin; the daily grader reads this</span></h2>
-    <div class="legend" style="margin-bottom:8px">Your running to-do (admin + property/improvement tasks). Keep it roughly current — the engine reads it each day to understand and grade your work. Maintenance is expected and doesn’t need to be listed.</div>
-    <textarea id="todoText" class="full" style="min-height:180px" placeholder="One task per line…"></textarea>
-    <div style="display:flex;gap:10px;margin-top:8px;align-items:center;flex-wrap:wrap">
-      <button onclick="saveTodo()">Save list</button>
-      <span id="todoStatus" class="muted"></span>
-    </div>
+    <h2>📋 To-Do list <span class="muted" style="font-weight:400;text-transform:none">— pulled from Gavin's document; the daily grader reads this</span></h2>
+    <div class="legend" style="margin-bottom:8px">Your task list, pulled live from Gavin's document. The engine reads it each day to understand and grade your work.</div>
+    <div id="todoText" class="legend" style="white-space:pre-wrap;min-height:60px;background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:10px 12px">…</div>
+    <div id="todoStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
   </div>
   <div class="card" id="weeklyCard">
     <h2>📊 Weekly report <span class="muted" style="font-weight:400;text-transform:none">— your daily grades, what went well and what to work on</span></h2>
@@ -450,23 +458,34 @@
 
   <div class="card">
     <h2>🏆 Bonus</h2>
-    <div class="legend" style="margin-bottom:10px">Your weekly performance bonus. Updates automatically from tracked hours and how well your daily check-in matches the data. No extra login — this tab is yours.</div>
-    <div id="bonusBody" class="legend">
-      <p><b>Coming online.</b> Once the weekly scoring formula is finalized, this tab will show your current-week score, hours logged, and the bonus earned so far — updated through the week.</p>
-      <p style="margin-top:8px">It will factor in: hours worked (from the time tracker), how closely your daily check-in matches what actually happened, and your bonus tier for the week.</p>
-    </div>
+    <div id="bonusBody" class="legend"></div>
   </div>
 
   <div class="card">
-    <h2>🧹 Cleans this month <span class="muted" style="font-weight:400;text-transform:none">— your running total, resets automatically each month</span></h2>
-    <div id="cleansTotal" style="font-size:34px;font-weight:800;margin:6px 0 2px">0</div>
-    <div class="legend" id="cleansMonth" style="margin-bottom:12px">—</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
-      <input id="cleanNote" type="text" placeholder="Which unit / note (optional)" style="flex:1;min-width:160px">
-      <button onclick="addClean()">+ Log a clean</button>
-      <button class="ghost" onclick="undoClean()">Undo last</button>
+    <h2>🧹 Cleans this month by Parkside <span class="muted" style="font-weight:400;text-transform:none">— two logs, reset automatically each month</span></h2>
+    <div style="display:flex;gap:18px;flex-wrap:wrap">
+      <div style="flex:1;min-width:230px">
+        <div style="font-weight:700">Monday check-in / check-out cleans</div>
+        <div id="cleansMondayTotal" style="font-size:30px;font-weight:800;margin:2px 0">0</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+          <input id="cleanMondayNote" type="text" placeholder="Which unit / note (optional)" style="flex:1;min-width:140px">
+          <button onclick="addClean('monday')">+ Log</button>
+          <button class="ghost" onclick="undoClean('monday')">Undo</button>
+        </div>
+        <div id="cleansMondayLog" class="legend"></div>
+      </div>
+      <div style="flex:1;min-width:230px">
+        <div style="font-weight:700">All other cleans Parkside did</div>
+        <div id="cleansOtherTotal" style="font-size:30px;font-weight:800;margin:2px 0">0</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+          <input id="cleanOtherNote" type="text" placeholder="Which unit / note (optional)" style="flex:1;min-width:140px">
+          <button onclick="addClean('other')">+ Log</button>
+          <button class="ghost" onclick="undoClean('other')">Undo</button>
+        </div>
+        <div id="cleansOtherLog" class="legend"></div>
+      </div>
     </div>
-    <div id="cleansLog" class="legend"></div>
+    <div class="legend" id="cleansMonth" style="margin-top:10px">—</div>
   </div>
 
   <div class="card">
@@ -892,7 +911,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); loadMonthly(); loadTodoDoc(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -941,6 +960,13 @@ async function saveGrade(){ const date=(document.getElementById('monDate')||{}).
     if(j&&j.ok){ if(st) st.textContent='Saved ✓'; const gp=document.getElementById('gradeProgress'); if(gp){ const c=j.graded_count||0; gp.textContent=c+' day'+(c===1?'':'s')+' graded'+(c<10?(' — grade ~'+(10-c)+' more to calibrate'):' — calibrated to your standard'); } }
     else { if(st) st.textContent=(j&&j.error)||'Save failed'; }
   }catch(e){ if(st) st.textContent='Error: '+e.message; } }
+async function loadMonthly(){ if(!GPW) return; const st=document.getElementById('monthlyStatus'); if(st) st.textContent='Loading\u2026'; const mo=(document.getElementById('monthlyMonth')||{}).value||''; try{ const r=await fetch(api('monthly_report')+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(st) st.textContent=''; renderMonthly(j); }catch(e){ if(st) st.textContent='error'; } }
+function renderMonthly(j){ const el=document.getElementById('monthlyBody'); if(!el) return; const weeks=(j&&j.weeks)||[]; if(!weeks.length){ el.innerHTML='<span class="muted">No graded days this month yet.</span>'; return; }
+  el.innerHTML=weeks.map(function(w){ const days=(w.days||[]).map(function(d){ return '<tr><td style="white-space:nowrap;color:var(--mut)">'+esc((d.weekday||'').slice(0,3))+' '+esc((d.date||'').slice(5))+'</td><td style="font-weight:600;white-space:nowrap">'+(d.grade==null?'\u2014':d.grade+'/100')+'</td><td style="word-break:break-word">'+esc(d.explanation||'')+'</td></tr>'; }).join('');
+    return '<div style="margin-bottom:12px"><b>Week of '+esc(w.weekStart)+' \u2013 '+esc(w.weekEnd)+'</b>'+(w.avgGrade!=null?(' \u00b7 avg '+w.avgGrade+'/100'):'')+(w.narrative?('<div class="muted" style="font-size:12px;margin:2px 0">'+esc(w.narrative)+'</div>'):'')+'<table style="width:100%;table-layout:fixed"><colgroup><col style="width:64px"><col style="width:62px"><col></colgroup>'+days+'</table></div>'; }).join(''); }
+async function emailMonthly(){ if(!GPW) return; if(!confirm('Email the monthly report to you and Victor now?')) return; const st=document.getElementById('monthlyStatus'); if(st) st.textContent='Sending\u2026'; const mo=(document.getElementById('monthlyMonth')||{}).value||''; try{ const r=await fetch(api('monthly_report')+'&send=1'+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(st) st.textContent=(j&&j.sent)?('Emailed \u2713 to '+((j.to||[]).join(', '))):((j&&j.reason)||(j&&j.detail)||'send failed'); }catch(e){ if(st) st.textContent='error'; } }
+async function loadTodoDoc(){ if(!GPW) return; try{ const r=await fetch(api('todo_doc')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); const u=document.getElementById('todoDocUrl'); if(u && document.activeElement!==u) u.value=(j&&j.url)||''; const p=document.getElementById('todoDocPreview'); if(p) p.textContent=(j&&j.text)||''; }catch(e){} }
+async function saveTodoDoc(){ if(!GPW) return; const st=document.getElementById('todoDocStatus'); if(st) st.textContent='Saving\u2026'; const url=(document.getElementById('todoDocUrl')||{}).value||''; try{ const r=await fetch(api('todo_doc'),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({url})}); const j=await r.json(); if(st) st.textContent=(j&&j.ok)?('Saved \u2713 \u00b7 '+(j.chars||0)+' chars pulled from your doc'):'Save failed'; const p=document.getElementById('todoDocPreview'); if(p) p.textContent=(j&&j.text)||'(No text pulled — make sure the doc is published to web / link-shared.)'; }catch(e){ if(st) st.textContent='error'; } }
 function renderScore(sc){ const el=document.getElementById('scResult'); if(!el) return; if(!sc||sc.truth_score==null){ el.innerHTML=''; return; }
   const ts=Math.max(0,Math.min(100,Number(sc.truth_score)||0)); const col= ts>=75?'#4ade80':ts>=45?'#f4b942':'#f87171';
   const list=function(arr,c){ return (arr&&arr.length)?('<ul style="margin:4px 0 8px 18px;color:'+c+'">'+arr.map(function(x){return '<li>'+esc(x)+'</li>';}).join('')+'</ul>'):''; };
@@ -1034,7 +1060,7 @@ function boot(){
   HMIN=sY*12+sM; HMAX=eY*12+eM;
   document.getElementById('horizon').textContent=`${MON[sM]} ${sY} → ${MON[eM]} ${eY} · rolling 12 mo · build 0611c`;
   document.getElementById('unit').innerHTML=UNITS.map(u=>`<option value='${u[0]}'>${u[1]}</option>`).join("");
-  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning(); loadGoLiveStatus(); loadKnobs(); loadRecommendations(); loadAgreements();
+  view.y=sY; view.m=sM; buildTargets(); setSyncUI(); loadOccupancy().then(applyPreview); loadLearning(); loadGoLiveStatus(); loadKnobs(); loadRecommendations();
 }
 
 // ===== Public inquiry + Victor's gate toggles =====
@@ -1051,7 +1077,11 @@ async function loadBookings(){
     if(j.error && !list.length){ st.textContent='Could not load bookings: '+j.error; return; }
     if(!list.length){ st.textContent='No current or upcoming bookings found.'; return; }
     st.style.display='none';
-    const guestCell=b=>{ if(b.name) return esc(b.name); if(b.reference) return "<span class='muted'>"+esc(b.reference)+"</span>"; return '\u2014'; };
+    const _todayStr=new Date().toISOString().slice(0,10);
+    const agrBadge=b=>{ if(b.agreementSigned==null) return ''; if(((b.departure||b.arrival)||'')<_todayStr) return ''; return b.agreementSigned
+      ? " <span title='Rental agreement signed' style='margin-left:6px;font-size:11px;font-weight:700;color:#2ecc71;white-space:nowrap'>\u2713 agreement</span>"
+      : " <span title='Rental agreement not signed yet' style='margin-left:6px;font-size:11px;font-weight:700;color:#e6b85c;white-space:nowrap'>\u26A0 agreement</span>"; };
+    const guestCell=b=>{ const nm = b.name? esc(b.name) : (b.reference? "<span class='muted'>"+esc(b.reference)+"</span>" : '\u2014'); return nm + agrBadge(b); };
     wrap.innerHTML="<table class='occ' style='width:100%'><tr><th>Check-in</th><th>Check-out</th><th>Unit</th><th>Guest</th><th>Email</th><th>Phone</th></tr>"
       +list.map(b=>"<tr><td>"+fmt(b.arrival)+"</td><td>"+fmt(b.departure)+"</td><td style='text-align:left'>"+esc(b.unit||'\u2014')+"</td><td style='text-align:left'>"+guestCell(b)+"</td><td style='text-align:left'>"+esc(b.email||'\u2014')+"</td><td>"+esc(b.phone||'\u2014')+"</td></tr>").join("")
       +"</table>";
@@ -1285,27 +1315,30 @@ function renderWeekly(j){ const rng=document.getElementById('weeklyRange'); if(r
   const rows=(j.days||[]).map(function(d){ const c=(d.grade==null)?'#9fb0c0':(d.grade>=75?'#4ade80':d.grade>=45?'#f4b942':'#f87171');
     return '<div style="padding:8px 0;border-top:1px solid #26354a"><div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline"><b>'+esc(d.weekday)+' '+esc((d.date||'').slice(5))+'</b><span style="color:'+c+';font-weight:700">'+(d.grade==null?'\u2014':d.grade+'/100')+(d.owner_graded?' \u2713':'')+'</span></div>'+(d.explanation?('<div class="muted" style="font-size:12px;margin-top:2px">'+esc(d.explanation)+'</div>'):'')+'</div>'; }).join('');
   el.innerHTML=rows||'<span class="muted">No grades this week yet.</span>'; }
-async function loadTodo(){ try{ const r=await fetch(api('todo_get')+'&cb='+Date.now()); const j=await r.json(); const ta=document.getElementById('todoText'); if(ta && document.activeElement!==ta) ta.value=(j&&j.text)||''; const st=document.getElementById('todoStatus'); if(st) st.textContent=(j&&j.updated_at)?('Last updated '+fmtWhen(j.updated_at)+(j.updated_by?(' by '+j.updated_by):'')):''; }catch(e){} }
+async function loadTodo(){ try{ const r=await fetch(api('todo_get')+'&cb='+Date.now()); const j=await r.json(); const ta=document.getElementById('todoText'); if(ta) ta.textContent=(j&&j.text)?j.text:'(No to-do document connected yet — Gavin sets it on his tab.)'; const st=document.getElementById('todoStatus'); if(st) st.textContent=(j&&j.source==='doc')?('Synced from Gavin\u2019s document'+(j.updated_at?(' \u00b7 '+fmtWhen(j.updated_at)):'')):''; }catch(e){} }
 async function saveTodo(){ const st=document.getElementById('todoStatus'); if(st) st.textContent='Saving…'; const h={'Content-Type':'application/json'}; if(PW) h['x-app-password']=PW; try{ const r=await fetch(api('todo_post'),{method:'POST',headers:h,body:JSON.stringify({text:(document.getElementById('todoText')||{}).value||''})}); const j=await r.json(); if(st) st.textContent=(j&&j.ok)?('Saved ✓ '+(j.updated_at?fmtWhen(j.updated_at):'')):'Save failed'; }catch(e){ if(st) st.textContent='Error: '+e.message; } }
 async function loadCleans(){
   try{ const r=await fetch(api('cleans_get')+'&cb='+Date.now()); const j=await r.json();
-    const t=document.getElementById('cleansTotal'); if(t) t.textContent=(j.count||0);
-    const m=document.getElementById('cleansMonth'); if(m) m.textContent='Month: '+(j.month||'');
-    const el=document.getElementById('cleansLog'); if(el){ const log=(j.log||[]).slice().reverse();
-      el.innerHTML = log.length ? '<table style="width:100%"><tr><th style="text-align:left">Date</th><th>#</th><th style="text-align:left">Note</th></tr>'
-        + log.map(e=>'<tr><td>'+bEsc(e.date||'')+'</td><td style="text-align:center">'+bEsc(e.n||1)+'</td><td>'+bEsc(e.note||'')+'</td></tr>').join('')+'</table>'
-        : '<span class="muted">No cleans logged yet this month.</span>'; }
+    renderCleanBucket('Monday', j.monday||{}); renderCleanBucket('Other', j.other||{});
+    const m=document.getElementById('cleansMonth'); if(m) m.textContent='Month: '+(j.month||'')+' \u00b7 '+((j.count)||0)+' total';
   }catch(e){}
 }
+function renderCleanBucket(key, bucket){
+  const t=document.getElementById('cleans'+key+'Total'); if(t) t.textContent=(bucket.count||0);
+  const el=document.getElementById('cleans'+key+'Log'); if(!el) return; const log=(bucket.log||[]).slice().reverse();
+  el.innerHTML = log.length ? '<table style="width:100%;table-layout:fixed"><colgroup><col style="width:82px"><col style="width:30px"><col></colgroup><tr><th style="text-align:left">Date</th><th>#</th><th style="text-align:left">Note</th></tr>'
+    + log.map(e=>'<tr><td style="vertical-align:top">'+bEsc(e.date||'')+'</td><td style="text-align:center;vertical-align:top">'+bEsc(e.n||1)+'</td><td style="word-break:break-word;white-space:normal">'+bEsc(e.note||'')+'</td></tr>').join('')+'</table>'
+    : '<span class="muted">None logged yet this month.</span>';
+}
 async function cleansPost(payload){ try{ const r=await fetch(api('cleans_post'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); if(r.ok){ await loadCleans(); return true; } }catch(e){} return false; }
-async function addClean(){ const note=(document.getElementById('cleanNote')||{}).value||''; await cleansPost({op:'add', n:1, note}); const ci=document.getElementById('cleanNote'); if(ci) ci.value=''; }
-async function undoClean(){ if(!confirm('Undo your most recent logged clean?')) return; await cleansPost({op:'undo'}); }
+async function addClean(type){ const nid=(type==='monday')?'cleanMondayNote':'cleanOtherNote'; const note=(document.getElementById(nid)||{}).value||''; await cleansPost({op:'add', n:1, type:(type==='monday'?'monday':'other'), note}); const ci=document.getElementById(nid); if(ci) ci.value=''; }
+async function undoClean(type){ if(!confirm('Undo the most recent logged clean?')) return; await cleansPost({op:'undo', type:(type==='monday'?'monday':'other')}); }
 async function loadRefunds(){
   try{ const r=await fetch(api('refunds_get')+'&cb='+Date.now()); const j=await r.json();
     const tt=document.getElementById('refundsTotal'); if(tt) tt.textContent=(j.count||0)+' refund(s) this month · $'+(j.total||0).toFixed(2)+' total';
     const el=document.getElementById('refundsList'); if(el){ const list=(j.refunds||[]);
-      el.innerHTML = list.length ? '<table style="width:100%"><tr><th style="text-align:left">Date</th><th>Amount</th><th style="text-align:left">What happened</th><th></th></tr>'
-        + list.map(x=>'<tr><td>'+bEsc(x.date||'')+'</td><td style="text-align:right">$'+(Number(x.amount)||0).toFixed(2)+'</td><td>'+bEsc(x.desc||'')+'</td><td><button class="ghost" onclick="delRefund(\''+bEsc(x.id)+'\')">✕</button></td></tr>').join('')+'</table>'
+      el.innerHTML = list.length ? '<table style="width:100%;table-layout:fixed"><colgroup><col style="width:82px"><col style="width:82px"><col><col style="width:36px"></colgroup><tr><th style="text-align:left">Date</th><th style="text-align:right">Amount</th><th style="text-align:left">What happened</th><th></th></tr>'
+        + list.map(x=>'<tr><td style="vertical-align:top">'+bEsc(x.date||'')+'</td><td style="text-align:right;vertical-align:top">$'+(Number(x.amount)||0).toFixed(2)+'</td><td style="text-align:left;word-break:break-word;white-space:normal">'+bEsc(x.desc||'')+'</td><td style="vertical-align:top"><button class="ghost" onclick="delRefund(\''+bEsc(x.id)+'\')">✕</button></td></tr>').join('')+'</table>'
         : '<span class="muted">No refunds reported yet this month.</span>'; }
   }catch(e){}
 }
