@@ -822,6 +822,80 @@ async function getGavinGradeExamples(limit){
   const out=[]; for(const d of dates){ try{ const g=await redis.get("parkside:grade:"+d); if(g&&g.grade!=null) out.push(g); }catch(e){} }
   return out;
 }
+// ===== Weekly + Monthly work reports (Victor sees weekly in his tab; monthly emailed to Gavin+Victor) =====
+function etDateAddDays(dateStr, n){ const d=new Date(dateStr+"T12:00:00Z"); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10); }
+function weekStartMonday(dateStr){ const d=new Date(dateStr+"T12:00:00Z"); const dow=d.getUTCDay(); const diff=(dow===0?-6:1-dow); d.setUTCDate(d.getUTCDate()+diff); return d.toISOString().slice(0,10); }
+function weekdayName(dateStr){ try{ return new Date(dateStr+"T12:00:00Z").toLocaleDateString("en-US",{weekday:"long",timeZone:"UTC"}); }catch(e){ return ""; } }
+function monthLastDay(month){ const a=month.split("-"); const y=Number(a[0]), m=Number(a[1]); const d=new Date(Date.UTC(y,m,0)); return d.toISOString().slice(0,10); }
+async function buildWeeklyReport(weekStart){
+  const days=[]; let sum=0, graded=0, scored=0;
+  for(let i=0;i<7;i++){ const date=etDateAddDays(weekStart,i);
+    let score=null, grade=null; try{ if(redis){ score=await redis.get("parkside:score:"+date); grade=await redis.get("parkside:grade:"+date); } }catch(e){}
+    const ownerG=!!(grade&&grade.grade!=null);
+    const g = ownerG ? Number(grade.grade) : (score&&score.productivity_score!=null?Number(score.productivity_score):null);
+    const src = ownerG ? "owner" : (score?"ai":null);
+    const expl = (grade&&grade.note)? String(grade.note) : (score&&score.summary?String(score.summary):"");
+    if(g!=null){ sum+=g; graded++; } if(score) scored++;
+    days.push({ date, weekday:weekdayName(date), grade:(g!=null?Math.round(g):null), source:src, owner_graded:ownerG, explanation:expl, truth:(score&&score.truth_score!=null?Math.round(score.truth_score):null), hours:(score&&score.hours_worked!=null?score.hours_worked:null) });
+  }
+  return { weekStart, weekEnd:etDateAddDays(weekStart,6), days, avgGrade:(graded?Math.round(sum/graded):null), gradedDays:graded, scoredDays:scored };
+}
+async function weeklyNarrative(rep, force){
+  const key=process.env.ANTHROPIC_API_KEY; if(!key) return null;
+  if(!rep.days.some(function(d){return d.grade!=null;})) return null;
+  const cacheKey="parkside:weekly_ai:"+rep.weekStart;
+  if(!force){ try{ if(redis){ const c=await redis.get(cacheKey); if(c && c.gradedDays===rep.gradedDays && c.text) return c.text; } }catch(e){} }
+  const lines=rep.days.map(function(d){ return d.date+" ("+d.weekday+"): "+(d.grade!=null?(d.grade+"/100"+(d.source==="owner"?" [owner-graded]":"")):"no grade")+(d.explanation?(" — "+d.explanation):""); }).join("\n");
+  const sys="You write a short, constructive WEEKLY work summary addressed directly to Victor (maintenance/operations at a glamping resort). Honest but encouraging and specific. Cover: how the week went overall, which days were strong and why, which were weak or need improvement and where to focus. 3-5 short sentences, plain paragraph (no JSON, no lists).";
+  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0.3,system:sys,messages:[{role:"user",content:"Week of "+rep.weekStart+" to "+rep.weekEnd+". Average grade: "+(rep.avgGrade!=null?(rep.avgGrade+"/100"):"n/a")+".\nDaily grades:\n"+lines}]})});
+    const j=await r.json(); if(!r.ok) return null; const text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
+    try{ if(redis&&text) await redis.set(cacheKey,{text,gradedDays:rep.gradedDays}); }catch(e){}
+    return text||null;
+  }catch(e){ return null; }
+}
+async function buildMonthlyReport(month){
+  const first=month+"-01"; const last=monthLastDay(month); const firstMon=weekStartMonday(first);
+  const weeks=[];
+  for(let i=0;i<6;i++){ const ws=etDateAddDays(firstMon,i*7); const we=etDateAddDays(ws,6);
+    if(ws>last) break;
+    if(we>=first && ws<=last){ const rep=await buildWeeklyReport(ws); rep.narrative=await weeklyNarrative(rep,false); weeks.push(rep); } }
+  return { month, weeks };
+}
+function monthlyReportHtml(mr){
+  let body='<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#0f172a">'
+    +'<h2 style="margin:0 0 6px">Victor — Monthly Work Report</h2>'
+    +'<div style="color:#475569;margin-bottom:14px">'+escHtml(mr.month)+'</div>';
+  if(!mr.weeks.length) body+='<p>No graded days this month yet.</p>';
+  for(const w of mr.weeks){
+    body+='<div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:12px">'
+      +'<div style="font-weight:700;margin-bottom:4px">Week of '+escHtml(w.weekStart)+' – '+escHtml(w.weekEnd)+(w.avgGrade!=null?(' · avg '+w.avgGrade+'/100'):'')+'</div>';
+    if(w.narrative) body+='<div style="font-size:13px;color:#334155;margin-bottom:8px">'+escHtml(w.narrative)+'</div>';
+    body+='<table style="width:100%;border-collapse:collapse;font-size:13px">';
+    for(const d of w.days){ const g=(d.grade==null?'—':d.grade+'/100'); body+='<tr><td style="padding:3px 0;color:#475569;white-space:nowrap">'+escHtml(d.weekday.slice(0,3))+' '+escHtml(d.date.slice(5))+'</td><td style="padding:3px 8px;font-weight:600;white-space:nowrap">'+g+'</td><td style="padding:3px 0;color:#64748b">'+escHtml(d.explanation||'')+'</td></tr>'; }
+    body+='</table></div>';
+  }
+  body+='<p style="color:#94a3b8;font-size:12px">Automated monthly report from the Parkside engine.</p></div>';
+  return body;
+}
+async function sendMonthlyReport(month, cfg){
+  cfg=cfg||await getNotifyConfig();
+  const to=scoreAlertRecipients(cfg); if(!to.length) return {sent:false, reason:"no recipients configured (SCORE_ALERT_EMAILS)"};
+  const mr=await buildMonthlyReport(month);
+  const html=monthlyReportHtml(mr);
+  const subject="Parkside — Victor monthly work report ("+month+")";
+  const r=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:to.join(","), subject, html});
+  return Object.assign({}, r, {to, month, weeks:mr.weeks.length});
+}
+async function runMonthlyReportIfDue(nowIso){
+  const today=etDate(nowIso||new Date().toISOString());
+  if(!/-01$/.test(today)) return {skipped:"not the 1st", today};
+  const d=new Date(today+"T12:00:00Z"); d.setUTCDate(0); const prev=d.toISOString().slice(0,7);
+  const dk="parkside:monthly_sent:"+prev;
+  try{ if(redis){ const done=await redis.get(dk); if(done) return {skipped:"already sent", prev, at:done}; } }catch(e){}
+  const r=await sendMonthlyReport(prev, null);
+  try{ if(redis) await redis.set(dk, new Date().toISOString()); }catch(e){}
+  return {month:prev, email:r};
+}
 function editPageHtml(it, token, unit, guestName, errMsg){
   const action='/api/app?action=edit_approval&id='+encodeURIComponent(it.id)+'&token='+encodeURIComponent(token||'');
   return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Write the reply</title></head>'
@@ -1585,6 +1659,22 @@ module.exports=async(req,res)=>{
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
       return res.status(200).json(await runDailyScore(new Date().toISOString()));
     }
+    // Weekly report (Victor-facing, his tab): all daily grades + explanations for a week. ?week=0 this week, 1=last week, or ?start=YYYY-MM-DD (Monday).
+    if(action==="weekly_report"){
+      let start=String((req.query&&req.query.start)||"").trim();
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(start)){ const off=Math.max(0,parseInt((req.query&&req.query.week)||0,10)||0); const today=etDate(new Date().toISOString()); start=weekStartMonday(etDateAddDays(today,-7*off)); }
+      const rep=await buildWeeklyReport(start);
+      let narrative=null; try{ narrative=await weeklyNarrative(rep,false); }catch(e){}
+      return res.status(200).json(Object.assign(rep,{narrative}));
+    }
+    // Monthly report (Gavin/cron): GET returns JSON; ?send=1 emails Gavin+Victor. ?month=YYYY-MM (default current).
+    if(action==="monthly_report"){
+      const okAuth=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x")) || ((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__y")) || ((req.query&&req.query.token)===(process.env.CRON_SECRET||"__z"));
+      if(!okAuth) return res.status(401).json({error:"unauthorized"});
+      const month=String((req.query&&req.query.month)||"")||etDate(new Date().toISOString()).slice(0,7);
+      if((req.query&&req.query.send)==="1"){ return res.status(200).json(await sendMonthlyReport(month, null)); }
+      return res.status(200).json(await buildMonthlyReport(month));
+    }
     // Gavin's manual grade for a day (ground truth the auto-grader learns from). Gavin-gated.
     if(action==="grade_get"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
@@ -1716,6 +1806,7 @@ module.exports=async(req,res)=>{
       const okAuth=((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__x")) || ((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__x")) || ((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__zzz"));
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
       let _dailyScore=null; try{ _dailyScore=await runDailyScore(new Date().toISOString()); }catch(_ds){ _dailyScore={error:String((_ds&&_ds.message)||_ds)}; }
+      try{ await runMonthlyReportIfDue(new Date().toISOString()); }catch(_mr){}
       try{ console.error("[run] start model-check auto_sync-check begin"); }catch(_){}
       const st=await getState(); const model=(st.pricing_model==="glide")?"glide":"legacy"; const sig=await getSignal();
       const od=await getOccData(st,today,days,false); const booked=od.booked;

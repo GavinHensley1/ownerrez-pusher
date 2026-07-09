@@ -85,7 +85,7 @@
     <button id="tabPricing" class="seg on" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
     <button id="tabMon" class="seg" onclick="switchView('monitoring')">Gavin</button>
-    <button id="tabBonus" class="seg" onclick="switchView('bonus')">Bonus</button>
+    <button id="tabBonus" class="seg" onclick="switchView('bonus')">My Work</button>
   </div>
   <span class="muted" id="horizon"></span>
   <span class="sp"></span>
@@ -436,6 +436,18 @@
       <span id="todoStatus" class="muted"></span>
     </div>
   </div>
+  <div class="card" id="weeklyCard">
+    <h2>📊 Weekly report <span class="muted" style="font-weight:400;text-transform:none">— your daily grades, what went well and what to work on</span></h2>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+      <button class="ghost" onclick="weekNav(1)">← Prev week</button>
+      <span id="weeklyRange" class="muted" style="font-weight:600">—</span>
+      <button class="ghost" onclick="weekNav(-1)">Next week →</button>
+    </div>
+    <div id="weeklyNarrative" class="legend" style="margin-bottom:10px"></div>
+    <div id="weeklyDays"></div>
+    <div class="muted" style="font-size:12px;margin-top:8px">A full month summary is emailed to you and Gavin at the start of each month.</div>
+  </div>
+
   <div class="card">
     <h2>🏆 Bonus</h2>
     <div class="legend" style="margin-bottom:10px">Your weekly performance bonus. Updates automatically from tracked hours and how well your daily check-in matches the data. No extra login — this tab is yours.</div>
@@ -1263,7 +1275,16 @@ async function deleteCall(key){
 }
 // ===== Bonus tab (visible to Victor later; no Gavin login) =====
 function bEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); }
+let WEEK_OFF=0;
+async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadWeekly(); }
+async function loadWeekly(){ try{ const r=await fetch(api('weekly_report')+'&week='+WEEK_OFF+'&cb='+Date.now()); const j=await r.json(); renderWeekly(j); }catch(e){} }
+function weekNav(delta){ WEEK_OFF=Math.max(0,WEEK_OFF+delta); loadWeekly(); }
+function renderWeekly(j){ const rng=document.getElementById('weeklyRange'); if(rng) rng.textContent=(j.weekStart||'')+' \u2192 '+(j.weekEnd||'')+(j.avgGrade!=null?('  \u00b7  avg '+j.avgGrade+'/100'):'  \u00b7  no grades yet');
+  const nar=document.getElementById('weeklyNarrative'); if(nar) nar.innerHTML=j.narrative?('<b>This week:</b> '+esc(j.narrative)):'';
+  const el=document.getElementById('weeklyDays'); if(!el) return;
+  const rows=(j.days||[]).map(function(d){ const c=(d.grade==null)?'#9fb0c0':(d.grade>=75?'#4ade80':d.grade>=45?'#f4b942':'#f87171');
+    return '<div style="padding:8px 0;border-top:1px solid #26354a"><div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline"><b>'+esc(d.weekday)+' '+esc((d.date||'').slice(5))+'</b><span style="color:'+c+';font-weight:700">'+(d.grade==null?'\u2014':d.grade+'/100')+(d.owner_graded?' \u2713':'')+'</span></div>'+(d.explanation?('<div class="muted" style="font-size:12px;margin-top:2px">'+esc(d.explanation)+'</div>'):'')+'</div>'; }).join('');
+  el.innerHTML=rows||'<span class="muted">No grades this week yet.</span>'; }
 async function loadTodo(){ try{ const r=await fetch(api('todo_get')+'&cb='+Date.now()); const j=await r.json(); const ta=document.getElementById('todoText'); if(ta && document.activeElement!==ta) ta.value=(j&&j.text)||''; const st=document.getElementById('todoStatus'); if(st) st.textContent=(j&&j.updated_at)?('Last updated '+fmtWhen(j.updated_at)+(j.updated_by?(' by '+j.updated_by):'')):''; }catch(e){} }
 async function saveTodo(){ const st=document.getElementById('todoStatus'); if(st) st.textContent='Saving…'; const h={'Content-Type':'application/json'}; if(PW) h['x-app-password']=PW; try{ const r=await fetch(api('todo_post'),{method:'POST',headers:h,body:JSON.stringify({text:(document.getElementById('todoText')||{}).value||''})}); const j=await r.json(); if(st) st.textContent=(j&&j.ok)?('Saved ✓ '+(j.updated_at?fmtWhen(j.updated_at):'')):'Save failed'; }catch(e){ if(st) st.textContent='Error: '+e.message; } }
 async function loadCleans(){
