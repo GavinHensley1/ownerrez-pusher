@@ -400,6 +400,14 @@
       </div>
       <div id="callsList" class="legend">…</div>
     </div>
+    <div class="card" id="connCard">
+      <h2>🔌 Data connection check <span class="muted" style="font-weight:400;text-transform:none">— is WebWork + Traccar actually reaching the engine?</span></h2>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+        <button class="ghost" onclick="loadConn()">Re-check now</button>
+        <span id="connStatus" class="muted"></span>
+      </div>
+      <div id="connBody" class="legend">…</div>
+    </div>
     <div class="card" id="monthlyCard">
       <h2>🗓 Monthly report <span class="muted" style="font-weight:400;text-transform:none">— Victor\u2019s month of grades; auto-emailed to you + Victor on the 1st</span></h2>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
@@ -911,7 +919,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); loadMonthly(); loadTodoDoc(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -960,6 +968,32 @@ async function saveGrade(){ const date=(document.getElementById('monDate')||{}).
     if(j&&j.ok){ if(st) st.textContent='Saved ✓'; const gp=document.getElementById('gradeProgress'); if(gp){ const c=j.graded_count||0; gp.textContent=c+' day'+(c===1?'':'s')+' graded'+(c<10?(' — grade ~'+(10-c)+' more to calibrate'):' — calibrated to your standard'); } }
     else { if(st) st.textContent=(j&&j.error)||'Save failed'; }
   }catch(e){ if(st) st.textContent='Error: '+e.message; } }
+async function loadConn(){ if(!GPW) return; const st=document.getElementById('connStatus'); if(st) st.textContent='Checking\u2026'; try{ const r=await fetch(api('conn_check')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(st) st.textContent=''; renderConn(j); }catch(e){ if(st) st.textContent='error'; } }
+function _dot(ok){ return '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:'+(ok?'#2ecc71':'#e05a5a')+';margin-right:6px;vertical-align:middle"></span>'; }
+function renderConn(j){ const el=document.getElementById('connBody'); if(!el) return; if(!j){ el.textContent='no data'; return; }
+  const ww=j.webwork||{}, gps=j.gps||{}; const ht=ww.hours_today||{}, hy=ww.hours_yday||{}, sc=ww.screen_today||{};
+  const wwToday=ht.available?(ht.hours+'h tracked, '+ht.active_pct+'% active'):('no data'+(ht.error?(' \u2014 '+esc(ht.error)):''));
+  const wwYday=hy.available?(hy.hours+'h tracked, '+hy.active_pct+'% active'):('no data'+(hy.error?(' \u2014 '+esc(hy.error)):''));
+  const wwOk=!!(ht.available||hy.available);
+  const gpsEver=(gps.total_points||0)>0;
+  const lastTs=gps.last&&(gps.last.t||gps.last.timestamp)?fmtWhen(gps.last.t||gps.last.timestamp):'never';
+  let html='';
+  html+='<div style="margin-bottom:12px"><b>'+_dot(ww.token_set&&wwOk)+'WebWork (computer)</b>';
+  html+='<div style="margin-left:16px">Token configured: '+(ww.token_set?'yes':'<span style="color:#e05a5a">NO \u2014 WEBWORK_TOKEN missing</span>')+'</div>';
+  html+='<div style="margin-left:16px">Workspace '+esc(String(ww.workspace||''))+' \u00b7 user '+esc(String(ww.user||''))+'</div>';
+  html+='<div style="margin-left:16px">Today ('+esc(j.today||'')+'): '+wwToday+'</div>';
+  html+='<div style="margin-left:16px">Yesterday ('+esc(j.yday||'')+'): '+wwYday+'</div>';
+  html+='<div style="margin-left:16px">Screen activity today: '+(sc.available?(sc.entries+' segments, '+sc.active_min+' min'):'none'+(sc.error?(' \u2014 '+esc(sc.error)):''))+'</div>';
+  if(!wwOk) html+='<div style="margin-left:16px;color:var(--mut);font-size:12px">If the token is set but 0 hours show, Victor is likely tracking under a DIFFERENT WebWork account/workspace than '+esc(String(ww.workspace||''))+' / user '+esc(String(ww.user||''))+', or he did not actually track time.</div>';
+  html+='</div>';
+  html+='<div><b>'+_dot(gpsEver)+'Traccar (phone GPS)</b>';
+  html+='<div style="margin-left:16px">Ingest configured: '+(gps.configured?'yes':'<span style="color:#e05a5a">NO \u2014 GPS_INGEST_SECRET missing</span>')+'</div>';
+  html+='<div style="margin-left:16px">Points ever received: '+(gps.total_points||0)+' \u00b7 today: '+(gps.points_today||0)+' \u00b7 yesterday: '+(gps.points_yday||0)+'</div>';
+  html+='<div style="margin-left:16px">Last fix: '+lastTs+'</div>';
+  if(gps.ingestUrl) html+='<div style="margin-left:16px;margin-top:4px">Traccar app must point at this exact server URL:<br><code style="word-break:break-all;font-size:12px">'+esc(gps.ingestUrl)+'</code><br>device id = <code>'+esc(String(gps.device_expected||'victor'))+'</code>, Tracking toggle ON.</div>';
+  if(!gpsEver) html+='<div style="margin-left:16px;color:var(--mut);font-size:12px">0 points ever = the phone app is NOT reaching us. Most common cause: Traccar Client is still pointed at its default demo server (demo.traccar.org) instead of the URL above, or Tracking is off.</div>';
+  html+='</div>';
+  el.innerHTML=html; }
 async function loadMonthly(){ if(!GPW) return; const st=document.getElementById('monthlyStatus'); if(st) st.textContent='Loading\u2026'; const mo=(document.getElementById('monthlyMonth')||{}).value||''; try{ const r=await fetch(api('monthly_report')+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(st) st.textContent=''; renderMonthly(j); }catch(e){ if(st) st.textContent='error'; } }
 function renderMonthly(j){ const el=document.getElementById('monthlyBody'); if(!el) return; const weeks=(j&&j.weeks)||[]; if(!weeks.length){ el.innerHTML='<span class="muted">No graded days this month yet.</span>'; return; }
   el.innerHTML=weeks.map(function(w){ const days=(w.days||[]).map(function(d){ return '<tr><td style="white-space:nowrap;color:var(--mut)">'+esc((d.weekday||'').slice(0,3))+' '+esc((d.date||'').slice(5))+'</td><td style="font-weight:600;white-space:nowrap">'+(d.grade==null?'\u2014':d.grade+'/100')+'</td><td style="word-break:break-word">'+esc(d.explanation||'')+'</td></tr>'; }).join('');

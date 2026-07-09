@@ -1645,6 +1645,32 @@ module.exports=async(req,res)=>{
         return res.status(200).json({status:r.status, url:base+path+(qs?("?"+qs):""), json:j, raw:(j?null:t.slice(0,1500))}); }
       catch(e){ return res.status(200).json({error:String(e.message||e)}); }
     }
+    // Connection check (Gavin-gated): is WebWork + Traccar/GPS data ACTUALLY reaching the engine right now?
+    if(action==="conn_check"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const today=etDate(new Date().toISOString()); const yday=etDateAddDays(today,-1);
+      // WebWork
+      const wwTok=!!String(process.env.WEBWORK_TOKEN||"");
+      let hToday=null,hY=null,scr=null;
+      try{ hToday=await wwHoursForDate(today); }catch(e){ hToday={available:false,error:String(e&&e.message||e)}; }
+      try{ hY=await wwHoursForDate(yday); }catch(e){ hY={available:false,error:String(e&&e.message||e)}; }
+      try{ scr=await wwScreenActivity(today); }catch(e){ scr={available:false,error:String(e&&e.message||e)}; }
+      // Traccar / GPS
+      const sec=String(process.env.GPS_INGEST_SECRET||""); const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
+      let last=null,total=0,ptsToday=0,ptsY=0;
+      try{ if(redis){ last=await redis.get("parkside:gps_last:"+device); total=await redis.llen("parkside:gps:"+device);
+        ptsToday=((await redis.lrange("parkside:gpsday:"+device+":"+today,0,-1))||[]).length;
+        ptsY=((await redis.lrange("parkside:gpsday:"+device+":"+yday,0,-1))||[]).length; } }catch(e){}
+      return res.status(200).json({
+        today, yday, device,
+        webwork:{ token_set:wwTok, workspace:wwWorkspace(), user:wwVictor(),
+          hours_today:hToday, hours_yday:hY,
+          screen_today:(scr?{available:!!scr.available, entries:scr.entries||0, active_min:scr.active_min||0, error:scr.error||null}:null) },
+        gps:{ configured:!!sec, ingestUrl:(sec?(origin+"/gps/"+sec):null), device_expected:device,
+          last, total_points:total, points_today:ptsToday, points_yday:ptsY }
+      });
+    }
     // Daily scorecard: WebWork hours + GPS zone-time + stored report + stored score. (Gavin-gated)
     if(action==="scorecard"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
