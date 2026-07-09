@@ -807,6 +807,21 @@ async function runDailyScore(nowIso){
   try{ if(redis) await redis.set(dk, new Date().toISOString()); }catch(e){}
   return result;
 }
+// ===== Gavin's manual grades (ground truth) + in-context learning =====
+async function buildDaySnapshot(date, device){
+  const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device||"victor",date); const screen=await wwScreenActivity(date);
+  let report=""; try{ if(redis) report=(await redis.get("parkside:report:"+date))||""; }catch(e){}
+  const bz=(zones&&zones.byZoneMin)||{};
+  const hs=hours.available?(hours.hours+"h, "+hours.active_pct+"% active"):"no WebWork hours";
+  const gs=(zones.on_site_min||0)+"/"+(zones.total_min||0)+" min on-site (office "+(bz.office||0)+", tepees "+(bz.tepees||0)+", maint "+(bz.maintenance||0)+", resort "+(bz.resort||0)+", off "+(bz.off||0)+")";
+  const ss=screen.available?(screen.entries+" segs, "+screen.active_min+" active min"+(screen.avg_activity_pct!=null?(", "+screen.avg_activity_pct+"% activity"):"")+(screen.top_activities&&screen.top_activities.length?("; top "+screen.top_activities.slice(0,4).map(function(a){return a.label+"("+a.min+"m)";}).join(", ")):"")):"no screen activity";
+  return { hours_summary:hs, gps_summary:gs, screen_summary:ss, report_excerpt:String(report).slice(0,600) };
+}
+async function getGavinGradeExamples(limit){
+  let dates=[]; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); dates=(z||[]).slice().reverse().slice(0,limit||8); } }catch(e){}
+  const out=[]; for(const d of dates){ try{ const g=await redis.get("parkside:grade:"+d); if(g&&g.grade!=null) out.push(g); }catch(e){} }
+  return out;
+}
 function editPageHtml(it, token, unit, guestName, errMsg){
   const action='/api/app?action=edit_approval&id='+encodeURIComponent(it.id)+'&token='+encodeURIComponent(token||'');
   return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Write the reply</title></head>'
@@ -1218,6 +1233,7 @@ async function scoreDay(date, device){
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return {error:"ANTHROPIC_API_KEY not set"};
   const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device, date);
   const screen=await wwScreenActivity(date); let todoDoc=""; try{ todoDoc=((await getTodo())||{}).text||""; }catch(e){}
+  let gradeExamples=[]; try{ gradeExamples=await getGavinGradeExamples(8); }catch(e){}
   let report=""; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; } }catch(e){}
   if(!report || !String(report).trim()) return {error:"no self-report on file for "+date+" (nothing to score against)"};
   let turn=null; try{ const tv=await getTurnovers(date,1,true); turn=tv[date]; }catch(e){}
@@ -1232,13 +1248,17 @@ async function scoreDay(date, device){
   const sys="You audit an employee's (Victor, maintenance/operations at Parkside Tepees resort) daily self-report against objective tracking data. "+
     "Compare what he SAID he did to the GPS zone time and WebWork computer-activity data. "+
     "Judge how well his claims match the data. Be fair: absence of GPS/WebWork data for a task does not always mean he lied (e.g., outdoor work with phone in pocket still shows GPS on-site; computer tasks show WebWork activity). "+
+    "Do NOT nitpick that every minute was active \u2014 short breaks, phone calls, and idle gaps are normal and fine. Judge productivity at an hour-to-two-hour granularity: was the time GENERALLY productive and not wasted (the real concern is an employee on his phone all day, not one who took a call). "+
     "Cross-check any CLEANING claims against the bookings/cleaning ground-truth: a unit needs a full turnover clean when a guest checked OUT that day. If he claims he cleaned MORE units than there were checkouts, flag the excess as unverified in discrepancies; markedly fewer cleanings than checkouts may mean turnovers were skipped. "+
     "If a to-do list is provided, treat work that advances items on it as valued/expected; he should stay roughly (not exactly) aligned to it, and maintenance is expected even if unlisted. Use the WebWork screen-activity (what he was doing on the computer) to corroborate desk/admin/computer claims. "+
     "Return ONLY a JSON object: {\"truth_score\":0-100, \"productivity_score\":0-100, \"hours_worked\":<number, from the data>, \"matches\":[\"...\"], \"discrepancies\":[\"...\"], \"summary\":\"1-2 sentences\"}. "+
     "truth_score = how well his report is corroborated by the data (100 = fully consistent, low = claims contradicted by the data). "+
-    "productivity_score = how productive and on-list the day was given the to-do list, GPS on-site time, and screen activity (100 = clearly productive on valued work, low = little evidence of productive/valued work).";
+    "productivity_score = how productive and on-list the day was given the to-do list, GPS on-site time, and screen activity (100 = clearly productive on valued work, low = little evidence of productive/valued work). "+
+    "If example gradings from the owner (Gavin) are provided below, your productivity_score MUST predict the grade GAVIN would give \u2014 learn his standard from those examples; his grading is the ground truth.";
   const todoBlock=(todoDoc&&todoDoc.trim())?("\nVICTOR'S CURRENT TO-DO LIST (living doc \u2014 admin + general tasks; maintenance expected, may be unlisted):\n"+String(todoDoc).slice(0,3000)+"\n"):"";
-  const userMsg=dataBlock+todoBlock+"\nVICTOR'S SELF-REPORT:\n"+String(report).slice(0,4000);
+  let exBlock="";
+  if(gradeExamples&&gradeExamples.length){ exBlock="\nHOW GAVIN (owner) GRADED PAST DAYS FOR PRODUCTIVITY (0-100) \u2014 match his standard:\n"+gradeExamples.map(function(e){ const sn=e.snap||{}; return "- "+e.date+" \u2192 "+Math.round(e.grade)+"/100"+(e.note?(" ("+String(e.note).slice(0,140)+")"):"")+". Data: "+(sn.hours_summary||"")+"; "+(sn.gps_summary||"")+"; "+(sn.screen_summary||"")+"."; }).join("\n")+"\n"; }
+  const userMsg=dataBlock+todoBlock+exBlock+"\nVICTOR'S SELF-REPORT:\n"+String(report).slice(0,4000);
   try{
     const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},
       body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:700,temperature:0,system:sys,messages:[{role:"user",content:userMsg}]})});
@@ -1523,8 +1543,8 @@ module.exports=async(req,res)=>{
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
       const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device,date); const screen=await wwScreenActivity(date);
-      let report="", score=null, todo=null; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; score=await redis.get("parkside:score:"+date); } }catch(e){} try{ todo=await getTodo(); }catch(e){}
-      return res.status(200).json({ date, device, hours, zones, screen, report, score, todo });
+      let report="", score=null, todo=null, grade=null, graded_count=0; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; score=await redis.get("parkside:score:"+date); grade=await redis.get("parkside:grade:"+date); const gz=await redis.zrange("parkside:grades_index",0,-1); graded_count=(gz||[]).length; } }catch(e){} try{ todo=await getTodo(); }catch(e){}
+      return res.status(200).json({ date, device, hours, zones, screen, report, score, todo, grade, graded_count });
     }
     // Get/set Victor's self-report text for a date. (Gavin-gated)
     if(action==="scorecard_report"){
@@ -1564,6 +1584,32 @@ module.exports=async(req,res)=>{
       const okAuth=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x")) || ((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__y")) || ((req.query&&req.query.token)===(process.env.CRON_SECRET||"__z"));
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
       return res.status(200).json(await runDailyScore(new Date().toISOString()));
+    }
+    // Gavin's manual grade for a day (ground truth the auto-grader learns from). Gavin-gated.
+    if(action==="grade_get"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
+      let grade=null; try{ if(redis) grade=await redis.get("parkside:grade:"+date); }catch(e){}
+      let count=0; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); count=(z||[]).length; } }catch(e){}
+      return res.status(200).json({date, grade, graded_count:count});
+    }
+    if(action==="grade_set"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
+      const device=String((req.query&&req.query.id)||"victor").replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+      if(b.grade===""||b.grade==null){ if(redis){ try{ await redis.del("parkside:grade:"+date); await redis.zrem("parkside:grades_index",date); }catch(e){} } return res.status(200).json({ok:true, cleared:true, date}); }
+      const g=Number(b.grade); if(!isFinite(g)) return res.status(400).json({error:"grade must be a number 0-100"});
+      const snap=await buildDaySnapshot(date, device);
+      const rec={date, grade:Math.max(0,Math.min(100,Math.round(g))), note:String(b.note||"").slice(0,500), by:"gavin", at:new Date().toISOString(), snap};
+      try{ if(redis){ await redis.set("parkside:grade:"+date, rec); await redis.zadd("parkside:grades_index",{score:Number(date.replace(/-/g,'')),member:date}); } }catch(e){}
+      let count=0; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); count=(z||[]).length; } }catch(e){}
+      return res.status(200).json(Object.assign({ok:true, graded_count:count}, rec));
+    }
+    if(action==="grades_list"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let dates=[]; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); dates=(z||[]).slice().reverse(); } }catch(e){}
+      return res.status(200).json({count:dates.length, dates});
     }
     if(action==="gps_zones"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x") && (req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
