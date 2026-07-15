@@ -52,10 +52,15 @@
     .switch{width:50px;height:28px} .knob{width:22px;height:22px} .switch.on .knob{left:25px}
     #monthLbl{min-width:110px!important}
   }
+.roster{width:100%;border-collapse:collapse}
+.roster th,.roster td{border:1px solid var(--line);padding:9px 12px;font-size:15px;text-align:center;white-space:normal;vertical-align:top}
+.roster th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+.roster td.l{text-align:left} .roster td.email{word-break:break-all;font-size:13px} .roster td.agr{white-space:nowrap;font-weight:700;font-size:13px}
+@media(max-width:640px){.roster th,.roster td{padding:6px 7px;font-size:13px} .roster td.email,.roster td.agr{font-size:11px}}
 </style></head><body>
 
 <!-- PUBLIC default: read-only booking roster pulled live from OwnerRez (no password) -->
-<div id="inquiry" style="max-width:920px;margin:5vh auto 0;padding:0 16px">
+<div id="inquiry" style="max-width:1180px;margin:5vh auto 0;padding:0 16px">
   <div class="card">
     <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
       <div>
@@ -65,7 +70,7 @@
       <button onclick="showVictorGate()" style="flex-shrink:0;background:var(--accent,#d4a64a);color:#10151c;font-weight:700;font-size:15px;border:none;border-radius:10px;padding:11px 20px;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.3)">🔒 Victor&rsquo;s Login</button>
     </div>
     <div id="rosterStatus" class="muted" style="padding:18px 0">Loading bookings…</div>
-    <div class="scroll" id="rosterWrap"></div>
+    <div id="rosterWrap"></div>
   </div>
 </div>
 
@@ -1112,12 +1117,12 @@ async function loadBookings(){
     if(!list.length){ st.textContent='No current or upcoming bookings found.'; return; }
     st.style.display='none';
     const _todayStr=new Date().toISOString().slice(0,10);
-    const agrBadge=b=>{ if(b.agreementSigned==null) return ''; if(((b.departure||b.arrival)||'')<_todayStr) return ''; return b.agreementSigned
-      ? " <span title='Rental agreement signed' style='margin-left:6px;font-size:11px;font-weight:700;color:#2ecc71;white-space:nowrap'>\u2713 agreement</span>"
-      : " <span title='Rental agreement not signed yet' style='margin-left:6px;font-size:11px;font-weight:700;color:#e6b85c;white-space:nowrap'>\u26A0 agreement</span>"; };
-    const guestCell=b=>{ const nm = b.name? esc(b.name) : (b.reference? "<span class='muted'>"+esc(b.reference)+"</span>" : '\u2014'); return nm + agrBadge(b); };
-    wrap.innerHTML="<table class='occ' style='width:100%'><tr><th>Check-in</th><th>Check-out</th><th>Unit</th><th>Guest</th><th>Email</th><th>Phone</th></tr>"
-      +list.map(b=>"<tr><td>"+fmt(b.arrival)+"</td><td>"+fmt(b.departure)+"</td><td style='text-align:left'>"+esc(b.unit||'\u2014')+"</td><td style='text-align:left'>"+guestCell(b)+"</td><td style='text-align:left'>"+esc(b.email||'\u2014')+"</td><td>"+esc(b.phone||'\u2014')+"</td></tr>").join("")
+    const agrCell=b=>{ if(b.agreementSigned==null||(((b.departure||b.arrival)||'')<_todayStr)) return "<span class='muted'>\u2014</span>"; return b.agreementSigned
+      ? "<span title='Rental agreement signed' style='color:#2ecc71'>\u2713 signed</span>"
+      : "<span title='Rental agreement not signed yet' style='color:#e6b85c'>\u26A0 not signed</span>"; };
+    const guestCell=b=>{ return b.name? esc(b.name) : (b.reference? "<span class='muted'>"+esc(b.reference)+"</span>" : '\u2014'); };
+    wrap.innerHTML="<table class='roster'><tr><th>Check-in</th><th>Check-out</th><th>Unit</th><th>Guest</th><th>Agreement</th><th>Email</th><th>Phone</th></tr>"
+      +list.map(b=>"<tr><td>"+fmt(b.arrival)+"</td><td>"+fmt(b.departure)+"</td><td class='l'>"+esc(b.unit||'\u2014')+"</td><td class='l'>"+guestCell(b)+"</td><td class='agr'>"+agrCell(b)+"</td><td class='l email'>"+esc(b.email||'\u2014')+"</td><td>"+esc(b.phone||'\u2014')+"</td></tr>").join("")
       +"</table>";
   }catch(e){ st.textContent='Error loading bookings: '+e.message; }
 }
