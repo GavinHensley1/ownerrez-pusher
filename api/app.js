@@ -713,6 +713,24 @@ async function escalateStaleApprovals(req){
     return {escalated:done.length, mins:cfg.escalateMins, items:done};
   }catch(e){ return {error:String(e.message||e)}; }
 }
+// Auto-resolve: any approval still pending after 24h becomes Rejected (nothing sent to guest).
+// Uses ts (queued time). Does NOT write the reject-KB — a timeout is not a judgment on the draft.
+async function autoRejectStaleApprovals(req){
+  try{
+    const cutoff=Date.now()-24*60*60*1000;
+    const list=await getApprovals(); let changed=false; const done=[];
+    for(const it of list){
+      if(!it || it.status!=="pending") continue;
+      const t=Date.parse(it.ts||it.primaryNotifiedAt||"");
+      if(!isFinite(t) || t>cutoff) continue;
+      it.status="rejected"; it.decidedAt=new Date().toISOString();
+      it.rejectReason="Auto-rejected: no decision within 24 hours"; it.autoRejected=true;
+      changed=true; done.push({id:it.id});
+    }
+    if(changed) await setApprovals(list);
+    return {autoRejected:done.length, items:done};
+  }catch(e){ return {error:String(e.message||e)}; }
+}
 function htmlPage(title, msg){
   return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+escHtml(title)+'</title></head>'
     +'<body style="font-family:Arial,Helvetica,sans-serif;background:#0f1720;color:#e7eef6;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">'
@@ -2357,8 +2375,9 @@ module.exports=async(req,res)=>{
       if(!okAuth) return res.status(401).json({error:"unauthorized"});
       const out=await runPollMessages(req);
       const esc=await escalateStaleApprovals(req);
+      const autorej=await autoRejectStaleApprovals(req);
       let verify=null; try{ verify=await runVictorVerifyReminder(new Date().toISOString()); }catch(e){ verify={error:String(e.message||e)}; }
-      return res.status(200).json(Object.assign(out||{}, {escalation:esc, verifyReminder:verify}));
+      return res.status(200).json(Object.assign(out||{}, {escalation:esc, autoReject:autorej, verifyReminder:verify}));
     }
     // PUBLIC plan-free heartbeat: hit by an external free cron (cron-job.org/UptimeRobot)
     // or by page loads. Token-gated by the approve-link secret. Drives intake without
@@ -2368,7 +2387,8 @@ module.exports=async(req,res)=>{
       if(!secret || tok!==secret) return res.status(403).json({error:"bad or missing token"});
       const out=await maybePollMessages(req);
       const esc=await escalateStaleApprovals(req);
-      return res.status(200).json(Object.assign(out||{skipped:true, reason:"throttled (<60s since last poll)", lastPoll:await getPollStatus()}, {escalation:esc}));
+      const autorej=await autoRejectStaleApprovals(req);
+      return res.status(200).json(Object.assign(out||{skipped:true, reason:"throttled (<60s since last poll)", lastPoll:await getPollStatus()}, {escalation:esc, autoReject:autorej}));
     }
     // Webhook intake: OwnerRez (or any source) POSTs an inbound message here.
     // URL: /api/app?action=or_message_inbound&token=<APPROVE_LINK_SECRET>

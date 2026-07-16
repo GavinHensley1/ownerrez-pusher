@@ -202,7 +202,7 @@
     <div class="groupBody" style="display:none;margin-top:12px">
   <div class="card">
     <h2>Approval queue — guest questions awaiting Victor</h2>
-    <div class="legend">When a question isn’t confidently answered by the knowledge base, it’s queued here and (once the SMS number is live) texted to Victor for a YES/NO. Approving sends the answer to the guest <b>and</b> saves it to the knowledge base so it auto-answers next time. You can also decide right here.</div>
+    <div class="legend">When a question isn’t confidently answered by the knowledge base, it’s queued here and (once the SMS number is live) texted to Victor for a YES/NO. You approve by <b>texting back</b> (reply the Q-label with yes/no); approving sends the answer to the guest <b>and</b> saves it to the knowledge base. This list is read-only. Anything left undecided for <b>24 hours</b> is automatically rejected (nothing is sent).</div>
     <div style="margin:8px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button onclick="loadApprovals()">Refresh queue</button>
       <button class="ghost" onclick="pruneLastApproved()" title="Delete the most recently approved answer from the approved bank + KB">🗑 Remove last approved answer</button>
@@ -1165,10 +1165,15 @@ async function loadApprovals(){
     if(j.counts) document.getElementById('apCounts').textContent='Pending '+j.counts.pending+' · Approved '+j.counts.approved+' · Rejected '+j.counts.rejected;
     const list=j.approvals||[];
     if(!list.length){ el.innerHTML="<span class='muted'>No pending questions. \uD83C\uDF89</span>"; }
-    else el.innerHTML=list.map(it=>"<div style='border:1px solid var(--line);border-radius:6px;padding:10px;margin:8px 0'>"
-      +"<div><b>Q:</b> "+esc(it.question)+"</div>"
-      +"<div style='margin-top:6px'><b>Proposed answer:</b><textarea id='ans_"+it.id+"' style='width:100%;min-height:48px'>"+esc(it.proposed||"")+"</textarea></div>"
-      +"<div style='margin-top:8px;display:flex;gap:8px'><button onclick=\"decide('"+it.id+"','yes')\">Approve &amp; send</button><button class='ghost' onclick=\"decide('"+it.id+"','no')\">Reject</button><span id='dec_"+it.id+"' class='muted' style='align-self:center'></span></div></div>").join("");
+    else el.innerHTML=list.map(function(it){
+      var lbl=it.smsLabel||''; var age='';
+      try{ var ms=Date.now()-Date.parse(it.ts||''); if(isFinite(ms)){ var h=Math.floor(ms/3600000); age=h<1?'under 1h ago':(h+'h ago'); } }catch(e){}
+      return "<div style='border:1px solid var(--line);border-radius:6px;padding:10px;margin:8px 0'>"
+      +"<div style='display:flex;justify-content:space-between;gap:8px;align-items:flex-start'><div><b>Q:</b> "+esc(it.question)+"</div>"+(lbl?("<span class='muted' style='white-space:nowrap;font-weight:600'>"+esc(lbl)+"</span>"):"")+"</div>"
+      +"<div style='margin-top:6px'><b>Proposed answer:</b><div style='white-space:pre-wrap;background:#0f1720;border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:4px'>"+esc(it.proposed||"(none)")+"</div></div>"
+      +"<div class='muted' style='margin-top:6px;font-size:12px'>Awaiting your text reply"+(lbl?(" \u2014 reply \u201c"+esc(lbl)+" yes\u201d or \u201c"+esc(lbl)+" no\u201d"):"")+". "+(age?("Received "+age+". "):"")+"Auto-rejected if undecided for 24h.</div>"
+      +"</div>";
+    }).join("");
   }catch(e){ el.textContent="Error: "+e.message; }
   try{ const s=await fetch(api('sms_status'),{headers:{'x-app-password':PW}}); const sj=await s.json(); const a=document.getElementById('apSms'); if(a) a.textContent='SMS: '+(sj.configured?('live ('+sj.provider+')'):'staged — number not configured yet'); }catch(e){}
 }
