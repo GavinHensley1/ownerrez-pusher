@@ -1384,9 +1384,32 @@ async function wwScreenActivity(date){
   const lvl=function(e){ const v=Number(e.activity_level!=null?e.activity_level:(e.activity!=null?e.activity:NaN)); return isFinite(v)?v:null; };
   const mins=function(e){ const m=Number(e.duration_minutes!=null?e.duration_minutes:(e.total_minutes!=null?e.total_minutes:(e.minutes!=null?e.minutes:NaN))); if(isFinite(m)) return m; const a=e.start||e.start_time, b=e.end||e.end_time; if(a&&b){ const g=(new Date(b)-new Date(a))/60000; return (isFinite(g)&&g>0)?g:0; } return 0; };
   let totMin=0, lvlSum=0, lvlN=0; const desc={}, methods={};
-  for(const e of entries){ const mm=mins(e); totMin+=mm; const L=lvl(e); if(L!=null){ lvlSum+=L; lvlN++; } const label=memo(e)||taskOf(e)||projOf(e); if(label) desc[label]=(desc[label]||0)+mm; const meth=String(e.tracking_method||e.method||"").trim(); if(meth) methods[meth]=(methods[meth]||0)+1; }
+  for(const e of entries){ const mm=mins(e); totMin+=mm; const L=lvl(e); if(L!=null){ lvlSum+=L; lvlN++; } const label=memo(e); if(label) desc[label]=(desc[label]||0)+mm; /* description only, not project/task which go stale e.g. minibar */ const meth=String(e.tracking_method||e.method||"").trim(); if(meth) methods[meth]=(methods[meth]||0)+1; }
   const top=Object.keys(desc).sort(function(a,b){return desc[b]-desc[a];}).slice(0,8).map(function(k){ return {label:k.slice(0,80), min:Math.round(desc[k])}; });
   return { available:true, entries:entries.length, active_min:Math.round(totMin), avg_activity_pct:(lvlN?Math.round(lvlSum/lvlN):null), top_activities:top, methods:Object.keys(methods) };
+}
+async function wwAppsWebsites(date){
+  // The apps & websites (URLs) Victor actually used + minutes + activity level. PRIMARY "is he active / what was he on"
+  // signal for verification — NOT project labels. Endpoint path env-overridable (WEBWORK_APPS_PATH).
+  const path=String(process.env.WEBWORK_APPS_PATH||"/reports/apps-websites");
+  const r=await wwFetch(path,"workspace_id="+wwWorkspace()+"&user_id="+wwVictor()+"&user_ids[]="+wwVictor()+"&start_date="+date+"&end_date="+date+"&apps_websites_only=true&per_page=100");
+  if(!r.ok || !r.json) return {available:false, error:r.error||("status "+r.status)};
+  const d=(r.json.data!=null)?r.json.data:r.json;
+  let rows=[];
+  const looksRow=function(e){ return e&&typeof e==="object" && (e.url!=null||e.website!=null||e.domain!=null||e.host!=null||e.app!=null||e.application!=null||e.name!=null||e.title!=null); };
+  const dig=function(x){ if(!x) return; if(Array.isArray(x)){ for(const e of x){ if(looksRow(e)) rows.push(e); else dig(e); } return; } if(typeof x==="object"){ for(const k in x){ if(Array.isArray(x[k])) dig(x[k]); else if(x[k]&&typeof x[k]==="object") dig(x[k]); } } };
+  try{ dig(d); }catch(e){}
+  const vid=String(wwVictor());
+  const mine=rows.filter(function(e){ const uid=String(e.user_id!=null?e.user_id:((e.user&&(e.user.id||e.user.user_id))||"")); return !uid || uid===vid; });
+  const use=mine.length?mine:rows;
+  const labelOf=function(e){ return String(e.url||e.website||e.domain||e.host||e.app||e.application||e.name||e.title||"").trim(); };
+  const minOf=function(e){ const m=Number(e.duration_minutes!=null?e.duration_minutes:(e.total_minutes!=null?e.total_minutes:(e.tracked_minutes!=null?e.tracked_minutes:(e.minutes!=null?e.minutes:(e.duration!=null?e.duration/60:NaN))))); return isFinite(m)?m:0; };
+  const lvlOf=function(e){ const v=Number(e.activity_level!=null?e.activity_level:(e.activity!=null?e.activity:NaN)); return isFinite(v)?v:null; };
+  const agg={}; let tot=0, lvlSum=0, lvlN=0;
+  for(const e of use){ const lab=labelOf(e); const mm=minOf(e); if(lab) agg[lab]=(agg[lab]||0)+mm; tot+=mm; const L=lvlOf(e); if(L!=null){ lvlSum+=L; lvlN++; } }
+  const top=Object.keys(agg).sort(function(a,b){return agg[b]-agg[a];}).slice(0,10).map(function(k){ return {label:k.slice(0,120), min:Math.round(agg[k])}; });
+  if(!top.length) return {available:false, empty:true, note:"no apps/website rows returned", raw_status:r.status};
+  return { available:true, rows:use.length, total_min:Math.round(tot), avg_activity_pct:(lvlN?Math.round(lvlSum/lvlN):null), top:top };
 }
 async function gpsZoneSummary(device, date){
   let pts=[]; try{ if(redis){ const raw=await redis.lrange("parkside:gpsday:"+device+":"+date,0,-1); pts=(raw||[]).map(function(x){ try{ return typeof x==="string"?JSON.parse(x):x; }catch(e){ return null; } }).filter(Boolean); } }catch(e){}
@@ -1401,7 +1424,7 @@ async function gpsZoneSummary(device, date){
 async function scoreDay(date, device){
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return {error:"ANTHROPIC_API_KEY not set"};
   const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device, date);
-  const screen=await wwScreenActivity(date); let todoDoc=""; try{ todoDoc=((await getTodo())||{}).text||""; }catch(e){}
+  const screen=await wwScreenActivity(date); const apps=await wwAppsWebsites(date); let todoDoc=""; try{ todoDoc=((await getTodo())||{}).text||""; }catch(e){}
   let gradeExamples=[]; try{ gradeExamples=await getGavinGradeExamples(8); }catch(e){}
   let report=""; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; } }catch(e){}
   if(!report || !String(report).trim()) return {error:"no self-report on file for "+date+" (nothing to score against)"};
@@ -1410,6 +1433,7 @@ async function scoreDay(date, device){
     "OBJECTIVE DATA for "+date+" (America/New_York):\n"+
     "- WebWork hours: "+(hours.available?(hours.hours+"h tracked, "+hours.active_pct+"% active ("+hours.active_min+" active min of "+hours.tracked_min+")"):"no WebWork data")+"\n"+
     "- WebWork screen activity: "+(screen.available?(screen.entries+" segment(s), "+screen.active_min+" active min"+(screen.avg_activity_pct!=null?(", "+screen.avg_activity_pct+"% avg activity"):"")+(screen.top_activities&&screen.top_activities.length?("; top: "+screen.top_activities.map(function(a){return a.label+" ("+a.min+"m)";}).join(", ")):"")):"no WebWork screen-activity data")+"\n"+
+    "- WebWork apps & websites (what he was ON — URLs/apps + activity): "+(apps.available?(apps.top.map(function(a){return a.label+" ("+a.min+"m)";}).join(", ")+(apps.avg_activity_pct!=null?("; "+apps.avg_activity_pct+"% activity"):"")):"no apps/website data")+"\n"+
     "- GPS on-site time: "+zones.on_site_min+" min on resort grounds of "+zones.total_min+" min tracked\n"+
     "- GPS time per zone (minutes): office "+zones.byZoneMin.office+", tepees "+zones.byZoneMin.tepees+", maintenance "+zones.byZoneMin.maintenance+", elsewhere-on-resort "+zones.byZoneMin.resort+", off-site "+zones.byZoneMin.off+"\n"+
     "- First ping "+(zones.first||"n/a")+", last ping "+(zones.last||"n/a")+"\n"+
@@ -1419,7 +1443,7 @@ async function scoreDay(date, device){
     "Judge how well his claims match the data. Be fair: absence of GPS/WebWork data for a task does not always mean he lied (e.g., outdoor work with phone in pocket still shows GPS on-site; computer tasks show WebWork activity). "+
     "Do NOT nitpick that every minute was active \u2014 short breaks, phone calls, and idle gaps are normal and fine. Judge productivity at an hour-to-two-hour granularity: was the time GENERALLY productive and not wasted (the real concern is an employee on his phone all day, not one who took a call). "+
     "Cross-check any CLEANING claims against the bookings/cleaning ground-truth: a unit needs a full turnover clean when a guest checked OUT that day. If he claims he cleaned MORE units than there were checkouts, flag the excess as unverified in discrepancies; markedly fewer cleanings than checkouts may mean turnovers were skipped. "+
-    "If a to-do list is provided, treat work that advances items on it as valued/expected; he should stay roughly (not exactly) aligned to it, and maintenance is expected even if unlisted. Use the WebWork screen-activity (what he was doing on the computer) to corroborate desk/admin/computer claims. "+
+    "If a to-do list is provided, treat work that advances items on it as valued/expected; he should stay roughly (not exactly) aligned to it, and maintenance is expected even if unlisted. Use the WebWork data PRIMARILY to verify he was actually ACTIVE and what he genuinely used (apps & websites / URLs + activity rate) to corroborate desk/admin/computer claims; do NOT treat WebWork project/task names as proof of what he worked on (those labels can be stale). "+
     "Return ONLY a JSON object: {\"truth_score\":0-100, \"productivity_score\":0-100, \"hours_worked\":<number, from the data>, \"matches\":[\"...\"], \"discrepancies\":[\"...\"], \"summary\":\"1-2 sentences\"}. "+
     "truth_score = how well his report is corroborated by the data (100 = fully consistent, low = claims contradicted by the data). "+
     "productivity_score = how productive and on-list the day was given the to-do list, GPS on-site time, and screen activity (100 = clearly productive on valued work, low = little evidence of productive/valued work). "+
@@ -1750,9 +1774,9 @@ module.exports=async(req,res)=>{
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
       const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
-      const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device,date); const screen=await wwScreenActivity(date);
+      const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device,date); const screen=await wwScreenActivity(date); const apps=await wwAppsWebsites(date);
       let report="", score=null, todo=null, grade=null, graded_count=0; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; score=await redis.get("parkside:score:"+date); grade=await redis.get("parkside:grade:"+date); const gz=await redis.zrange("parkside:grades_index",0,-1); graded_count=(gz||[]).length; } }catch(e){} try{ todo=await getTodo(); }catch(e){}
-      return res.status(200).json({ date, device, hours, zones, screen, report, score, todo, grade, graded_count });
+      return res.status(200).json({ date, device, hours, zones, screen, apps, report, score, todo, grade, graded_count });
     }
     // Get/set Victor's self-report text for a date. (Gavin-gated)
     if(action==="scorecard_report"){
@@ -1776,7 +1800,7 @@ module.exports=async(req,res)=>{
     if(action==="ww_activity"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
-      return res.status(200).json(await wwScreenActivity(date));
+      return res.status(200).json(Object.assign(await wwScreenActivity(date), {apps: await wwAppsWebsites(date)}));
     }
     // Shared to-do list. Victor-facing like cleans/refunds (panel is the access boundary); tags who edited.
     if(action==="todo_get"){ return res.status(200).json(await getTodo()); }
