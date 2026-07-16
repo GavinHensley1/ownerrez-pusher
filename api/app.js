@@ -858,6 +858,7 @@ const EMAIL_CATALOG=[
 function _splitAddrs(x){ return String(x||"").split(/[,;\s]+/).map(function(a){return a.trim();}).filter(Boolean); }
 function resolveRecipients(er, key, cfg){
   var row=(er&&er[key])||{};
+  if(row.enabled===false) return [];  // email turned OFF in the panel
   var list=[];
   if(typeof row.to==="string") list=_splitAddrs(row.to);
   if(row.victor && cfg && cfg.to) list.push(cfg.to);
@@ -1858,14 +1859,16 @@ module.exports=async(req,res)=>{
       let _b=req.body; if(typeof _b==="string"){ try{ _b=JSON.parse(_b);}catch(e){ _b={}; } }
       const _rec=(_b&&_b.recipients)||{};
       const _clean={};
-      for(const it of EMAIL_CATALOG){ const rr=_rec[it.key]||{}; _clean[it.key]={ to:String(rr.to||"").slice(0,400), victor:!!rr.victor }; }
+      for(const it of EMAIL_CATALOG){ const rr=_rec[it.key]||{}; _clean[it.key]={ to:String(rr.to||"").slice(0,400), victor:!!rr.victor, enabled:(rr.enabled!==false) }; }
       await setEmailRecipients(_clean);
-      const _out=EMAIL_CATALOG.map(it=>({key:it.key,name:it.name,desc:it.desc,to:_clean[it.key].to,victor:_clean[it.key].victor,effective:resolveRecipients(_clean,it.key,_cfg)}));
-      return res.status(200).json({ok:true, victorEmail:_cfg.to, emails:_out});
+      if(typeof _b.from==="string"){ const _raw=await getNotifyRaw(); _raw.from=String(_b.from).trim().slice(0,120); await setNotifyRaw(_raw); }
+      const _cfg2=await getNotifyConfig();
+      const _out=EMAIL_CATALOG.map(it=>({key:it.key,name:it.name,desc:it.desc,to:_clean[it.key].to,victor:_clean[it.key].victor,enabled:_clean[it.key].enabled,effective:resolveRecipients(_clean,it.key,_cfg2)}));
+      return res.status(200).json({ok:true, victorEmail:_cfg2.to, from:_cfg2.from, emails:_out});
     }
     const _er=await getEmailRecipients();
-    const _out=EMAIL_CATALOG.map(it=>({key:it.key,name:it.name,desc:it.desc,to:(_er[it.key]&&_er[it.key].to)||"",victor:!!(_er[it.key]&&_er[it.key].victor),effective:resolveRecipients(_er,it.key,_cfg)}));
-    return res.status(200).json({victorEmail:_cfg.to, emails:_out});
+    const _out=EMAIL_CATALOG.map(it=>({key:it.key,name:it.name,desc:it.desc,to:(_er[it.key]&&_er[it.key].to)||"",victor:!!(_er[it.key]&&_er[it.key].victor),enabled:!(_er[it.key]&&_er[it.key].enabled===false),effective:resolveRecipients(_er,it.key,_cfg)}));
+    return res.status(200).json({victorEmail:_cfg.to, from:_cfg.from, emails:_out});
   }
   if(action==="weekly_hide"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
