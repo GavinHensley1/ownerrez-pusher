@@ -1073,9 +1073,15 @@ function renderMonitor(j){ if(!MON_MAP) initMonMap(); MON_LAYERS.clearLayers();
   for(const p of trail){ const c=ZONE_COLORS[p.zone||'off']||'#f87171'; L.circleMarker([p.lat,p.lon],{radius:4,color:c,fillColor:c,fillOpacity:0.9,weight:1}).addTo(MON_LAYERS).bindPopup((p.zone||'off')+' · '+fmtWhen(p.t)); }
   const last=j.last; if(last&&isFinite(last.lat)){ const c=ZONE_COLORS[last.zone||'off']||'#f87171';
     L.circleMarker([last.lat,last.lon],{radius:8,color:'#fff',fillColor:c,fillOpacity:1,weight:2}).addTo(MON_LAYERS).bindPopup('LATEST · '+(last.zone||'off')+' · '+fmtWhen(last.t)).openPopup(); MON_MAP.panTo([last.lat,last.lon]); }
+  else if(j.lastSeen&&isFinite(j.lastSeen.lat)){ const ls=j.lastSeen; const c=ZONE_COLORS[ls.zone||'off']||'#94a3b8';
+    L.circleMarker([ls.lat,ls.lon],{radius:7,color:'#fbbf24',fillColor:c,fillOpacity:0.55,weight:2,dashArray:'3 3'}).addTo(MON_LAYERS).bindPopup('LAST SEEN (not today) · '+(ls.zone||'off')+' · '+fmtWhen(ls.t)).openPopup(); MON_MAP.panTo([ls.lat,ls.lon]); }
   const zoneNow=j.zone||(last&&last.zone)||null;
   if(j.date){ document.getElementById('monNow').innerHTML = last ? ('<b>'+j.date+'</b> — '+(j.count||0)+' points · ended in <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> at '+fmtWhen(last.t)) : ('<b>'+j.date+'</b> — no points that day.'); }
-  else { document.getElementById('monNow').innerHTML = last ? ('Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> · '+fmtWhen(last.t)+' · '+(j.count||0)+' points') : 'No pings yet for this device.'; }
+  else {
+    if(last){ document.getElementById('monNow').innerHTML = 'Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> · '+fmtWhen(last.t)+' · '+(j.count||0)+' points today'; }
+    else if(j.lastSeen){ document.getElementById('monNow').innerHTML = '<b style="color:#fbbf24">No GPS yet today.</b> Last seen: <b>'+((j.lastSeen.zone)||'off')+'</b> · '+fmtWhen(j.lastSeen.t); }
+    else { document.getElementById('monNow').innerHTML = 'No pings yet for this device.'; }
+  }
   const by=j.trailByZone||{}; const order=['office','tepees','maintenance','resort','off']; let h='';
   for(const z of order){ if(by[z]) h+='<span class="pill" style="background:'+(ZONE_COLORS[z]||'#333')+';color:#0b1220;margin-right:8px">'+z+': '+by[z]+'</span>'; }
   document.getElementById('monZones').innerHTML = h||'<span class="muted">No recent points.</span>';

@@ -1512,15 +1512,23 @@ module.exports=async(req,res)=>{
       const date=String((req.query&&req.query.date)||"").trim();
       const sec=String(process.env.GPS_INGEST_SECRET||""); const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
       const _parse=raw=>(raw||[]).map(x=>{ try{ return typeof x==="string"?JSON.parse(x):x; }catch{ return null; } }).filter(Boolean);
-      let last=null, count=0, trail=[];
+      let last=null, count=0, trail=[], lastSeen=null, stale=false, liveToday=null;
       try{ if(redis){
         if(date){ const dk="parkside:gpsday:"+device+":"+date; trail=_parse(await redis.lrange(dk,0,-1)); count=trail.length; last=trail.length?trail[trail.length-1]:null; }
-        else { last=await redis.get("parkside:gps_last:"+device); const k="parkside:gps:"+device; count=await redis.llen(k); trail=_parse(await redis.lrange(k,-300,-1)); }
+        else {
+          // "Today (live)": show ONLY today's (ET) points — never spill yesterday's fixes into the live view.
+          liveToday=etDate(new Date().toISOString());
+          const dk="parkside:gpsday:"+device+":"+liveToday;
+          trail=_parse(await redis.lrange(dk,0,-1)); count=trail.length;
+          last = trail.length ? trail[trail.length-1] : null;      // live "current" = today's last fix only
+          lastSeen = await redis.get("parkside:gps_last:"+device);  // most-recent fix on ANY day (for "last seen")
+          stale = !!(lastSeen && !last);                            // no fix yet today
+        }
       } }catch(e){}
       const zones=await getZones();
       const zoneNow=(last&&last.zone)?last.zone:null;
       const byZone={}; for(const x of trail){ if(!x) continue; const z=x.zone||'off'; byZone[z]=(byZone[z]||0)+1; }
-      return res.status(200).json({ device, date:date||null, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, zone:zoneNow, on_site:(zoneNow&&zoneNow!=='off'), zones, trailByZone:byZone, trail });
+      return res.status(200).json({ device, date:date||null, today:liveToday, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, lastSeen, stale, zone:zoneNow, on_site:(zoneNow&&zoneNow!=='off'), zones, trailByZone:byZone, trail });
     }
     // Get/set the named zones (password-gated). POST {zones:[{name,lat,lon,radius_m},...]} to replace them.
     // List days that have GPS history for a device (Gavin-gated) — powers the date scrubber.
