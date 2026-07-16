@@ -783,6 +783,31 @@ async function runVictorVerifyReminder(nowIso){
   return {sent:!!(r&&r.sent===true), date, weekday:wd, email:r};
 }
 // ===== Shared living to-do list (Gavin + Victor + engine all read/write one doc) =====
+// Pure-Node .docx text extractor (no deps): read ZIP central directory -> inflate word/document.xml -> strip to text.
+function docxToText(buf){
+  const zlib=require('zlib');
+  if(!Buffer.isBuffer(buf)) buf=Buffer.from(buf);
+  let eocd=-1;
+  for(let i=buf.length-22;i>=0 && i>buf.length-22-65536;i--){ if(buf.readUInt32LE(i)===0x06054b50){ eocd=i; break; } }
+  if(eocd<0) throw new Error("not a .docx (no zip directory)");
+  const cdOffset=buf.readUInt32LE(eocd+16); const cdCount=buf.readUInt16LE(eocd+10);
+  let p=cdOffset, target=null;
+  for(let n=0;n<cdCount;n++){
+    if(buf.readUInt32LE(p)!==0x02014b50) break;
+    const method=buf.readUInt16LE(p+10); const compSize=buf.readUInt32LE(p+20);
+    const fnLen=buf.readUInt16LE(p+28); const exLen=buf.readUInt16LE(p+30); const cmLen=buf.readUInt16LE(p+32);
+    const lho=buf.readUInt32LE(p+42); const name=buf.slice(p+46,p+46+fnLen).toString('utf8');
+    if(name==='word/document.xml'){ target={method,compSize,lho}; break; }
+    p=p+46+fnLen+exLen+cmLen;
+  }
+  if(!target) throw new Error("word/document.xml not found in the file");
+  const lfn=buf.readUInt16LE(target.lho+26); const lex=buf.readUInt16LE(target.lho+28);
+  const dataStart=target.lho+30+lfn+lex; const comp=buf.slice(dataStart, dataStart+target.compSize);
+  let xml=(target.method===8 ? zlib.inflateRawSync(comp) : comp).toString('utf8');
+  let t=xml.replace(/<w:tab\b[^>]*\/>/g,' ').replace(/<w:br\b[^>]*\/>/g,'\n').replace(/<\/w:p>/g,'\n')
+    .replace(/<[^>]+>/g,'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&apos;/g,"'");
+  return t.replace(/\r/g,'').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim().slice(0,20000);
+}
 async function fetchDocText(url){
   try{ let u=String(url||"").trim(); if(!u) return "";
     const m=u.match(/docs\.google\.com\/document\/d\/([A-Za-z0-9_-]+)/);
@@ -1757,6 +1782,18 @@ module.exports=async(req,res)=>{
       return res.status(200).json(Object.assign({ok:true}, doc));
     }
     // Gavin sets the to-do DOCUMENT url (his docX). GET returns url+pulled text; POST {url} saves it.
+    if(action==="todo_docx_upload"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+      const data=String(b.data||""); if(!data) return res.status(400).json({error:"no file data"});
+      let buf; try{ buf=Buffer.from(data.replace(/^data:[^,]*,/,""), "base64"); }catch(e){ return res.status(400).json({error:"bad file encoding"}); }
+      if(!buf.length) return res.status(400).json({error:"empty file"});
+      let text; try{ text=docxToText(buf); }catch(e){ return res.status(400).json({error:"could not read .docx: "+String(e.message||e)}); }
+      if(!text || !text.trim()) return res.status(400).json({error:"no text found in the document"});
+      await setTodo(text, "gavin-docx:"+String(b.filename||"").slice(0,60));
+      try{ if(redis){ await redis.del("parkside:todo_doc_url"); await redis.del("parkside:todo_doc_cache"); } }catch(e){}
+      return res.status(200).json({ok:true, chars:text.length, text:text.slice(0,4000), filename:String(b.filename||"")});
+    }
     if(action==="todo_doc"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
