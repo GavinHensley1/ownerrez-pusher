@@ -810,10 +810,16 @@ function docxToText(buf){
 }
 async function fetchDocText(url){
   try{ let u=String(url||"").trim(); if(!u) return "";
+    // Dropbox share link -> force direct download of the raw file
+    if(/dropbox\.com/i.test(u)){ if(/[?&]dl=0\b/i.test(u)) u=u.replace(/([?&])dl=0\b/i,"$1dl=1"); else if(!/[?&]dl=1\b/i.test(u)) u+=(u.indexOf("?")>=0?"&":"?")+"dl=1"; }
+    // Google Doc -> plain-text export (legacy)
     const m=u.match(/docs\.google\.com\/document\/d\/([A-Za-z0-9_-]+)/);
     if(m) u="https://docs.google.com/document/d/"+m[1]+"/export?format=txt";
     const r=await fetch(u,{redirect:"follow"}); if(!r||!r.ok) return "";
-    let t=await r.text();
+    const ab=await r.arrayBuffer(); const buf=Buffer.from(ab);
+    // .docx (and any zip-based Office file) starts with the ZIP magic "PK"
+    if(buf.length>=2 && buf[0]===0x50 && buf[1]===0x4b){ try{ return docxToText(buf); }catch(e){ return ""; } }
+    let t=buf.toString("utf8");
     if(/<html|<!doctype/i.test(t.slice(0,300))){ t=t.replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<\/(p|div|h[1-6]|li|tr)>/gi,"\n").replace(/<[^>]+>/g," ").replace(/&nbsp;/g," ").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&#39;/g,"'").replace(/&quot;/g,'"'); }
     return t.replace(/\r/g,"").replace(/[ \t]+\n/g,"\n").replace(/\n{3,}/g,"\n\n").trim().slice(0,20000);
   }catch(e){ return ""; }
