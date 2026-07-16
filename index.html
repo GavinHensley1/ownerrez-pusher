@@ -413,6 +413,11 @@
       </div>
       <div id="connBody" class="legend">…</div>
     </div>
+    <div class="card" id="weeklyHideCard">
+      <h2>&#128202; Weekly report visibility <span class="muted" style="font-weight:400;text-transform:none">- hide Victor's weekly report while you edit it</span></h2>
+      <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="weeklyHideChk" onchange="setWeeklyHide()"> <span>Hide the Weekly report from Victor's My Work tab</span></label>
+      <div id="weeklyHideStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
+    </div>
     <div class="card" id="monthlyCard">
       <h2>🗓 Monthly report <span class="muted" style="font-weight:400;text-transform:none">— Victor\u2019s month of grades; auto-emailed to you + Victor on the 1st</span></h2>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
@@ -467,6 +472,19 @@
     <div id="weeklyNarrative" class="legend" style="margin-bottom:10px"></div>
     <div id="weeklyDays"></div>
     <div class="muted" style="font-size:12px;margin-top:8px">A full month summary is emailed to you and Gavin at the start of each month.</div>
+  </div>
+
+  <div class="card" id="timeoffCard">
+    <h2>&#127796; Time off <span class="muted" style="font-weight:400;text-transform:none">- log days or hours you are taking off</span></h2>
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px">
+      <label style="display:flex;flex-direction:column;font-size:12px;color:var(--mut)">Date<input id="toDate" type="date" style="width:auto"></label>
+      <label style="display:flex;flex-direction:column;font-size:12px;color:var(--mut)">Type<select id="toKind" onchange="toKindVis()" style="width:auto"><option value="day">Full day off</option><option value="hours">Hours off</option></select></label>
+      <label id="toHoursWrap" style="display:none;flex-direction:column;font-size:12px;color:var(--mut)">Hours<input id="toHours" type="number" min="0" max="24" step="0.5" style="width:80px"></label>
+      <label style="display:flex;flex-direction:column;font-size:12px;color:var(--mut);flex:1;min-width:160px">Note<input id="toNote" type="text" placeholder="reason (optional)"></label>
+      <button onclick="addTimeoff()">Add</button>
+      <span id="toStatus" class="muted"></span>
+    </div>
+    <div id="timeoffList" class="legend"></div>
   </div>
 
   <div class="card">
@@ -924,7 +942,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1345,10 +1363,18 @@ async function deleteCall(key){
 // ===== Bonus tab (visible to Victor later; no Gavin login) =====
 function bEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 let WEEK_OFF=0;
-async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadWeekly(); }
+async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadWeekly(); loadTimeoff(); }
 async function loadWeekly(){ try{ const r=await fetch(api('weekly_report')+'&week='+WEEK_OFF+'&cb='+Date.now()); const j=await r.json(); renderWeekly(j); }catch(e){} }
 function weekNav(delta){ WEEK_OFF=Math.max(0,WEEK_OFF+delta); loadWeekly(); }
-function renderWeekly(j){ const rng=document.getElementById('weeklyRange'); if(rng) rng.textContent=(j.weekStart||'')+' \u2192 '+(j.weekEnd||'')+(j.avgGrade!=null?('  \u00b7  avg '+j.avgGrade+'/100'):'  \u00b7  no grades yet');
+function toKindVis(){ var k=(document.getElementById('toKind')||{}).value; var w=document.getElementById('toHoursWrap'); if(w) w.style.display=(k==='hours')?'flex':'none'; }
+async function loadTimeoff(){ var el=document.getElementById('timeoffList'); if(!el) return; var h={}; if(PW) h['x-app-password']=PW; try{ var r=await fetch(api('timeoff_list')+'&cb='+Date.now(),{headers:h}); var j=await r.json(); var list=(j&&j.items)||[]; if(!list.length){ el.innerHTML='<span class="muted">No time off logged yet.</span>'; return; } el.innerHTML=list.map(function(it){ var lbl=it.kind==='hours'?((it.hours||0)+'h off'):'Full day off'; return '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;padding:7px 0;border-top:1px solid #26354a"><div><b>'+esc(it.date||'')+'</b> &middot; '+esc(lbl)+(it.note?(' <span class="muted">'+esc(it.note)+'</span>'):'')+'</div><button class="ghost" style="padding:3px 8px" onclick="delTimeoff(\''+it.id+'\')">Remove</button></div>'; }).join(''); }catch(e){ el.textContent='Error: '+e.message; } }
+async function addTimeoff(){ var st=document.getElementById('toStatus'); var date=(document.getElementById('toDate')||{}).value; if(!date){ if(st) st.textContent='pick a date'; return; } var kind=(document.getElementById('toKind')||{}).value; var hours=(document.getElementById('toHours')||{}).value; var note=(document.getElementById('toNote')||{}).value; if(st) st.textContent='Saving...'; var h={'Content-Type':'application/json'}; if(PW) h['x-app-password']=PW; try{ var r=await fetch(api('timeoff_add'),{method:'POST',headers:h,body:JSON.stringify({date:date,kind:kind,hours:hours,note:note})}); var j=await r.json(); if(j&&j.ok){ if(st) st.textContent='Added'; var n=document.getElementById('toNote'); if(n) n.value=''; loadTimeoff(); } else if(st) st.textContent=(j&&j.error)||'failed'; }catch(e){ if(st) st.textContent='Error: '+e.message; } }
+async function delTimeoff(id){ var h={'Content-Type':'application/json'}; if(PW) h['x-app-password']=PW; try{ await fetch(api('timeoff_del'),{method:'POST',headers:h,body:JSON.stringify({id:id})}); loadTimeoff(); }catch(e){} }
+async function loadWeeklyHide(){ if(!GPW) return; try{ var r=await fetch(api('weekly_hide')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json(); var c=document.getElementById('weeklyHideChk'); if(c) c.checked=!!(j&&j.hidden); }catch(e){} }
+async function setWeeklyHide(){ if(!GPW) return; var c=document.getElementById('weeklyHideChk'); var st=document.getElementById('weeklyHideStatus'); if(st) st.textContent='Saving...'; try{ var r=await fetch(api('weekly_hide'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({hidden:!!(c&&c.checked)})}); var j=await r.json(); if(st) st.textContent=(j&&j.ok)?((j.hidden)?'Hidden from Victor':'Visible to Victor'):'failed'; }catch(e){ if(st) st.textContent='error'; } }
+
+function renderWeekly(j){ if(j&&j.hidden){ var _wd=document.getElementById('weeklyDays'); if(_wd) _wd.innerHTML='<span class="muted">Your weekly report is being updated - it will be back shortly.</span>'; var _nr=document.getElementById('weeklyNarrative'); if(_nr) _nr.innerHTML=''; var _r0=document.getElementById('weeklyRange'); if(_r0) _r0.textContent='updating...'; return; }
+  const rng=document.getElementById('weeklyRange'); if(rng) rng.textContent=(j.weekStart||'')+' \u2192 '+(j.weekEnd||'')+(j.avgGrade!=null?('  \u00b7  avg '+j.avgGrade+'/100'):'  \u00b7  no grades yet');
   const nar=document.getElementById('weeklyNarrative'); if(nar) nar.innerHTML=j.narrative?('<b>This week:</b> '+esc(j.narrative)):'';
   const el=document.getElementById('weeklyDays'); if(!el) return;
   const rows=(j.days||[]).map(function(d){ const c=(d.grade==null)?'#9fb0c0':(d.grade>=75?'#4ade80':d.grade>=45?'#f4b942':'#f87171');

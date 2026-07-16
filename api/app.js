@@ -1731,11 +1731,43 @@ module.exports=async(req,res)=>{
     }
     // Weekly report (Victor-facing, his tab): all daily grades + explanations for a week. ?week=0 this week, 1=last week, or ?start=YYYY-MM-DD (Monday).
     if(action==="weekly_report"){
+      const _isGavinWk=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x"));
+      if(!_isGavinWk){ let _wkHid=false; try{ if(redis) _wkHid=!!(await redis.get("parkside:weekly_hidden")); }catch(e){} if(_wkHid) return res.status(200).json({hidden:true}); }
       let start=String((req.query&&req.query.start)||"").trim();
       if(!/^\d{4}-\d{2}-\d{2}$/.test(start)){ const off=Math.max(0,parseInt((req.query&&req.query.week)||0,10)||0); const today=etDate(new Date().toISOString()); start=weekStartMonday(etDateAddDays(today,-7*off)); }
       const rep=await buildWeeklyReport(start);
       let narrative=null; try{ narrative=await weeklyNarrative(rep,false); }catch(e){}
       return res.status(200).json(Object.assign(rep,{narrative}));
+    }
+    // Weekly report visibility toggle (Gavin-gated). GET -> {hidden}; POST {hidden} -> set.
+    if(action==="weekly_hide"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
+      if(Object.prototype.hasOwnProperty.call(b,"hidden")){ const hid=!!b.hidden; try{ if(redis){ if(hid) await redis.set("parkside:weekly_hidden","1"); else await redis.del("parkside:weekly_hidden"); } }catch(e){} return res.status(200).json({ok:true, hidden:hid}); }
+      let hid=false; try{ if(redis) hid=!!(await redis.get("parkside:weekly_hidden")); }catch(e){} return res.status(200).json({hidden:hid});
+    }
+    // Victor time-off log. app-gated (Victor) or Gavin. GET=list; POST add {date,kind:day|hours,hours,note}; POST del {id,del:1}.
+    if(action==="timeoff_list"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let items=[]; try{ if(redis){ const raw=await redis.lrange("parkside:timeoff",0,-1); items=(raw||[]).map(function(x){try{return typeof x==="string"?JSON.parse(x):x;}catch(e){return null;}}).filter(Boolean); } }catch(e){}
+      items.sort(function(a,b){return String(b.date||"").localeCompare(String(a.date||""));});
+      return res.status(200).json({items});
+    }
+    if(action==="timeoff_add"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
+      const date=String(b.date||"").slice(0,10); if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:"date required (YYYY-MM-DD)"});
+      const kind=(String(b.kind||"day").toLowerCase()==="hours")?"hours":"day";
+      const hours=kind==="hours"?Math.max(0,Math.min(24,Number(b.hours)||0)):null;
+      const rec={id:"to_"+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36), date:date, kind:kind, hours:hours, note:String(b.note||"").slice(0,200), at:new Date().toISOString()};
+      try{ if(redis){ await redis.rpush("parkside:timeoff", JSON.stringify(rec)); await redis.ltrim("parkside:timeoff",-500,-1); } }catch(e){ return res.status(500).json({error:"db error"}); }
+      return res.status(200).json({ok:true, item:rec});
+    }
+    if(action==="timeoff_del"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{}; const id=String(b.id||"");
+      try{ if(redis){ const raw=await redis.lrange("parkside:timeoff",0,-1); const kept=(raw||[]).map(function(x){return typeof x==="string"?x:JSON.stringify(x);}).filter(function(x){try{return JSON.parse(x).id!==id;}catch(e){return true;}}); await redis.del("parkside:timeoff"); if(kept.length) await redis.rpush.apply(redis,["parkside:timeoff"].concat(kept)); } }catch(e){ return res.status(500).json({error:"db error"}); }
+      return res.status(200).json({ok:true, removed:id});
     }
     // Monthly report (Gavin/cron): GET returns JSON; ?send=1 emails Gavin+Victor. ?month=YYYY-MM (default current).
     if(action==="monthly_report"){
