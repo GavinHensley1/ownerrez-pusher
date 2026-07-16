@@ -696,7 +696,8 @@ async function sendApprovalEmail(req, item, toAddr, isEsc){
 async function escalateStaleApprovals(req){
   try{
     const cfg=await getNotifyConfig();
-    if(!cfg.to2) return {escalated:0, reason:"no backup email set"};
+    const _escTo=resolveRecipients(await getEmailRecipients(), "escalation", cfg);
+    if(!_escTo.length) return {escalated:0, reason:"no backup email set"};
     if(!cfg.apiKey||!cfg.from) return {escalated:0, reason:"backup email not configured (need Resend key + From)"};
     const cutoff=Date.now()-cfg.escalateMins*60*1000;
     const list=await getApprovals(); let changed=false; const done=[];
@@ -704,7 +705,7 @@ async function escalateStaleApprovals(req){
       if(!it || it.status!=="pending" || it.escalatedTo2) continue;
       const t=Date.parse(it.primaryNotifiedAt||it.ts||"");
       if(!isFinite(t) || t>cutoff) continue;
-      const r=await sendApprovalEmail(req, it, cfg.to2, true);
+      const r=await sendApprovalEmail(req, it, _escTo.join(","), true);
       it.escalatedTo2=true; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=!!(r&&r.sent===true);
       changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:cfg.to2});
     }
@@ -737,7 +738,7 @@ async function victorCalledOn(date){ // did Victor complete a verification call 
 }
 async function sendVictorVerifyReminderEmail(){
   const cfg=await getNotifyConfig();
-  const to=cfg.to; // Victor's email (victorEmail / VICTOR_EMAIL)
+  const to=resolveRecipients(await getEmailRecipients(), "verify", cfg).join(",")||cfg.to; // Victor by default; configurable
   const subject="Parkside — we could not verify you today ⚠️";
   const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#0f172a">'
     +'<h2 style="margin:0 0 10px">We were unable to verify you today</h2>'
@@ -794,8 +795,32 @@ function scoreAlertRecipients(cfg){
   if(!list.length){ const g=(process.env.GAVIN_EMAIL||"").trim(), v=(cfg&&cfg.to)||""; list=[g,v].filter(Boolean); }
   return Array.from(new Set(list));
 }
+// ===== Configurable per-email recipients (Gavin tab) =====
+// Each owner-facing email has a row {to:"a@b,c@d", victor:bool}. EMPTY config => identical to legacy behavior.
+let _memER=null;
+async function getEmailRecipients(){ try{ return (redis?(await redis.get("parkside:email_recipients")):_memER)||{}; }catch(e){ return {}; } }
+async function setEmailRecipients(o){ if(redis) await redis.set("parkside:email_recipients",o); else _memER=o; return o; }
+const EMAIL_CATALOG=[
+  {key:"gap_alert", name:"Daily data-gap alert", desc:"When the engine can't fully grade a day (missing WebWork, GPS, or Victor's report)."},
+  {key:"monthly", name:"Monthly work report", desc:"Full month summary of Victor's grades, emailed on the 1st."},
+  {key:"escalation", name:"Approval escalation", desc:"A guest-message approval re-sent to a backup contact when there's no text reply in time."},
+  {key:"verify", name:"Verification reminder", desc:"Reminder sent when Victor's daily verification isn't received."},
+];
+function _splitAddrs(x){ return String(x||"").split(/[,;\s]+/).map(function(a){return a.trim();}).filter(Boolean); }
+function resolveRecipients(er, key, cfg){
+  var row=(er&&er[key])||{};
+  var list=[];
+  if(typeof row.to==="string") list=_splitAddrs(row.to);
+  if(row.victor && cfg && cfg.to) list.push(cfg.to);
+  if(!list.length){ // legacy defaults - keep current behavior when unconfigured
+    if(key==="gap_alert"||key==="monthly") list=scoreAlertRecipients(cfg);
+    else if(key==="escalation") list=[cfg&&cfg.to2].filter(Boolean);
+    else if(key==="verify") list=[cfg&&cfg.to].filter(Boolean);
+  }
+  return Array.from(new Set(list.filter(Boolean)));
+}
 async function sendScoreGapEmail(date, gaps, cfg){
-  const to=scoreAlertRecipients(cfg); if(!to.length) return {sent:false, reason:"no alert recipients configured (set SCORE_ALERT_EMAILS or GAVIN_EMAIL + Victor email)"};
+  const to=resolveRecipients(await getEmailRecipients(), "gap_alert", cfg); if(!to.length) return {sent:false, reason:"no alert recipients configured (set recipients in the Email notifications card)"};
   const subject="Parkside — could not fully grade "+date+" (missing data) ⚠️";
   const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
     +'<h2 style="margin:0 0 10px">Daily grade incomplete for '+escHtml(date)+'</h2>'
@@ -900,7 +925,7 @@ function monthlyReportHtml(mr){
 }
 async function sendMonthlyReport(month, cfg){
   cfg=cfg||await getNotifyConfig();
-  const to=scoreAlertRecipients(cfg); if(!to.length) return {sent:false, reason:"no recipients configured (SCORE_ALERT_EMAILS)"};
+  const to=resolveRecipients(await getEmailRecipients(), "monthly", cfg); if(!to.length) return {sent:false, reason:"no recipients configured (set recipients in the Email notifications card)"};
   const mr=await buildMonthlyReport(month);
   const html=monthlyReportHtml(mr);
   const subject="Parkside — Victor monthly work report ("+month+")";
@@ -1740,7 +1765,24 @@ module.exports=async(req,res)=>{
       return res.status(200).json(Object.assign(rep,{narrative}));
     }
     // Weekly report visibility toggle (Gavin-gated). GET -> {hidden}; POST {hidden} -> set.
-    if(action==="weekly_hide"){
+    if(action==="email_recipients"){
+    const _isG=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x"));
+    if(!_isG) return res.status(403).json({error:"gavin only"});
+    const _cfg=await getNotifyConfig();
+    if(req.method==="POST"){
+      let _b=req.body; if(typeof _b==="string"){ try{ _b=JSON.parse(_b);}catch(e){ _b={}; } }
+      const _rec=(_b&&_b.recipients)||{};
+      const _clean={};
+      for(const it of EMAIL_CATALOG){ const rr=_rec[it.key]||{}; _clean[it.key]={ to:String(rr.to||"").slice(0,400), victor:!!rr.victor }; }
+      await setEmailRecipients(_clean);
+      const _out=EMAIL_CATALOG.map(it=>({key:it.key,name:it.name,desc:it.desc,to:_clean[it.key].to,victor:_clean[it.key].victor,effective:resolveRecipients(_clean,it.key,_cfg)}));
+      return res.status(200).json({ok:true, victorEmail:_cfg.to, emails:_out});
+    }
+    const _er=await getEmailRecipients();
+    const _out=EMAIL_CATALOG.map(it=>({key:it.key,name:it.name,desc:it.desc,to:(_er[it.key]&&_er[it.key].to)||"",victor:!!(_er[it.key]&&_er[it.key].victor),effective:resolveRecipients(_er,it.key,_cfg)}));
+    return res.status(200).json({victorEmail:_cfg.to, emails:_out});
+  }
+  if(action==="weekly_hide"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
       if(Object.prototype.hasOwnProperty.call(b,"hidden")){ const hid=!!b.hidden; try{ if(redis){ if(hid) await redis.set("parkside:weekly_hidden","1"); else await redis.del("parkside:weekly_hidden"); } }catch(e){} return res.status(200).json({ok:true, hidden:hid}); }
