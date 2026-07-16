@@ -1057,6 +1057,7 @@ function initMonMap(){ if(MON_MAP) return;
 }
 function monAutoToggle(){ const el=document.getElementById('monAuto'); const on=el?el.checked:true; if(MON_TIMER){clearInterval(MON_TIMER);MON_TIMER=null;} if(on&&GPW) MON_TIMER=setInterval(loadMonitor,45000); }
 function fmtWhen(t){ try{ return new Date(t).toLocaleString(); }catch(e){ return t||''; } }
+function agoStr(t){ try{ var s=(Date.now()-new Date(t).getTime())/1000; if(!isFinite(s)) return ''; if(s<0)s=0; if(s<90) return Math.round(s)+'s ago'; if(s<5400) return Math.round(s/60)+' min ago'; if(s<172800) return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago'; }catch(e){ return ''; } }
 async function loadMonitor(){ if(!GPW) return; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const date=(document.getElementById('monDate')||{}).value||'';
   try{ const r=await fetch(api('gps_status')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}});
     if(r.status===401){ document.getElementById('monNow').textContent='Session expired — re-enter Gavin password.'; return; }
@@ -1078,8 +1079,9 @@ function renderMonitor(j){ if(!MON_MAP) initMonMap(); MON_LAYERS.clearLayers();
   const zoneNow=j.zone||(last&&last.zone)||null;
   if(j.date){ document.getElementById('monNow').innerHTML = last ? ('<b>'+j.date+'</b> — '+(j.count||0)+' points · ended in <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> at '+fmtWhen(last.t)) : ('<b>'+j.date+'</b> — no points that day.'); }
   else {
-    if(last){ document.getElementById('monNow').innerHTML = 'Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> · '+fmtWhen(last.t)+' · '+(j.count||0)+' points today'; }
-    else if(j.lastSeen){ document.getElementById('monNow').innerHTML = '<b style="color:#fbbf24">No GPS yet today.</b> Last seen: <b>'+((j.lastSeen.zone)||'off')+'</b> · '+fmtWhen(j.lastSeen.t); }
+    if(last){ var _ag=(Date.now()-new Date(last.t).getTime())/1000; var _fresh=_ag<900; var _dot=_fresh?'#4ade80':'#fbbf24';
+      document.getElementById('monNow').innerHTML = '<b style="color:'+_dot+'">\u25cf</b> Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> · updated '+agoStr(last.t)+(_fresh?'':' <span style="color:#fbbf24">(stale — phone may not be reporting)</span>')+' · '+(j.count||0)+' points today'; }
+    else if(j.lastSeen){ document.getElementById('monNow').innerHTML = '<b style="color:#f87171">\u25cf</b> <b style="color:#fbbf24">No GPS yet today.</b> Last seen '+agoStr(j.lastSeen.t)+' — <b>'+((j.lastSeen.zone)||'off')+'</b> · '+fmtWhen(j.lastSeen.t); }
     else { document.getElementById('monNow').innerHTML = 'No pings yet for this device.'; }
   }
   const by=j.trailByZone||{}; const order=['office','tepees','maintenance','resort','off']; let h='';
