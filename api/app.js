@@ -851,8 +851,6 @@ async function setEmailRecipients(o){ if(redis) await redis.set("parkside:email_
 const EMAIL_CATALOG=[
   {key:"gap_alert", name:"Daily data-gap alert", desc:"When the engine can't fully grade a day (missing WebWork, GPS, or Victor's report)."},
   {key:"monthly", name:"Monthly work report", desc:"Full month summary of Victor's grades, emailed on the 1st."},
-  {key:"escalation", name:"Approval escalation", desc:"A guest-message approval re-sent to a backup contact when there's no text reply in time."},
-  {key:"verify", name:"Verification reminder", desc:"Reminder sent when Victor's daily verification isn't received."},
 ];
 function _splitAddrs(x){ return String(x||"").split(/[,;\s]+/).map(function(a){return a.trim();}).filter(Boolean); }
 function resolveRecipients(er, key, cfg){
@@ -869,7 +867,7 @@ function resolveRecipients(er, key, cfg){
   return Array.from(new Set(list.filter(Boolean)));
 }
 async function sendScoreGapEmail(date, gaps, cfg){
-  const to=scoreAlertRecipients(cfg); if(!to.length) return {sent:false, reason:"no alert recipients configured (set SCORE_ALERT_EMAILS or GAVIN_EMAIL + Victor email)"};
+  const to=resolveRecipients(await getEmailRecipients(), "gap_alert", cfg); if(!to.length) return {sent:false, reason:"no recipients configured (set them on the Gavin tab -> Report emails)"};
   const subject="Parkside — could not fully grade "+date+" (missing data) ⚠️";
   const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
     +'<h2 style="margin:0 0 10px">Daily grade incomplete for '+escHtml(date)+'</h2>'
@@ -974,7 +972,7 @@ function monthlyReportHtml(mr){
 }
 async function sendMonthlyReport(month, cfg){
   cfg=cfg||await getNotifyConfig();
-  const to=scoreAlertRecipients(cfg); if(!to.length) return {sent:false, reason:"no recipients configured (SCORE_ALERT_EMAILS)"};
+  const to=resolveRecipients(await getEmailRecipients(), "monthly", cfg); if(!to.length) return {sent:false, reason:"no recipients configured (set them on the Gavin tab -> Report emails)"};
   const mr=await buildMonthlyReport(month);
   const html=monthlyReportHtml(mr);
   const subject="Parkside — Victor monthly work report ("+month+")";
@@ -1858,7 +1856,24 @@ module.exports=async(req,res)=>{
       return res.status(200).json(Object.assign(rep,{narrative}));
     }
     // Weekly report visibility toggle (Gavin-gated). GET -> {hidden}; POST {hidden} -> set.
-if(action==="weekly_hide"){
+if(action==="email_recipients"){
+    const _isG=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x"));
+    if(!_isG) return res.status(403).json({error:"gavin only"});
+    const _cfg=await getNotifyConfig();
+    if(req.method==="POST"){
+      let _b=req.body; if(typeof _b==="string"){ try{ _b=JSON.parse(_b);}catch(e){ _b={}; } }
+      const _rec=(_b&&_b.recipients)||{};
+      const _clean={};
+      for(const it of EMAIL_CATALOG){ const rr=_rec[it.key]||{}; _clean[it.key]={ to:String(rr.to||"").slice(0,400), victor:!!rr.victor, enabled:(rr.enabled!==false) }; }
+      await setEmailRecipients(_clean);
+      const _out=EMAIL_CATALOG.map(it=>({key:it.key,name:it.name,desc:it.desc,to:_clean[it.key].to,victor:_clean[it.key].victor,enabled:_clean[it.key].enabled,effective:resolveRecipients(_clean,it.key,_cfg)}));
+      return res.status(200).json({ok:true, victorEmail:_cfg.to, emails:_out});
+    }
+    const _er=await getEmailRecipients();
+    const _out=EMAIL_CATALOG.map(it=>({key:it.key,name:it.name,desc:it.desc,to:(_er[it.key]&&_er[it.key].to)||"",victor:!!(_er[it.key]&&_er[it.key].victor),enabled:!(_er[it.key]&&_er[it.key].enabled===false),effective:resolveRecipients(_er,it.key,_cfg)}));
+    return res.status(200).json({victorEmail:_cfg.to, emails:_out});
+  }
+  if(action==="weekly_hide"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
       if(Object.prototype.hasOwnProperty.call(b,"hidden")){ const hid=!!b.hidden; try{ if(redis){ if(hid) await redis.set("parkside:weekly_hidden","1"); else await redis.del("parkside:weekly_hidden"); } }catch(e){} return res.status(200).json({ok:true, hidden:hid}); }
