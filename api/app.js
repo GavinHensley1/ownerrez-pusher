@@ -766,11 +766,29 @@ async function sendVictorVerifyReminderEmail(){
   return {...result, to, subject};
 }
 // Core check — safe to call from a cron or heartbeat. Returns what it did.
+// Victor's WORKING-DAY calendar: he works Wed-Sat (ET); Sun/Mon/Tue are OFF and
+// not tracked. A full-day entry in his time-off tab (parkside:timeoff, kind
+// "day") also means he is off that date. The monitoring system must NOT grade
+// or send emails/alerts on days he is not supposed to be working.
+async function isTimeOffDay(dateStr){
+  try{ if(redis){ const raw=await redis.lrange("parkside:timeoff",0,-1);
+    const items=(raw||[]).map(function(x){ try{ return typeof x==="string"?JSON.parse(x):x; }catch(e){ return null; } }).filter(Boolean);
+    return items.some(function(t){ return t && t.date===dateStr && (t.kind==="day" || !t.kind); });
+  } }catch(e){}
+  return false;
+}
+async function isWorkingDay(dateStr){
+  const wd=etWeekday(dateStr+"T12:00:00Z");
+  if(!(wd>=3 && wd<=6)) return false;             // Sun/Mon/Tue = off
+  if(await isTimeOffDay(dateStr)) return false;   // full day off in his time-off tab
+  return true;
+}
 async function runVictorVerifyReminder(nowIso){
   const iso=nowIso||new Date().toISOString();
   const date=etDate(iso); const wd=etWeekday(iso);
   // Only Wed(3)-Sat(6). Sun(0)/Mon(1)/Tue(2) are NOT monitored — never send.
   if(!(wd>=3 && wd<=6)) return {sent:false, skipped:"not a monitored day (Wed-Sat only)", date, weekday:wd};
+  if(await isTimeOffDay(date)) return {sent:false, skipped:"time-off day (in his days-off tab)", date, weekday:wd};
   const cfg=await victorVerifyConfig();
   if(cfg.emailEnabled) return {sent:false, skipped:"email verification enabled", date};
   if(await victorCalledOn(date)) return {sent:false, skipped:"verification call completed", date};
@@ -887,6 +905,7 @@ async function runDailyScore(nowIso){
   const device="victor";
   const dk="parkside:daily_score_done:"+date;
   try{ if(redis){ const done=await redis.get(dk); if(done) return {skipped:"already handled", date, at:done}; } }catch(e){}
+  if(!(await isWorkingDay(date))) return {skipped:"off day (Sun/Mon/Tue or in his time-off tab) — not graded, no alert", date};
   const cfg=await getNotifyConfig();
   const hours=await wwHoursForDate(date); const screen=await wwScreenActivity(date); const zones=await gpsZoneSummary(device,date);
   let report=""; try{ if(redis) report=(await redis.get("parkside:report:"+date))||""; }catch(e){}
