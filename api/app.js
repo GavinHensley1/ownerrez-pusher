@@ -478,6 +478,7 @@ async function sendGuestReply(enabled, ids, body){
   // ==== GUEST-SEND HARD GUARD (single choke-point) ====
   body=stripInternalArtifacts(body);
   body=tidyQuotes(body);
+  body=scrubContact(body); // defense-in-depth: strip any phone/email the channel would block, on EVERY guest send
   if(isInternalArtifact(body)){
     const rec={sent:false, blocked:true, staged:false, reason:"BLOCKED: body looked like an internal approval/label, not a guest reply \u2014 nothing was sent to the guest"};
     try{ if(cfg.smsUrl&&cfg.smsTo) await sendSmsGateway(cfg, "\u26A0\uFE0F Blocked a guest send that looked like an internal label/command. Nothing went to the guest."); }catch(e){}
@@ -717,17 +718,26 @@ async function escalateStaleApprovals(req){
 async function autoRejectStaleApprovals(req){
   try{
     const cutoff=Date.now()-24*60*60*1000;
-    const list=await getApprovals(); let changed=false; const done=[];
+    const list=await getApprovals(); let changed=false; const done=[]; let rejected=0, closed=0;
     for(const it of list){
-      if(!it || it.status!=="pending") continue;
+      if(!it) continue;
       const t=Date.parse(it.ts||it.primaryNotifiedAt||"");
       if(!isFinite(t) || t>cutoff) continue;
-      it.status="rejected"; it.decidedAt=new Date().toISOString();
-      it.rejectReason="Auto-rejected: no decision within 24 hours"; it.autoRejected=true;
-      changed=true; done.push({id:it.id});
+      if(it.status==="pending"){
+        // A draft nobody approved in 24h -> reject (nothing sent). Not a judgment on the draft, so no KB pollution.
+        it.status="rejected"; it.decidedAt=new Date().toISOString();
+        it.rejectReason="Auto-rejected: no decision within 24 hours"; it.autoRejected=true;
+        changed=true; rejected++; done.push({id:it.id, was:"pending"});
+      } else if(it.status==="escalated"){
+        // Guest already got the holding message; Victor never sent a fact in 24h. Close it so the
+        // Q-label frees up and it stops showing as active. (Nothing further is sent to the guest.)
+        it.status="closed"; it.decidedAt=new Date().toISOString();
+        it.closeReason="Auto-closed: no manager reply within 24 hours"; it.autoClosed=true;
+        changed=true; closed++; done.push({id:it.id, was:"escalated"});
+      }
     }
     if(changed) await setApprovals(list);
-    return {autoRejected:done.length, items:done};
+    return {autoRejected:rejected, autoClosed:closed, items:done};
   }catch(e){ return {error:String(e.message||e)}; }
 }
 function htmlPage(title, msg){
@@ -1376,7 +1386,7 @@ async function reviseFromSms(req, item, extraInfo){
   // NEVER send Victor's raw text to the guest. If the AI couldn't draft, keep the prior draft and flag it.
   if(!proposed) return {proposed:item.proposed||"", known:"full", failed:true};
   const list=await getApprovals(); const it=list.find(x=>x.id===item.id);
-  if(it){ it.proposed=proposed; it.status="pending"; it.escalate=false; it.factFromVictor=extraInfo; it.revisedAt=new Date().toISOString(); await setApprovals(list); }
+  if(it){ const _now=new Date().toISOString(); it.proposed=proposed; it.status="pending"; it.escalate=false; it.factFromVictor=extraInfo; it.revisedAt=_now; it.ts=_now; it.primaryNotifiedAt=_now; it.escalatedTo2=false; await setApprovals(list); }
   return {proposed, known};
 }
 
@@ -2598,7 +2608,8 @@ if(action==="email_recipients"){
       if(!question) return res.status(200).json({ok:true, ignored:"no text"});
       const guestName=nameFrom();
       try{ const out=await processGuestQuestion(req,{question, threadId, bookingId, guestName, unit:"", source:"ownerrez_webhook"});
-        return res.status(200).json({ok:true, processed:true, type:"thread_message", auto_approved:!!out.auto_approved, queued:!!out.queued}); }
+        const mode=out.auto_answered?"auto_answered":(out.escalated?"escalated":(out.no_response_needed?"no_response":(out.queued?"queued":"?")));
+        return res.status(200).json({ok:true, processed:true, type:"thread_message", mode, sent:(out.sent===true||out.holding_sent===true), id:out.id||null}); }
       catch(err){ return res.status(200).json({ok:true, processed:false, error:String(err&&err.message||err)}); }
     }
     // View the approved bank (password) — the high-weight, physically-approved Q&A.
@@ -2886,8 +2897,12 @@ if(action==="email_recipients"){
       let target=null, rest=bodyRaw;
       if(lm){ target=findByLabel(list, "Q"+lm[1]); rest=String(lm[2]||"").trim();
         if(!target){ await ackBack("I don't see a pending Q"+lm[1]+". Pending: "+(pend.map(x=>x.smsLabel||"?").join(", ")||"none")+"."); return res.status(200).json({ignored:true, reason:"label not found"}); } }
-      const isYes=(t)=>/^(y|yes|yep|yeah|ok|okay|sure|send|approve|approved|confirm|go)\b/i.test(t);
-      const isNo=(t)=>/^(n|no|nope|reject|skip|cancel|decline|stop)\b/i.test(t);
+      // STRICT: only a BARE affirmation/negation counts as a yes/no COMMAND. Anything longer is
+      // a correction or (for an escalation) the FACT Victor is supplying — so "no pets allowed"
+      // or "yes we have parking" is treated as content, NEVER misread as reject/approve.
+      const _bare=(t)=>String(t||"").trim().replace(/\s+/g," ").replace(/[.!,]+$/,"").toLowerCase();
+      const isYes=(t)=>/^(y|yes|yep|yeah|yup|ok|okay|okey|sure|send|send it|yes send|yes send it|approve|approve it|approved|confirm|confirmed|go|looks good|lgtm)$/i.test(_bare(t));
+      const isNo=(t)=>/^(n|no|nope|reject|reject it|skip|cancel|decline|stop|do not send|dont send|don't send)$/i.test(_bare(t));
       if(!target){
         if(isYes(rest)||isNo(rest)){
           if(pend.length===1) target=pend[0];
