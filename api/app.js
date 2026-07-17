@@ -1227,7 +1227,7 @@ async function sendVictorEscalationSms(req, item, ctx){
   const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-6);
   const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"Us: ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim().slice(0,160)).join("\n\n"):("Guest: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,180));
   const _ctx=[unit,guestName].filter(Boolean).join(" - ");
-  const text=lbl+(_ctx?(" - "+_ctx):"")+" (escalated)\n"+_convo+"\n\nI told the guest I'd check with a manager. Reply \""+lbl+" <the answer/facts>\" and I'll send it to them + save it for review.";
+  const text=lbl+(_ctx?(" - "+_ctx):"")+" (escalated)\n"+_convo+"\n\nI told the guest I'd check with a manager. Reply \""+lbl+" <the answer/fact>\" and I'll draft a reply for you to approve before it goes to the guest.";
   try{ return await sendSmsGateway(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 
@@ -1363,10 +1363,11 @@ function findByLabel(list, label){
 // Owner texted a correction for a pending item: fold the new info into the KB, re-draft, record the correction, re-stage.
 async function reviseFromSms(req, item, extraInfo){
   extraInfo=String(extraInfo||"").trim();
-  const st=await getState(); const enabled=!!st.messaging_enabled; const auto=await autoMessageOn();
+  const st=await getState();
   const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
-  // Compose a fresh reply using the KB PLUS Victor's just-provided facts, IN-CONTEXT ONLY.
-  // We do NOT write to the live KB here — the fact is queued for review (addPendingFact).
+  // Victor is only ever providing a FACT. Compose a fresh reply using the KB PLUS that fact,
+  // IN-CONTEXT ONLY (no live-KB write). NOTHING is sent to the guest here — the item is
+  // re-staged as a normal pending approval so Victor must reply "Q# yes" before it sends.
   let proposed=null, known="full";
   try{ const history=await getThreadLog(item.thread_id, item.booking_id);
        const kbPlus={ format:(kb&&kb.format)||"", items:[...((kb&&kb.items)||[]), {topic:String(item.question||"").slice(0,60), a:extraInfo}] };
@@ -1375,16 +1376,7 @@ async function reviseFromSms(req, item, extraInfo){
   // NEVER send Victor's raw text to the guest. If the AI couldn't draft, keep the prior draft and flag it.
   if(!proposed) return {proposed:item.proposed||"", known:"full", failed:true};
   const list=await getApprovals(); const it=list.find(x=>x.id===item.id);
-  if(auto){
-    // Auto-message: send the real answer to the guest now; queue Victor's fact for KB review.
-    const guestSend=await sendGuestReply(enabled, {threadId:item.thread_id, bookingId:item.booking_id}, proposed);
-    if(it){ it.status="answered"; it.answer=proposed; it.auto=true; it.decidedAt=new Date().toISOString(); it.guestSend=guestSend; await setApprovals(list); }
-    try{ await addPendingFact({ q:item.question, a:extraInfo, source:"victor_escalation" }); }catch(e){}
-    return {proposed, known, sent:guestSend.sent===true, autoSent:true};
-  }
-  // Legacy: re-stage for approval; queue the fact for review.
-  if(it){ it.proposed=proposed; it.escalate=(known==="none"); it.revisedAt=new Date().toISOString(); await setApprovals(list); }
-  try{ await addPendingFact({ q:item.question, a:extraInfo, source:"victor_escalation" }); }catch(e){}
+  if(it){ it.proposed=proposed; it.status="pending"; it.escalate=false; it.factFromVictor=extraInfo; it.revisedAt=new Date().toISOString(); await setApprovals(list); }
   return {proposed, known};
 }
 
@@ -2908,15 +2900,17 @@ if(action==="email_recipients"){
         }
       }
       const lbl=target.smsLabel||"Q?";
-      // Auto-message escalations: the holding message already went to the guest; Victor's
-      // reply is the FACTS/answer. Draft + send it to the guest and queue the fact for review.
+      // Auto-message escalations: the holding message already went to the guest. Victor only ever
+      // provides a FACT here — it is NEVER sent to the guest directly. We draft a reply from his
+      // fact and text it BACK to him; only his "Q# yes" then sends it to the guest.
       if(target.status==="escalated"){
-        if(rest===""){ await ackBack(lbl+": reply with the facts, e.g. \""+lbl+" checkout is 11am\", and I'll answer the guest + save it for review."); return res.status(200).json({need_facts:true, label:lbl}); }
+        if(rest===""){ await ackBack(lbl+": reply with the fact, e.g. \""+lbl+" checkout is 11am\", and I'll draft a reply for you to approve."); return res.status(200).json({need_facts:true, label:lbl}); }
         if(isNo(rest)){ const it2=list.find(x=>x.id===target.id); if(it2){ it2.status="closed"; it2.decidedAt=new Date().toISOString(); await setApprovals(list); } await ackBack(lbl+" closed — nothing more sent to the guest."); return res.status(200).json({closed:true, label:lbl}); }
+        if(isYes(rest)){ await ackBack(lbl+": I don't have the fact yet — reply \""+lbl+" <the answer/fact>\" and I'll draft a reply for you to approve."); return res.status(200).json({need_facts:true, label:lbl}); }
         const rev2=await reviseFromSms(req, target, rest);
-        if(rev2 && rev2.failed){ await ackBack(lbl+": couldn't draft a guest reply from that — try rephrasing the facts."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
-        await ackBack(lbl+": sent to the guest ✅ and saved to review.");
-        return res.status(200).json({escalation_answered:true, label:lbl, sent:rev2&&rev2.sent===true});
+        if(rev2 && rev2.failed){ await ackBack(lbl+": couldn't draft a guest reply from that — try rephrasing the fact."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
+        await ackBack(lbl+" — draft reply for the guest:\n"+String(rev2.proposed||"").slice(0,600)+"\n\nReply \""+lbl+" yes\" to send it, or text a correction. Nothing is sent until you reply yes.");
+        return res.status(200).json({escalation_drafted:true, label:lbl});
       }
       if((lm && rest==="")||isYes(rest)){
         const out=await decideApproval(target.id, "yes", null);

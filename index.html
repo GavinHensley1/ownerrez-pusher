@@ -204,7 +204,7 @@
       <div class="switch" id="autoSwitch" onclick="toggleAuto()"><div class="knob"></div></div>
       <span class="pill" id="autoState">OFF</span>
     </div>
-    <div class="legend" id="autoNote">When <b>ON</b>: if the engine <b>knows</b> the answer it sends it to the guest automatically; if it <b>doesn&rsquo;t</b>, it sends the guest a short &ldquo;let me check with my manager&rdquo; holding note and texts Victor for the facts &mdash; his reply then goes straight to the guest. Pure &ldquo;thank you&rdquo; messages get no reply. Every answer it sends is queued below for your review before it&rsquo;s trusted as a saved fact. When <b>OFF</b>: the classic flow &mdash; every reply waits in the approval queue for your YES/NO. (Still requires the Messaging master switch ON to actually send.)</div>
+    <div class="legend" id="autoNote">When <b>ON</b>: if the engine <b>knows</b> the answer it sends it to the guest automatically; if it <b>doesn&rsquo;t</b>, it sends the guest a short &ldquo;let me check with my manager&rdquo; holding note and texts Victor for the fact. Victor only supplies the fact &mdash; the engine drafts a reply and texts it back to him, and <b>nothing reaches the guest until he replies &ldquo;Q# yes&rdquo;</b>. Pure &ldquo;thank you&rdquo; messages get no reply. Every answer it sends is queued below for your review before it&rsquo;s trusted as a saved fact. When <b>OFF</b>: the classic flow &mdash; every reply waits in the approval queue for your YES/NO. (Still requires the Messaging master switch ON to actually send.)</div>
   </div>
   <div class="card">
     <h2>🧠 Learned facts <span class="muted" style="font-weight:400;text-transform:none">(pending your review)</span></h2>
@@ -696,7 +696,7 @@ function setAutoUI(){
 }
 async function toggleAuto(){
   const next=!AUTO_ON;
-  if(next && !confirm("Turn Auto-message ON? The engine will reply to guests on its own — known answers auto-send; unknown ones send a holding note and text Victor for the facts.")) return;
+  if(next && !confirm("Turn Auto-message ON? The engine will reply to guests on its own — known answers auto-send; unknown ones send a holding note and text Victor for the fact, then draft a reply he must approve with \"Q# yes\" before it sends.")) return;
   try{ const r=await fetch(api('auto_message'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({enabled:next})}); const j=await r.json(); if(j.ok){ AUTO_ON=!!j.enabled; setAutoUI(); } else { alert('Could not save.'); } }catch(e){ alert('Could not save.'); }
 }
 async function loadPendingFacts(){
