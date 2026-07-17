@@ -197,6 +197,24 @@
     </div>
     <div class="legend" id="msgNote">The on/off for the whole guest-messaging system. When <b>ON</b>, the engine drafts a reply to each guest message, texts it to you for approval, and sends your approved reply to the guest. When <b>OFF</b>, nothing is sent to guests.</div>
   </div>
+  <div class="card" style="margin-top:20px">
+    <h2>🤖 Auto-message <span class="muted" style="font-weight:400;text-transform:none">(hands-off replies)</span></h2>
+    <div class="toggle">
+      <span class="muted">Auto-send answers &mdash; the engine replies to guests itself instead of staging every message for approval</span>
+      <div class="switch" id="autoSwitch" onclick="toggleAuto()"><div class="knob"></div></div>
+      <span class="pill" id="autoState">OFF</span>
+    </div>
+    <div class="legend" id="autoNote">When <b>ON</b>: if the engine <b>knows</b> the answer it sends it to the guest automatically; if it <b>doesn&rsquo;t</b>, it sends the guest a short &ldquo;let me check with my manager&rdquo; holding note and texts Victor for the facts &mdash; his reply then goes straight to the guest. Pure &ldquo;thank you&rdquo; messages get no reply. Every answer it sends is queued below for your review before it&rsquo;s trusted as a saved fact. When <b>OFF</b>: the classic flow &mdash; every reply waits in the approval queue for your YES/NO. (Still requires the Messaging master switch ON to actually send.)</div>
+  </div>
+  <div class="card">
+    <h2>🧠 Learned facts <span class="muted" style="font-weight:400;text-transform:none">(pending your review)</span></h2>
+    <div class="legend">New answers the engine sent, or facts Victor provided, are queued here <b>before</b> they&rsquo;re saved into the knowledge base &mdash; nothing is trusted for future messaging until you approve it. Edit the wording if needed, then Approve to save it as a fact, or Reject to discard.</div>
+    <div style="margin:8px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button onclick="loadPendingFacts()">Refresh</button>
+      <span id="pfCount" class="muted"></span>
+    </div>
+    <div id="pfList" class="legend"></div>
+  </div>
   <div class="group" id="grpApprovals" style="margin-top:20px">
     <h2 class="groupHead" style="cursor:pointer;user-select:none;border-bottom:1px solid var(--line);padding-bottom:8px" onclick="toggleGroup('grpApprovals')">✅ Approvals &mdash; answer guest questions &amp; review decisions <span class="gcaret" style="color:var(--mut);font-weight:400;float:right">&#9656;</span></h2>
     <div class="groupBody" style="display:none;margin-top:12px">
@@ -667,6 +685,53 @@ async function toggleMessaging(){
   const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({messaging_enabled:next})});
   if(r.ok){ STATE.messaging_enabled=next; setMsgUI(); }
 }
+async function loadAutoState(){
+  try{ const r=await fetch(api('auto_message'),{headers:{'x-app-password':PW}}); const j=await r.json(); AUTO_ON=!!j.enabled; }catch(e){ AUTO_ON=false; }
+  setAutoUI();
+}
+function setAutoUI(){
+  const sw=document.getElementById('autoSwitch'); if(!sw) return;
+  sw.className='switch'+(AUTO_ON?' on':'');
+  const st=document.getElementById('autoState'); if(st){ st.textContent=AUTO_ON?'ON':'OFF'; st.style.background=AUTO_ON?'var(--ok)':'#3a4759'; }
+}
+async function toggleAuto(){
+  const next=!AUTO_ON;
+  if(next && !confirm("Turn Auto-message ON? The engine will reply to guests on its own — known answers auto-send; unknown ones send a holding note and text Victor for the facts.")) return;
+  try{ const r=await fetch(api('auto_message'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({enabled:next})}); const j=await r.json(); if(j.ok){ AUTO_ON=!!j.enabled; setAutoUI(); } else { alert('Could not save.'); } }catch(e){ alert('Could not save.'); }
+}
+async function loadPendingFacts(){
+  const el=document.getElementById('pfList'); const cnt=document.getElementById('pfCount');
+  if(el) el.textContent="Loading…";
+  try{
+    const r=await fetch(api('pending_facts')+'&cb='+Date.now(),{headers:{'x-app-password':PW}}); const j=await r.json();
+    PF=j.facts||[]; if(cnt) cnt.textContent=PF.length?(PF.length+" awaiting review"):"";
+    if(!PF.length){ if(el) el.innerHTML="<span class='muted'>Nothing pending — no new learned facts to review.</span>"; return; }
+    el.innerHTML=PF.map(function(f){ var src=({auto_answer:'auto-sent to guest',victor_escalation:'from Victor',approved_reply:'approved reply'})[f.source]||f.source||'learned';
+      return "<div style='border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px'>"
+        +"<div class='muted' style='font-size:12px;margin-bottom:6px'>Q: "+esc(f.q||f.topic||"")+" &nbsp;&middot;&nbsp; <i>"+esc(src)+"</i></div>"
+        +"<input id='pft_"+f.id+"' style='width:100%;margin-bottom:6px' value=\""+esc(f.topic||f.q||"").replace(/\"/g,'&quot;')+"\" placeholder='Topic / question'>"
+        +"<textarea id='pfa_"+f.id+"' style='width:100%;min-height:60px' placeholder='Answer'>"+esc(f.a||"")+"</textarea>"
+        +"<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>"
+        +"<button onclick=\"approvePendingFact('"+f.id+"')\">Approve &amp; save</button>"
+        +"<button class='ghost' onclick=\"editPendingFact('"+f.id+"')\">Save edit</button>"
+        +"<button class='seg-x' style='width:auto;padding:2px 12px' onclick=\"rejectPendingFact('"+f.id+"')\">Reject</button>"
+        +"<span class='muted' id='pfs_"+f.id+"'></span>"
+        +"</div></div>";
+    }).join("");
+  }catch(e){ if(el) el.innerHTML="<span class='muted'>Could not load.</span>"; }
+}
+async function pfDecide(id, action){
+  const t=document.getElementById('pft_'+id), aEl=document.getElementById('pfa_'+id);
+  const topic=t?t.value:"", a=aEl?aEl.value:"";
+  const s=document.getElementById('pfs_'+id); if(s) s.textContent="…";
+  try{ const r=await fetch(api('pending_fact'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({id:id,action:action,topic:topic,a:a})}); const j=await r.json();
+    if(j.ok){ if(action==='edit'){ if(s) s.textContent="saved"; } else { loadPendingFacts(); } }
+    else if(s){ s.textContent=(j.error||"error"); }
+  }catch(e){ if(s) s.textContent="error"; }
+}
+function approvePendingFact(id){ pfDecide(id,'approve'); }
+function rejectPendingFact(id){ if(confirm('Discard this learned fact?')) pfDecide(id,'reject'); }
+function editPendingFact(id){ pfDecide(id,'edit'); }
 async function loadOccupancy(){
   try{ const r=await fetch(api('occupancy')); OCC=await r.json(); }catch{ OCC={units:[],months:[],byUnit:{},totalBooked:0}; }
   const el=document.getElementById('occTable');
@@ -924,7 +989,7 @@ async function loadLearning(){
   document.getElementById('learnTable').innerHTML=h;
   document.getElementById('learnNote').textContent=`Each lever blends a seeded prior with what it learns from real booking outcomes; the learned weight grows with data, so today values sit ≈ seed. Logged so far: ${paceN} booking events + ${j.snapshotCells||0} nightly snapshot cells. Rules of thumb before a lever moves materially: pace curve ~150+ bookings; each unit premium ~60+ of its own bookings; each gap/premium lever dozens of exposure-days.`;
 }
-let MSG_BUILT=false; let KB={format:"",items:[]};
+let MSG_BUILT=false; let KB={format:"",items:[]}; let AUTO_ON=false, PF=[];
 function switchView(v){
   const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus';
   document.getElementById('main').style.display=isP?'block':'none';
@@ -939,7 +1004,7 @@ function switchView(v){
   document.getElementById('horizon').style.display=isP?'':'none';
   document.getElementById('syncWrap').style.display=isP?'':'none';
   if(isP) setSyncUI();
-  if(isM){ if(!MSG_BUILT){ renderMessaging(); MSG_BUILT=true; } loadApprovals(); loadInquiries(); loadNotifyStatus(); loadDecisions(); makeCollapsible('#msgMain'); }
+  if(isM){ if(!MSG_BUILT){ renderMessaging(); MSG_BUILT=true; } loadApprovals(); loadInquiries(); loadNotifyStatus(); loadDecisions(); loadAutoState(); loadPendingFacts(); makeCollapsible('#msgMain'); }
   if(isMon && GPW && MON_MAP){ setTimeout(function(){ MON_MAP.invalidateSize(); loadMonitor(); },60); }
 }
 // ===== Monitoring (Gavin) tab: GPS map overlay =====

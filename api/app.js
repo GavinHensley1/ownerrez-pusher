@@ -1169,30 +1169,66 @@ async function maybePollMessages(req){
 async function requireApprovalAll(){ const raw=await getNotifyRaw();
   if(typeof raw.requireApprovalAll==="boolean") return raw.requireApprovalAll;
   return String(process.env.REQUIRE_APPROVAL_ALL||"true").toLowerCase()!=="false"; }
+// Auto-message mode: when ON, the engine SENDS replies itself (known->answer, unknown->holding + escalate to Victor) instead of staging every reply for approval.
+async function autoMessageOn(){ const raw=await getNotifyRaw(); if(typeof raw.autoMessage==="boolean") return raw.autoMessage; return String(process.env.AUTO_MESSAGE||"false").toLowerCase()==="true"; }
+// Pending "learned facts" — new facts are queued here for human review; they are NOT used in messaging until approved into the KB.
+let _memPendingFacts=[];
+async function getPendingFacts(){ try{ return (redis?(await redis.get("parkside:pending_facts")):_memPendingFacts)||[]; }catch(e){ return []; } }
+async function setPendingFacts(a){ if(redis) await redis.set("parkside:pending_facts",a); else _memPendingFacts=a; return a; }
+async function addPendingFact(o){ o=o||{}; try{ const list=await getPendingFacts(); const nq=normQ(o.q||o.topic||""); let rec=nq?list.find(x=>x&&x.status==="pending"&&normQ(x.q||x.topic||"")===nq):null; const now=new Date().toISOString();
+  if(rec){ rec.a=String(o.a||"").slice(0,1500); if(o.topic) rec.topic=String(o.topic).slice(0,80); rec.source=o.source||rec.source; rec.at=now; }
+  else { list.push({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), q:String(o.q||"").slice(0,300), topic:String(o.topic||o.q||"").slice(0,80), a:String(o.a||"").slice(0,1500), source:o.source||"", status:"pending", at:now }); }
+  await setPendingFacts(list.slice(-300)); }catch(e){} }
 
 async function processGuestQuestion(req, p){
   const question=String(p.question||"").trim(); if(!question) return {error:"no question"};
   const bookingId=p.bookingId||null, unit=p.unit||"", guestName=p.guestName||"", threadId=p.threadId||p.thread_id||null;
   const st=await getState(); const enabled=!!st.messaging_enabled; const kb=st.kb||KB_SEED;
-  const requireAll=await requireApprovalAll();
-  // Saved answers (approved bank) + KB are used purely as FACTS/reference — never sent
-  // verbatim. ALWAYS compose a FRESH reply tailored to exactly what THIS guest asked,
-  // pulling only the relevant facts. If the specific thing asked isn't in our info ->
-  // escalate with the holding message (do NOT fall back to an unrelated saved answer).
+  const auto=await autoMessageOn();
   const history=await getThreadLog(threadId, bookingId);
-  const draft=await aiDraftAnswer(kb, question, guestName, await getApprovedBank(), history);
-  let proposed=draft.answer||holdingMessage(guestName), pSource="composed", escalate=false;
-  if(draft.known==="full"){ pSource="composed"; }
-  else if(draft.known==="partial"){ pSource="composed_partial"; escalate=true; }
-  else { pSource="escalation"; escalate=true; }
-  const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate,
-    unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", status:"pending", ts:new Date().toISOString() };
   await appendThreadLog(threadId, bookingId, "in", question, guestName);
-  item.primaryNotifiedAt=new Date().toISOString();
-  const list=await getApprovals(); item.smsLabel=smsLabelFor(list, item); item.smsCode=mkSmsCode(); item.firstProposed=proposed; list.push(item); await setApprovals(list);
-  const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
-  const sms=await smsVictor(enabled, "Parkside approval needed.\nQ: "+question.slice(0,250)+"\nProposed: "+(proposed||"(write one)")+"\nReply: YES "+item.id+"  or  NO "+item.id);
-  return {queued:true, require_approval_all:requireAll, id:item.id, proposed, matchSource:pSource, escalate, victorEmail, victorSms:sms};
+  const draft=await aiDraftAnswer(kb, question, guestName, await getApprovedBank(), history);
+  // Skip messages that don't need a reply (thank-you / acknowledgment). No send, no escalation.
+  if(draft && draft.needs_response===false){ return {no_response_needed:true, question}; }
+  const knownFull=(draft.known==="full");
+  let proposed=draft.answer||holdingMessage(guestName);
+  const list=await getApprovals();
+  const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate:!knownFull,
+    unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", ts:new Date().toISOString(),
+    smsLabel:smsLabelFor(list, {}), smsCode:mkSmsCode(), firstProposed:proposed, primaryNotifiedAt:new Date().toISOString() };
+  if(!auto){
+    // Legacy (auto-message OFF): stage every reply for approval; text Victor to approve/deny.
+    item.status="pending"; list.push(item); await setApprovals(list);
+    const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
+    return {queued:true, mode:"approval", id:item.id, proposed, escalate:!knownFull, victorEmail};
+  }
+  if(knownFull){
+    // AUTO-MESSAGE: it fully knows the answer -> send the composed reply to the guest now.
+    const guestSend=await sendGuestReply(enabled, {threadId, bookingId}, proposed);
+    item.status="answered"; item.answer=proposed; item.auto=true; item.decidedAt=new Date().toISOString(); item.guestSend=guestSend;
+    list.push(item); await setApprovals(list);
+    await addPendingFact({ q:question, a:proposed, source:"auto_answer" }); // queue Q->A for KB review (not auto-added)
+    return {auto_answered:true, sent:guestSend.sent===true, id:item.id, proposed, guestSend};
+  }
+  // Unknown/partial: auto-send the holding ("checking with a manager") message, then text Victor for the facts.
+  const hold=holdingMessage(guestName);
+  const guestSend=await sendGuestReply(enabled, {threadId, bookingId}, hold);
+  item.status="escalated"; item.proposed=hold; item.holdingSent=(guestSend.sent===true);
+  list.push(item); await setApprovals(list);
+  const vsms=await sendVictorEscalationSms(req, item, {unit, guestName});
+  return {escalated:true, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms};
+}
+async function sendVictorEscalationSms(req, item, ctx){
+  ctx=ctx||{};
+  const cfg=await getNotifyConfig();
+  if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false, reason:"SMS not configured"};
+  const unit=ctx.unit||item.unit||""; const guestName=ctx.guestName||item.guest_name||"";
+  const lbl=item.smsLabel||"Q?";
+  const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-6);
+  const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"Us: ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim().slice(0,160)).join("\n\n"):("Guest: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,180));
+  const _ctx=[unit,guestName].filter(Boolean).join(" - ");
+  const text=lbl+(_ctx?(" - "+_ctx):"")+" (escalated)\n"+_convo+"\n\nI told the guest I'd check with a manager. Reply \""+lbl+" <the answer/facts>\" and I'll send it to them + save it for review.";
+  try{ return await sendSmsGateway(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 
 function scrubContact(text){
@@ -1214,14 +1250,15 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
   const facts=[...kbFacts, ...bankFacts].join("\n");
   let _learn="";
   try{ const _corr=(await getCorrections()).slice(-8).map(c=>'- For "'+c.q+'": do NOT reply like "'+c.bad+'" — the owner corrected it to "'+c.good+'".').join("\n");
-       const _rej=(await getRejections()).slice(-8).filter(r=>r&&r.q).map(r=>'- For "'+String(r.q).slice(0,120)+'": a past draft was rejected'+(r.reason?(' because: '+r.reason):'')+'.').join("\n");
+       const _rej=(await getRejections()).filter(r=>r&&r.q&&r.reason&&String(r.reason).trim()&&!r.autoRejected&&!/auto-?rejected|no decision within/i.test(String(r.reason))).slice(-8).map(r=>'- For "'+String(r.q).slice(0,120)+'": a past draft was rejected because: '+r.reason+'.').join("\n");
        _learn=(_corr?("LEARNED CORRECTIONS (the owner edited these past drafts — match the corrected version, avoid the rejected phrasing):\n"+_corr+"\n\n"):"")+(_rej?("PAST REJECTIONS (avoid repeating these mistakes):\n"+_rej+"\n\n"):""); }catch(e){ _learn=""; }
   const convo=(Array.isArray(history)?history:[]).filter(m=>m&&m.b).slice(-12).map(m=>(m.d==="out"?"Us (already sent): ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim()).join("\n");
   const first=String(guestName||"").trim().split(/\s+/)[0]||"";
   const hold=holdingMessage(guestName);
-  const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). A human reviews your draft before it is sent. "
+  const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). Your reply may be sent to the guest automatically, so it must be correct and grounded ONLY in known info. "
     +"Use ONLY the KNOWN INFO below. NEVER invent, guess, infer, or substitute a different fact. Keep the reply SHORT.\n"
     +"The KNOWN INFO entries (including previously-approved answers) are REFERENCE FACTS, NOT templates. COMPOSE a fresh reply tailored to exactly what THIS guest asked, pulling only the relevant fact(s). Do NOT paste a whole prior answer that does not match what was asked.\n"
+    +"FIRST decide if this newest guest message needs a reply at all. A pure acknowledgment or pleasantry that asks for nothing \u2014 e.g. 'thank you', 'thanks!', 'ok', 'great', 'sounds good', 'perfect', 'got it', 'awesome', an emoji/thumbs-up \u2014 does NOT need a reply: set needs_response=false. If it asks a question, makes a request, reports a problem, or expects an answer, set needs_response=true.\n"
     +"First decide how much of the guest's message the KNOWN INFO answers: 'full' (every part), 'partial' (some parts), or 'none'.\n"
     +"Match the question word to the right fact: 'where'->a location/place/address; 'when'/'what time'->a time; 'how'->a process; 'what'/'which'->the specific item. If the specific thing asked is NOT in KNOWN INFO, treat that part as UNKNOWN (do not substitute a different fact).\n"
     +"Format: ONE warm greeting line ('Hi "+(first||"there")+"!'), then the answer in 1-3 short sentences, then a brief friendly closing. No padding, no over-explaining.\n"
@@ -1230,14 +1267,14 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
     +"- partial: answer the part(s) you DO know from KNOWN INFO; for the unknown part(s) say you'll check with your manager and follow up shortly \u2014 NEVER guess it.\n"
     +"- none: do NOT attempt an answer. Use this exact warm holding message: \""+hold+"\"\n"
     +"You may be shown CONVERSATION SO FAR: earlier messages from this guest and replies WE already sent. Use it to understand what is being asked (pronouns, follow-ups) and do NOT repeat info we already gave. Still answer ONLY from KNOWN INFO.\n"
-    +"Reply with ONLY a JSON object: {\"known\":\"full\"|\"partial\"|\"none\", \"answer\":\"...\"}. 'answer' is always the full message text.\n\n"
+    +"Reply with ONLY a JSON object: {\"needs_response\":true|false, \"known\":\"full\"|\"partial\"|\"none\", \"answer\":\"...\"}. 'answer' is always the full message text (ignored when needs_response is false).\n\n"
     +_learn
     +"KNOWN INFO:\n"+(facts||"(none saved yet)");
   const userMsg=(first?("Guest first name: "+first+"\n"):"")+(convo?("CONVERSATION SO FAR (oldest first):\n"+convo+"\n\n"):"")+"Newest guest message (reply to THIS): "+String(question);
   try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:350,temperature:0.2,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return {known:"none", answer:holdingMessage(guestName), error:JSON.stringify(j).slice(0,200)};
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
-    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; let answer=tidyQuotes(scrubContact(String(o.answer||"").trim())); if(!answer) answer=holdingMessage(guestName); return {known, answer}; }
+    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; const needs_response=(o.needs_response===false)?false:true; let answer=tidyQuotes(scrubContact(String(o.answer||"").trim())); if(!answer) answer=holdingMessage(guestName); return {known, answer, needs_response}; }
     catch{ return {known:"none", answer:holdingMessage(guestName)}; }
   }catch(e){ return {known:"none", answer:holdingMessage(guestName), error:String(e.message||e)}; }
 }
@@ -1289,11 +1326,9 @@ async function decideApproval(id, decision, overrideAnswer, reason){
     const shouldLearn = isOverride || !it.escalate;
     let bankSize=null;
     if(shouldLearn){
-      bankSize=await upsertApprovedBank(it.question, answer); // high-weight approved bank
-      const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
-      const nt=normQ(it.question); const existing=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
-      if(existing) existing.a=answer; else kb.items.push({topic:it.question.slice(0,60), a:answer, src:"approved"});
-      await setState({kb});
+      // Route the learned Q->A to the pending-facts review queue instead of writing it
+      // straight into the live KB — a human approves it before it is used in messaging.
+      try{ await addPendingFact({ q:it.question, a:answer, source:"approved_reply" }); }catch(e){}
     }
     // LEARN FROM THE EDIT: owner changed the proposed reply -> store (bad draft, good sent) so future drafts avoid the mistake.
     let learnedEdit=false;
@@ -1313,14 +1348,14 @@ async function decideApproval(id, decision, overrideAnswer, reason){
 // --- SMS approval labels (Q1, Q2 ...) + revise-from-text ---
 function smsLabelFor(list, item){
   if(item && item.smsLabel) return item.smsLabel;
-  const used=new Set((list||[]).filter(x=>x.status==="pending"&&x.smsLabel).map(x=>parseInt(String(x.smsLabel).replace(/\D/g,""),10)).filter(n=>n>0));
+  const used=new Set((list||[]).filter(x=>(x.status==="pending"||x.status==="escalated")&&x.smsLabel).map(x=>parseInt(String(x.smsLabel).replace(/\D/g,""),10)).filter(n=>n>0));
   let n=1; while(used.has(n)) n++; return "Q"+n;
 }
 function mkSmsCode(){ return (Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,5)); }
 function findByCode(list, code){ code=String(code||"").trim(); if(!code) return null; const m=(list||[]).filter(x=>x.smsCode===code); return m.length?m[m.length-1]:null; }
 function findByLabel(list, label){
   const num=parseInt(String(label||"").replace(/\D/g,""),10); if(!num) return null;
-  const pend=(list||[]).filter(x=>x.status==="pending"&&x.smsLabel&&parseInt(String(x.smsLabel).replace(/\D/g,""),10)===num);
+  const pend=(list||[]).filter(x=>(x.status==="pending"||x.status==="escalated")&&x.smsLabel&&parseInt(String(x.smsLabel).replace(/\D/g,""),10)===num);
   if(pend.length) return pend[pend.length-1];
   const any=(list||[]).filter(x=>x.smsLabel&&parseInt(String(x.smsLabel).replace(/\D/g,""),10)===num);
   return any.length?any[any.length-1]:null;
@@ -1328,19 +1363,28 @@ function findByLabel(list, label){
 // Owner texted a correction for a pending item: fold the new info into the KB, re-draft, record the correction, re-stage.
 async function reviseFromSms(req, item, extraInfo){
   extraInfo=String(extraInfo||"").trim();
-  const st=await getState(); const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
-  try{ const nt=normQ(item.question); const ex=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
-       if(ex) ex.a=extraInfo; else kb.items.push({topic:String(item.question||"").slice(0,60), a:extraInfo, src:"sms-correction"});
-       await setState({kb}); }catch(e){}
+  const st=await getState(); const enabled=!!st.messaging_enabled; const auto=await autoMessageOn();
+  const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
+  // Compose a fresh reply using the KB PLUS Victor's just-provided facts, IN-CONTEXT ONLY.
+  // We do NOT write to the live KB here — the fact is queued for review (addPendingFact).
   let proposed=null, known="full";
   try{ const history=await getThreadLog(item.thread_id, item.booking_id);
-       const d=await aiDraftAnswer(kb, item.question, item.guest_name, await getApprovedBank(), history);
+       const kbPlus={ format:(kb&&kb.format)||"", items:[...((kb&&kb.items)||[]), {topic:String(item.question||"").slice(0,60), a:extraInfo}] };
+       const d=await aiDraftAnswer(kbPlus, item.question, item.guest_name, await getApprovedBank(), history);
        if(d && d.answer && !d.noKey){ proposed=String(d.answer).trim(); known=d.known||"full"; } }catch(e){}
-  // NEVER send the owner's raw correction text to the guest. If the AI could not produce a fresh draft, keep the prior AI draft and flag it.
+  // NEVER send Victor's raw text to the guest. If the AI couldn't draft, keep the prior draft and flag it.
   if(!proposed) return {proposed:item.proposed||"", known:"full", failed:true};
-  try{ if(item.proposed && proposed!==String(item.proposed).trim()) await appendCorrection(item.question, item.proposed, proposed); }catch(e){}
   const list=await getApprovals(); const it=list.find(x=>x.id===item.id);
+  if(auto){
+    // Auto-message: send the real answer to the guest now; queue Victor's fact for KB review.
+    const guestSend=await sendGuestReply(enabled, {threadId:item.thread_id, bookingId:item.booking_id}, proposed);
+    if(it){ it.status="answered"; it.answer=proposed; it.auto=true; it.decidedAt=new Date().toISOString(); it.guestSend=guestSend; await setApprovals(list); }
+    try{ await addPendingFact({ q:item.question, a:extraInfo, source:"victor_escalation" }); }catch(e){}
+    return {proposed, known, sent:guestSend.sent===true, autoSent:true};
+  }
+  // Legacy: re-stage for approval; queue the fact for review.
   if(it){ it.proposed=proposed; it.escalate=(known==="none"); it.revisedAt=new Date().toISOString(); await setApprovals(list); }
+  try{ await addPendingFact({ q:item.question, a:extraInfo, source:"victor_escalation" }); }catch(e){}
   return {proposed, known};
 }
 
@@ -2845,7 +2889,7 @@ if(action==="email_recipients"){
       }
       if(!bodyRaw) return res.status(200).json({ignored:true, reason:"empty"});
       const ackBack=async(t)=>{ if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false}; let _r=null; for(let _i=0;_i<3;_i++){ try{ _r=await sendSmsGateway(cfg, t); if(_r && _r.sent) return _r; }catch(e){ _r={sent:false, error:String(e.message||e)}; } if(_i<2) await new Promise(function(res){setTimeout(res,1200);}); } return _r||{sent:false}; };
-      const list=await getApprovals(); const pend=list.filter(x=>x.status==="pending");
+      const list=await getApprovals(); const pend=list.filter(x=>x.status==="pending"||x.status==="escalated");
       const lm=bodyRaw.match(/^\s*q\s*0*(\d+)\b\s*([\s\S]*)$/i);
       let target=null, rest=bodyRaw;
       if(lm){ target=findByLabel(list, "Q"+lm[1]); rest=String(lm[2]||"").trim();
@@ -2864,6 +2908,16 @@ if(action==="email_recipients"){
         }
       }
       const lbl=target.smsLabel||"Q?";
+      // Auto-message escalations: the holding message already went to the guest; Victor's
+      // reply is the FACTS/answer. Draft + send it to the guest and queue the fact for review.
+      if(target.status==="escalated"){
+        if(rest===""){ await ackBack(lbl+": reply with the facts, e.g. \""+lbl+" checkout is 11am\", and I'll answer the guest + save it for review."); return res.status(200).json({need_facts:true, label:lbl}); }
+        if(isNo(rest)){ const it2=list.find(x=>x.id===target.id); if(it2){ it2.status="closed"; it2.decidedAt=new Date().toISOString(); await setApprovals(list); } await ackBack(lbl+" closed — nothing more sent to the guest."); return res.status(200).json({closed:true, label:lbl}); }
+        const rev2=await reviseFromSms(req, target, rest);
+        if(rev2 && rev2.failed){ await ackBack(lbl+": couldn't draft a guest reply from that — try rephrasing the facts."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
+        await ackBack(lbl+": sent to the guest ✅ and saved to review.");
+        return res.status(200).json({escalation_answered:true, label:lbl, sent:rev2&&rev2.sent===true});
+      }
       if((lm && rest==="")||isYes(rest)){
         const out=await decideApproval(target.id, "yes", null);
         await ackBack(out && out.sent ? (lbl+" sent to the guest. ✅") : (lbl+" NOT sent: "+((out&&out.error)||"error")));
@@ -2880,8 +2934,41 @@ if(action==="email_recipients"){
       return res.status(200).json({revised:true, label:lbl, proposed:rev.proposed});
     }
 
+    // ===== Auto-message toggle (app-gated) =====
+    if(action==="auto_message"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
+      if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{}; const raw=await getNotifyRaw(); raw.autoMessage=!!b.enabled; await setNotifyRaw(raw); return res.status(200).json({ok:true, enabled:!!b.enabled}); }
+      return res.status(200).json({enabled: await autoMessageOn()});
+    }
+    // ===== Pending "learned facts" review (app-gated) =====
+    if(action==="pending_facts"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
+      const list=(await getPendingFacts()).filter(x=>x&&x.status==="pending").slice().reverse();
+      return res.status(200).json({facts:list, count:list.length});
+    }
+    if(action==="pending_fact"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
+      const id=String(b.id||""); const act=String(b.action||"");
+      const list=await getPendingFacts(); const rec=list.find(x=>x&&x.id===id);
+      if(!rec) return res.status(200).json({ok:false, error:"not found"});
+      if(act==="edit"){ if(typeof b.topic==="string") rec.topic=b.topic.slice(0,80); if(typeof b.a==="string") rec.a=b.a.slice(0,1500); await setPendingFacts(list); return res.status(200).json({ok:true, fact:rec}); }
+      if(act==="reject"){ const kept=list.filter(x=>x.id!==id); await setPendingFacts(kept); return res.status(200).json({ok:true, removed:true}); }
+      if(act==="approve"){
+        const topic=(typeof b.topic==="string"&&b.topic.trim())?b.topic.trim().slice(0,80):String(rec.topic||rec.q||"").slice(0,80);
+        const a=(typeof b.a==="string"&&b.a.trim())?b.a.trim().slice(0,1500):String(rec.a||"").slice(0,1500);
+        const st=await getState(); const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
+        const nt=normQ(topic); const ex=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
+        if(ex) ex.a=a; else kb.items.push({topic, a, src:"approved-fact"});
+        await setState({kb});
+        const kept=list.filter(x=>x.id!==id); await setPendingFacts(kept);
+        return res.status(200).json({ok:true, approved:true, kbSize:kb.items.length});
+      }
+      return res.status(200).json({ok:false, error:"unknown action"});
+    }
     // Queryable KB so future response generation can pull approved answers.
     if(action==="kb_query"){
+
       const st=await getState(); const kb=st.kb||KB_SEED; const q=(req.query&&req.query.q)||"";
       const m=kbAutoMatch(kb, q);
       return res.status(200).json({query:q, match:m, knownTopics:(kb.items||[]).filter(i=>String(i.a||"").trim()).map(i=>i.topic)});
