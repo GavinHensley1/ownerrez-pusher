@@ -676,8 +676,9 @@ async function sendApprovalEmail(req, item, toAddr, isEsc){
   const yes=base+"&decision=yes", no=base+"&decision=no";
   const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const unit=item.unit||""; const guestName=item.guest_name||""; const proposed=item.proposed||"";
+  const esc2=(item.status==="escalated"); // waiting on a FACT from Victor (no draft to approve yet)
   let threadHtml=""; try{ threadHtml=await renderThread(item, await getApprovals()); }catch(e){}
-  const subject=(isEsc?"No text reply - 2nd notice: ":"")+"Parkside approval needed"+(unit?(" - "+unit):"");
+  const subject=(isEsc?"No text reply - 2nd notice: ":"")+(esc2?"Guest question needs info":"Parkside approval needed")+(unit?(" - "+unit):"");
   const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
   const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
     +(isEsc?'<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 14px;margin:0 0 14px;color:#991b1b;font-size:14px"><b>No response to the text within the time limit - escalated to you.</b></div>':'')
@@ -686,10 +687,13 @@ async function sendApprovalEmail(req, item, toAddr, isEsc){
     +(guestName?'<div style="color:#64748b;font-size:13px">Guest: <b>'+escHtml(guestName)+'</b></div>':'')
     +'<div style="margin:14px 0 6px;font-size:12px;color:#64748b;text-transform:uppercase">Conversation</div>'
     +'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:4px 12px">'+threadHtml+'</div>'
-    +'<div style="margin:14px 0 6px;font-size:12px;color:#64748b;text-transform:uppercase">Suggested reply</div>'
-    +'<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:14px;white-space:pre-wrap">'+(proposed?escHtml(proposed):'<i>No suggested reply</i>')+'</div>'
-    +'<div style="margin:18px 0">'+btn(yes,"#16a34a","Approve & Send")+btn(editUrl,"#2563eb","Edit")+btn(no,"#dc2626","Reject")+'</div>'
-    +'<p style="color:#94a3b8;font-size:12px">Approve sends this reply to the guest. Reject sends nothing. (Ref '+escHtml(item.id)+')</p></div>';
+    +'<div style="margin:14px 0 6px;font-size:12px;color:#64748b;text-transform:uppercase">'+(esc2?"What happened":"Suggested reply")+'</div>'
+    +(esc2
+       ? '<div style="background:#fff8e1;border:1px solid #fcd34d;border-radius:10px;padding:10px 12px;font-size:14px;color:#0f172a">The engine did not know the answer, so it sent the guest a short holding message and texted <b>'+escHtml(item.smsLabel||"the manager")+'</b> for the info. No answer has been sent to the guest yet. Text the fact to <b>'+escHtml(item.smsLabel||"that item")+'</b> from your phone (e.g. &ldquo;'+escHtml(item.smsLabel||"Q1")+' checkout is 11am&rdquo;) and a reply will be drafted for approval.</div>'
+         +'<p style="color:#94a3b8;font-size:12px;margin-top:12px">Nothing is sent to the guest until a reply is drafted and approved. (Ref '+escHtml(item.id)+')</p></div>'
+       : '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:14px;white-space:pre-wrap">'+(proposed?escHtml(proposed):'<i>No suggested reply</i>')+'</div>'
+         +'<div style="margin:18px 0">'+btn(yes,"#16a34a","Approve & Send")+btn(editUrl,"#2563eb","Edit")+btn(no,"#dc2626","Reject")+'</div>'
+         +'<p style="color:#94a3b8;font-size:12px">Approve sends this reply to the guest. Reject sends nothing. (Ref '+escHtml(item.id)+')</p></div>');
   const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:toAddr, subject, html});
   return {...result, to:toAddr, from:cfg.from, subject, escalation:isEsc};
 }
@@ -702,7 +706,8 @@ async function escalateStaleApprovals(req){
     const cutoff=Date.now()-cfg.escalateMins*60*1000;
     const list=await getApprovals(); let changed=false; const done=[];
     for(const it of list){
-      if(!it || it.status!=="pending" || it.escalatedTo2) continue;
+      if(!it || it.escalatedTo2) continue;
+      if(it.status!=="pending" && it.status!=="escalated") continue; // both approval AND fact-needed items nudge the backup
       const t=Date.parse(it.primaryNotifiedAt||it.ts||"");
       if(!isFinite(t) || t>cutoff) continue;
       const r=await sendApprovalEmail(req, it, cfg.to2, true);
@@ -718,26 +723,20 @@ async function escalateStaleApprovals(req){
 async function autoRejectStaleApprovals(req){
   try{
     const cutoff=Date.now()-24*60*60*1000;
-    const list=await getApprovals(); let changed=false; const done=[]; let rejected=0, closed=0;
+    const list=await getApprovals(); let changed=false; const done=[];
     for(const it of list){
-      if(!it) continue;
+      // Only 'pending' (a drafted reply awaiting a yes) auto-rejects after 24h. Escalated items
+      // (waiting on a fact from Victor) are LEFT OPEN on purpose so their Q# keeps piling up and
+      // they stay visible until handled — the backup email nudges instead of auto-closing them.
+      if(!it || it.status!=="pending") continue;
       const t=Date.parse(it.ts||it.primaryNotifiedAt||"");
       if(!isFinite(t) || t>cutoff) continue;
-      if(it.status==="pending"){
-        // A draft nobody approved in 24h -> reject (nothing sent). Not a judgment on the draft, so no KB pollution.
-        it.status="rejected"; it.decidedAt=new Date().toISOString();
-        it.rejectReason="Auto-rejected: no decision within 24 hours"; it.autoRejected=true;
-        changed=true; rejected++; done.push({id:it.id, was:"pending"});
-      } else if(it.status==="escalated"){
-        // Guest already got the holding message; Victor never sent a fact in 24h. Close it so the
-        // Q-label frees up and it stops showing as active. (Nothing further is sent to the guest.)
-        it.status="closed"; it.decidedAt=new Date().toISOString();
-        it.closeReason="Auto-closed: no manager reply within 24 hours"; it.autoClosed=true;
-        changed=true; closed++; done.push({id:it.id, was:"escalated"});
-      }
+      it.status="rejected"; it.decidedAt=new Date().toISOString();
+      it.rejectReason="Auto-rejected: no decision within 24 hours"; it.autoRejected=true;
+      changed=true; done.push({id:it.id});
     }
     if(changed) await setApprovals(list);
-    return {autoRejected:rejected, autoClosed:closed, items:done};
+    return {autoRejected:done.length, items:done};
   }catch(e){ return {error:String(e.message||e)}; }
 }
 function htmlPage(title, msg){
@@ -1203,9 +1202,10 @@ async function processGuestQuestion(req, p){
   const knownFull=(draft.known==="full");
   let proposed=draft.answer||holdingMessage(guestName);
   const list=await getApprovals();
+  const _lbl=await nextSmsLabel();
   const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate:!knownFull,
     unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", ts:new Date().toISOString(),
-    smsLabel:smsLabelFor(list, {}), smsCode:mkSmsCode(), firstProposed:proposed, primaryNotifiedAt:new Date().toISOString() };
+    smsLabel:_lbl, smsCode:mkSmsCode(), firstProposed:proposed, primaryNotifiedAt:new Date().toISOString() };
   if(!auto){
     // Legacy (auto-message OFF): stage every reply for approval; text Victor to approve/deny.
     item.status="pending"; list.push(item); await setApprovals(list);
@@ -1360,6 +1360,18 @@ function smsLabelFor(list, item){
   if(item && item.smsLabel) return item.smsLabel;
   const used=new Set((list||[]).filter(x=>(x.status==="pending"||x.status==="escalated")&&x.smsLabel).map(x=>parseInt(String(x.smsLabel).replace(/\D/g,""),10)).filter(n=>n>0));
   let n=1; while(used.has(n)) n++; return "Q"+n;
+}
+// Ever-CLIMBING Q# labels (Gavin wants the numbers to pile up, never reuse). Persistent
+// Redis counter; seeded once above any existing labels; falls back to max-in-list + 1.
+async function nextSmsLabel(){
+  try{ if(redis){
+      let n=await redis.incr("parkside:sms_seq");
+      if(n===1){ let mx=0; try{ const list=await getApprovals(); for(const it of (list||[])){ const k=parseInt(String(it&&it.smsLabel||"").replace(/\D/g,""),10); if(isFinite(k)&&k>mx) mx=k; } }catch(e){}
+        if(mx>=1){ n=mx+1; try{ await redis.set("parkside:sms_seq", n); }catch(e){} } }
+      if(isFinite(n)&&n>0) return "Q"+n;
+  } }catch(e){}
+  try{ const list=await getApprovals(); let mx=0; for(const it of (list||[])){ const k=parseInt(String(it&&it.smsLabel||"").replace(/\D/g,""),10); if(isFinite(k)&&k>mx) mx=k; } return "Q"+(mx+1); }
+  catch(e){ return "Q"+String(Date.now()).slice(-5); }
 }
 function mkSmsCode(){ return (Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,5)); }
 function findByCode(list, code){ code=String(code||"").trim(); if(!code) return null; const m=(list||[]).filter(x=>x.smsCode===code); return m.length?m[m.length-1]:null; }
