@@ -765,12 +765,12 @@ async function victorCalledOn(date){ // did Victor complete a verification call 
 async function sendVictorVerifyReminderEmail(){
   const cfg=await getNotifyConfig();
   const to=cfg.to; // Victor's email (victorEmail / VICTOR_EMAIL)
-  const subject="Parkside — we could not verify you today ⚠️";
+  const subject="Parkside — verification system didn't confirm today";
   const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#0f172a">'
-    +'<h2 style="margin:0 0 10px">We were unable to verify you today</h2>'
-    +'<p style="font-size:14px;line-height:1.5">We did not receive your daily verification call, and email verification is not turned on for your account.</p>'
-    +'<p style="font-size:14px;line-height:1.5">Please complete your verification phone call, or turn on email verification, so we can confirm you today.</p>'
-    +'<p style="color:#94a3b8;font-size:12px">Automated reminder from the Parkside engine.</p></div>';
+    +'<h2 style="margin:0 0 10px">The verification system didn\u2019t confirm today</h2>'
+    +'<p style="font-size:14px;line-height:1.5">Our verification system wasn\u2019t able to confirm today \u2014 it didn\u2019t receive a verification call, and email verification isn\u2019t switched on for your account yet.</p>'
+    +'<p style="font-size:14px;line-height:1.5">Nothing to worry about. Whenever it\u2019s convenient, complete the verification call or switch on email verification, and the system will confirm you going forward. Thanks so much!</p>'
+    +'<p style="color:#94a3b8;font-size:12px">Automated note from the Parkside engine.</p></div>';
   const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to, subject, html});
   return {...result, to, subject};
 }
@@ -797,6 +797,10 @@ async function runVictorVerifyReminder(nowIso){
   const date=etDate(iso); const wd=etWeekday(iso);
   // Only Wed(3)-Sat(6). Sun(0)/Mon(1)/Tue(2) are NOT monitored — never send.
   if(!(wd>=3 && wd<=6)) return {sent:false, skipped:"not a monitored day (Wed-Sat only)", date, weekday:wd};
+  // Only send in the EVENING of a work day (>= 8pm ET) so it's a real end-of-day
+  // check-in, never a midnight/start-of-day fire (which read as "Tuesday night").
+  const hr=etHour(iso);
+  if(hr<20) return {sent:false, skipped:"before the 8pm ET end-of-day window", date, weekday:wd, hour:hr};
   if(await isTimeOffDay(date)) return {sent:false, skipped:"time-off day (in his days-off tab)", date, weekday:wd};
   const cfg=await victorVerifyConfig();
   if(cfg.emailEnabled) return {sent:false, skipped:"email verification enabled", date};
@@ -1417,6 +1421,7 @@ function etDate(iso){ try{ return new Date(iso).toLocaleDateString('en-CA',{time
 // Weekday (0=Sun..6=Sat) in America/New_York for a given iso (or now). Used to gate the
 // daily verification-call reminder to Wed-Sat only (Sun/Mon/Tue are not monitored).
 function etWeekday(iso){ try{ var d=iso?new Date(iso):new Date(); var wd=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',weekday:'short'}).format(d); return {Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6}[wd]; }catch(e){ return new Date().getUTCDay(); } }
+function etHour(iso){ try{ var d=iso?new Date(iso):new Date(); var h=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',hour12:false}).format(d); return parseInt(h,10)%24; }catch(e){ return new Date().getUTCHours(); } }
 // Current YYYY-MM in America/New_York (month key for cleans/refunds tallies).
 function etMonth(iso){ return etDate(iso||new Date().toISOString()).slice(0,7); }
 async function getZones(){ try{ if(redis){ const z=await redis.get('parkside:zones'); if(Array.isArray(z)&&z.length) return z.map(x=>({name:String(x.name||'zone'),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)})).filter(x=>isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0); } }catch(e){} return ZONES_DEFAULT; }
