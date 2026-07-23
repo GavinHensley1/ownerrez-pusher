@@ -1204,10 +1204,11 @@ async function processGuestQuestion(req, p){
   // Skip messages that don't need a reply (thank-you / acknowledgment). No send, no escalation.
   if(draft && draft.needs_response===false){ return {no_response_needed:true, question}; }
   const knownFull=(draft.known==="full");
-  let proposed=draft.answer||holdingMessage(guestName);
+  const isComplaint=!!(draft&&draft.complaint);
+  let proposed=isComplaint?holdingMessage(guestName,true):(draft.answer||holdingMessage(guestName));
   const list=await getApprovals();
   const _lbl=await nextSmsLabel();
-  const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate:!knownFull,
+  const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate:(!knownFull||isComplaint), complaint:isComplaint,
     unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", ts:new Date().toISOString(),
     smsLabel:_lbl, smsCode:mkSmsCode(), firstProposed:proposed, primaryNotifiedAt:new Date().toISOString() };
   if(!auto){
@@ -1216,7 +1217,7 @@ async function processGuestQuestion(req, p){
     const victorEmail=await sendVictorApprovalEmail(req, item, {unit, guestName});
     return {queued:true, mode:"approval", id:item.id, proposed, escalate:!knownFull, victorEmail};
   }
-  if(knownFull){
+  if(knownFull && !isComplaint){
     // AUTO-MESSAGE: it fully knows the answer -> send the composed reply to the guest now.
     const guestSend=await sendGuestReply(enabled, {threadId, bookingId}, proposed);
     item.status="answered"; item.answer=proposed; item.auto=true; item.decidedAt=new Date().toISOString(); item.guestSend=guestSend;
@@ -1224,13 +1225,13 @@ async function processGuestQuestion(req, p){
     await addPendingFact({ q:question, a:proposed, source:"auto_answer" }); // queue Q->A for KB review (not auto-added)
     return {auto_answered:true, sent:guestSend.sent===true, id:item.id, proposed, guestSend};
   }
-  // Unknown/partial: auto-send the holding ("checking with a manager") message, then text Victor for the facts.
-  const hold=holdingMessage(guestName);
+  // Unknown/partial OR a complaint: send the holding (apology + "checking with a manager"), then text Victor.
+  const hold=holdingMessage(guestName, isComplaint);
   const guestSend=await sendGuestReply(enabled, {threadId, bookingId}, hold);
   item.status="escalated"; item.proposed=hold; item.holdingSent=(guestSend.sent===true);
   list.push(item); await setApprovals(list);
-  const vsms=await sendVictorEscalationSms(req, item, {unit, guestName});
-  return {escalated:true, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms};
+  const vsms=await sendVictorEscalationSms(req, item, {unit, guestName, complaint:isComplaint});
+  return {escalated:true, complaint:isComplaint, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms};
 }
 async function sendVictorEscalationSms(req, item, ctx){
   ctx=ctx||{};
@@ -1241,7 +1242,8 @@ async function sendVictorEscalationSms(req, item, ctx){
   const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-6);
   const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"Us: ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim().slice(0,160)).join("\n\n"):("Guest: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,180));
   const _ctx=[unit,guestName].filter(Boolean).join(" - ");
-  const text=lbl+(_ctx?(" - "+_ctx):"")+" (escalated)\n"+_convo+"\n\nI told the guest I'd check with a manager. Reply \""+lbl+" <the answer/fact>\" and I'll draft a reply for you to approve before it goes to the guest.";
+  const _isComp=!!(ctx.complaint||item.complaint);
+  const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+(_isComp?" (COMPLAINT)":" (escalated)")+"\n"+_convo+"\n\n"+(_isComp?"I told the guest I'm sorry and a manager will follow up.":"I told the guest I'd check with a manager.")+" Reply \""+lbl+" <the answer/fact>\" and I'll draft a reply for you to approve before it goes to the guest.";
   try{ return await sendSmsGateway(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 
@@ -1253,8 +1255,9 @@ function scrubContact(text){
   t=t.replace(/[ \t]{2,}/g," ").replace(/\s+([.,!?;:])/g,"$1").replace(/\(\s*\)/g,"").trim();
   return t;
 }
-function holdingMessage(guestName){ const f=String(guestName||"").trim().split(/\s+/)[0];
-  return "Hi "+(f||"there")+"! Great question \u2014 I want to make sure I get you the right info, so let me check with my manager and I\u2019ll get right back to you shortly. \uD83D\uDE0A"; }
+function holdingMessage(guestName, complaint){ const f=String(guestName||"").trim().split(/\s+/)[0];
+  if(complaint) return "Hi "+(f||"there")+", I\u2019m so sorry for the trouble \u2014 that\u2019s truly not the experience we want you to have. I\u2019m getting my manager involved right now and we\u2019ll get right back to you shortly.";
+  return "Hi "+(f||"there")+"! Thanks for reaching out \u2014 I want to make sure I get you the right info, so let me check with my manager and I\u2019ll get right back to you shortly. \uD83D\uDE0A"; }
 // KB-grounded draft. Returns {known:"full"|"partial"|"none", answer}. NEVER fabricates:
 // unknown parts -> say we will confirm with the manager and follow up (no guessing).
 async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
@@ -1273,22 +1276,23 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
     +"Use ONLY the KNOWN INFO below. NEVER invent, guess, infer, or substitute a different fact. Keep the reply SHORT.\n"
     +"The KNOWN INFO entries (including previously-approved answers) are REFERENCE FACTS, NOT templates. COMPOSE a fresh reply tailored to exactly what THIS guest asked, pulling only the relevant fact(s). Do NOT paste a whole prior answer that does not match what was asked.\n"
     +"FIRST decide if this newest guest message needs a reply at all. A pure acknowledgment or pleasantry that asks for nothing \u2014 e.g. 'thank you', 'thanks!', 'ok', 'great', 'sounds good', 'perfect', 'got it', 'awesome', an emoji/thumbs-up \u2014 does NOT need a reply: set needs_response=false. If it asks a question, makes a request, reports a problem, or expects an answer, set needs_response=true.\n"
+    +"COMPLAINT DETECTION: set complaint=true if the guest reports a problem or is upset \u2014 e.g. something broken/leaking/dirty, bugs/pests, bad smell, a safety issue, or asks for a refund, credit, compensation, or to leave early. Otherwise complaint=false. When complaint=true be empathetic: apologize for the trouble and say a manager will follow up; do NOT say 'great question' and do NOT use a cheerful emoji.\n"
     +"First decide how much of the guest's message the KNOWN INFO answers: 'full' (every part), 'partial' (some parts), or 'none'.\n"
     +"Match the question word to the right fact: 'where'->a location/place/address; 'when'/'what time'->a time; 'how'->a process; 'what'/'which'->the specific item. If the specific thing asked is NOT in KNOWN INFO, treat that part as UNKNOWN (do not substitute a different fact).\n"
     +"Format: ONE warm greeting line ('Hi "+(first||"there")+"!'), then the answer in 1-3 short sentences, then a brief friendly closing. No padding, no over-explaining.\n"
     +"NEVER include a phone number, email address, or external link, and never say 'call us', 'text us', or 'email us'. The channel BLOCKS messages that contain contact info, so they fail to send. Keep everything inside this message thread.\n"
     +"- full: answer every part using ONLY KNOWN INFO.\n"
     +"- partial: answer the part(s) you DO know from KNOWN INFO; for the unknown part(s) say you'll check with your manager and follow up shortly \u2014 NEVER guess it.\n"
-    +"- none: do NOT attempt an answer. Use this exact warm holding message: \""+hold+"\"\n"
+    +"- none: do NOT attempt an answer. If complaint=true, briefly apologize for the trouble and say a manager will follow up shortly (no 'great question', no smiley). Otherwise use this exact warm holding message: \""+hold+"\"\n"
     +"You may be shown CONVERSATION SO FAR: earlier messages from this guest and replies WE already sent. Use it to understand what is being asked (pronouns, follow-ups) and do NOT repeat info we already gave. Still answer ONLY from KNOWN INFO.\n"
-    +"Reply with ONLY a JSON object: {\"needs_response\":true|false, \"known\":\"full\"|\"partial\"|\"none\", \"answer\":\"...\"}. 'answer' is always the full message text (ignored when needs_response is false).\n\n"
+    +"Reply with ONLY a JSON object: {\"needs_response\":true|false, \"complaint\":true|false, \"known\":\"full\"|\"partial\"|\"none\", \"answer\":\"...\"}. 'answer' is always the full message text (ignored when needs_response is false).\n\n"
     +_learn
     +"KNOWN INFO:\n"+(facts||"(none saved yet)");
   const userMsg=(first?("Guest first name: "+first+"\n"):"")+(convo?("CONVERSATION SO FAR (oldest first):\n"+convo+"\n\n"):"")+"Newest guest message (reply to THIS): "+String(question);
   try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:350,temperature:0.2,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return {known:"none", answer:holdingMessage(guestName), error:JSON.stringify(j).slice(0,200)};
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
-    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; const needs_response=(o.needs_response===false)?false:true; let answer=tidyQuotes(scrubContact(String(o.answer||"").trim())); if(!answer) answer=holdingMessage(guestName); return {known, answer, needs_response}; }
+    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; const needs_response=(o.needs_response===false)?false:true; const complaint=(o.complaint===true); let answer=tidyQuotes(scrubContact(String(o.answer||"").trim())); if(!answer) answer=holdingMessage(guestName, complaint); return {known, answer, needs_response, complaint}; }
     catch{ return {known:"none", answer:holdingMessage(guestName)}; }
   }catch(e){ return {known:"none", answer:holdingMessage(guestName), error:String(e.message||e)}; }
 }
