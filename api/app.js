@@ -1203,6 +1203,19 @@ async function processGuestQuestion(req, p){
   const draft=await aiDraftAnswer(kb, question, guestName, await getApprovedBank(), history);
   // Skip messages that don't need a reply (thank-you / acknowledgment). No send, no escalation.
   if(draft && draft.needs_response===false){ return {no_response_needed:true, question}; }
+  // If this thread already has an OPEN escalation (a manager is already handling it), do NOT
+  // send another "checking with my manager" holding. Stay quiet to the guest and just forward
+  // the new message to the manager on the text thread so they can respond.
+  if(auto){
+    const _al=await getApprovals();
+    const _open=_al.find(it=>it && it.status==="escalated" && ((threadId&&it.thread_id===threadId)||(bookingId&&String(it.booking_id)===String(bookingId))));
+    if(_open){
+      _open.ts=new Date().toISOString(); _open.lastGuestMsgAt=new Date().toISOString();
+      await setApprovals(_al);
+      const vsms=await sendVictorEscalationSms(req, _open, {unit, guestName, complaint:!!_open.complaint, followup:true, newMsg:question});
+      return {forwarded_to_manager:true, no_guest_reply:true, id:_open.id, victorSms:vsms, question};
+    }
+  }
   const knownFull=(draft.known==="full");
   const isComplaint=!!(draft&&draft.complaint);
   let proposed=isComplaint?holdingMessage(guestName,true):(draft.answer||holdingMessage(guestName));
@@ -1242,6 +1255,11 @@ async function sendVictorEscalationSms(req, item, ctx){
   const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-6);
   const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"Us: ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim().slice(0,160)).join("\n\n"):("Guest: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,180));
   const _ctx=[unit,guestName].filter(Boolean).join(" - ");
+  if(ctx.followup){
+    const _nm=String(ctx.newMsg||item.question||"").replace(/\s+/g," ").trim().slice(0,220);
+    const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 NEW guest message (you are already on this thread; I did NOT auto-reply):\n\""+_nm+"\"\n\nWaiting for you to respond to the guest.";
+    try{ return await sendSmsGateway(cfg, _ft); }catch(e){ return {sent:false, error:String(e.message||e)}; }
+  }
   const _isComp=!!(ctx.complaint||item.complaint);
   const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+(_isComp?" (COMPLAINT)":" (escalated)")+"\n"+_convo+"\n\n"+(_isComp?"I told the guest I'm sorry and a manager will follow up.":"I told the guest I'd check with a manager.")+" Reply \""+lbl+" <the answer/fact>\" and I'll draft a reply for you to approve before it goes to the guest.";
   try{ return await sendSmsGateway(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
