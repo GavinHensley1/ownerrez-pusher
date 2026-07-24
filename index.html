@@ -379,6 +379,15 @@
       </div>
       <div id="scResult" style="margin-top:12px"></div>
     </div>
+    <div class="card" id="webActCard">
+      <h2>🖥 Admin web activity <span class="muted" style="font-weight:400;text-transform:none">— URLs visited, time on each, and total activity level (WebWork). The admin-activity signal we grade on.</span></h2>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+        <button class="ghost" onclick="loadWebActivity()">Refresh</button>
+        <span id="webActStatus" class="muted"></span>
+      </div>
+      <div id="webActSummary" class="legend" style="margin-bottom:10px">…</div>
+      <div id="webActList"></div>
+    </div>
     <div class="card" id="fraudCard" style="border-color:#5a2a2a">
       <h2>🛡️ Fraud Alert <span class="muted" style="font-weight:400;text-transform:none">— payout-account integrity + receipts (Gavin-only)</span></h2>
       <div class="legend" style="margin-bottom:10px">Records the <b>correct payout bank account</b> for each channel, then flags if a checked value ever differs. Also logs receipts (Amazon, MMS) for reconciliation. Victor can’t see this tab.</div>
@@ -1013,7 +1022,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1023,10 +1032,10 @@ async function populateDays(){ try{ const dev=(document.getElementById('monDevic
   const sel=document.getElementById('monDate'); if(!sel) return; const days=j.days||[];
   sel.innerHTML='<option value="">Today (live)</option>'+days.map(function(d){return '<option value="'+d+'">'+d+'</option>';}).join('');
 }catch(e){} }
-async function onDeviceChange(){ await populateDays(); loadMonitor(); loadScorecard(); }
+async function onDeviceChange(){ await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); }
 function onDateChange(){ const d=(document.getElementById('monDate')||{}).value; const auto=document.getElementById('monAuto');
   if(d){ if(auto){auto.checked=false; auto.disabled=true;} if(MON_TIMER){clearInterval(MON_TIMER); MON_TIMER=null;} }
-  else { if(auto){auto.disabled=false;} monAutoToggle(); } loadMonitor(); loadScorecard(); }
+  else { if(auto){auto.disabled=false;} monAutoToggle(); } loadMonitor(); loadScorecard(); loadWebActivity(); }
 async function populateDevices(){
   try{ const r=await fetch(api('gps_devices')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
     const sel=document.getElementById('monDevice'); if(!sel) return; const cur=sel.value;
@@ -1053,6 +1062,19 @@ async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementB
     const gn=document.getElementById('gradeNote'); if(gn && document.activeElement!==gn) gn.value=(j.grade&&j.grade.note)||'';
     const gp=document.getElementById('gradeProgress'); if(gp){ const c=j.graded_count||0; gp.textContent=c+' day'+(c===1?'':'s')+' graded'+(c<10?(' — grade ~'+(10-c)+' more to calibrate the auto-grader'):' — auto-grader is calibrated to your standard'); }
   }catch(e){ const el=document.getElementById('scHours'); if(el) el.textContent='Error: '+e.message; }
+}
+async function loadWebActivity(){ if(!GPW) return;
+  const date=(document.getElementById('monDate')||{}).value||'';
+  const st=document.getElementById('webActStatus'); if(st) st.textContent='Loading\u2026';
+  try{ const r=await fetch(api('ww_activity')+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}});
+    const j=await r.json(); if(st) st.textContent='';
+    const a=j.apps||{}; const sum=document.getElementById('webActSummary'); const list=document.getElementById('webActList');
+    if(!a.available){ if(sum) sum.innerHTML='<span class="muted">No web-activity data for this day'+(a.error?(' ('+esc(a.error)+')'):(a.empty?' \u2014 WebWork returned no URL/site rows (needs the desktop app running and a plan tier that reports websites)':''))+'.</span>'; if(list) list.innerHTML=''; return; }
+    if(sum) sum.innerHTML='<b>Total activity level:</b> '+(a.avg_activity_pct!=null?(a.avg_activity_pct+'%'):'\u2014')+' &nbsp;&middot;&nbsp; <b>Total time tracked:</b> '+(a.total_min||0)+' min &nbsp;&middot;&nbsp; '+((a.top&&a.top.length)||0)+' sites/apps';
+    let h='<table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="text-align:left;color:var(--mut)"><th style="padding:4px 6px">URL / site visited</th><th style="padding:4px 6px;text-align:right">Time</th></tr>';
+    (a.top||[]).forEach(function(x){ h+='<tr style="border-top:1px solid #26354a"><td style="padding:4px 6px;word-break:break-all">'+esc(x.label)+'</td><td style="padding:4px 6px;text-align:right;white-space:nowrap">'+x.min+' min</td></tr>'; });
+    h+='</table>'; if(list) list.innerHTML=h;
+  }catch(e){ if(st) st.textContent='error'; }
 }
 async function saveReport(){ const date=(document.getElementById('monDate')||{}).value||''; const st=document.getElementById('scStatus'); st.textContent='Saving…';
   try{ const r=await fetch(api('scorecard_report')+(date?('&date='+encodeURIComponent(date)):''),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({report:document.getElementById('scReport').value})}); const j=await r.json(); st.textContent=j.ok?'Saved ✓':'Save failed'; }catch(e){ st.textContent='Error: '+e.message; } }
