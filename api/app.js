@@ -1494,17 +1494,17 @@ async function wwAppsWebsites(date){
   // The apps & websites (URLs) Victor actually used + minutes + activity level. PRIMARY "is he active / what was he on"
   // signal for verification — NOT project labels. Endpoint path env-overridable (WEBWORK_APPS_PATH).
   const path=String(process.env.WEBWORK_APPS_PATH||"/reports/apps-websites");
-  const r=await wwFetch(path,"workspace_id="+wwWorkspace()+"&user_id="+wwVictor()+"&user_ids[]="+wwVictor()+"&start_date="+date+"&end_date="+date+"&apps_websites_only=true&per_page=100");
+  const r=await wwFetch(path,"workspace_id="+wwWorkspace()+"&users="+wwVictor()+"&start_date="+date+"&end_date="+date+"&per_page=200");
   if(!r.ok || !r.json) return {available:false, error:r.error||("status "+r.status)};
   const d=(r.json.data!=null)?r.json.data:r.json;
   let rows=[];
-  const looksRow=function(e){ return e&&typeof e==="object" && (e.url!=null||e.website!=null||e.domain!=null||e.host!=null||e.app!=null||e.application!=null||e.name!=null||e.title!=null); };
+  const looksRow=function(e){ return e&&typeof e==="object" && (e.app_website!=null||e.url!=null||e.website!=null||e.domain!=null||e.host!=null||e.app!=null||e.application!=null||e.name!=null||e.title!=null); };
   const dig=function(x){ if(!x) return; if(Array.isArray(x)){ for(const e of x){ if(looksRow(e)) rows.push(e); else dig(e); } return; } if(typeof x==="object"){ for(const k in x){ if(Array.isArray(x[k])) dig(x[k]); else if(x[k]&&typeof x[k]==="object") dig(x[k]); } } };
   try{ dig(d); }catch(e){}
   const vid=String(wwVictor());
-  const mine=rows.filter(function(e){ const uid=String(e.user_id!=null?e.user_id:((e.user&&(e.user.id||e.user.user_id))||"")); return !uid || uid===vid; });
+  const mine=rows.filter(function(e){ const uid=String(e.user_id!=null?e.user_id:((e.user&&(e.user.id||e.user.user_id))||(e.member&&(e.member.id||e.member.user_id))||"")); return !uid || uid===vid; });
   const use=mine.length?mine:rows;
-  const labelOf=function(e){ return String(e.url||e.website||e.domain||e.host||e.app||e.application||e.name||e.title||"").trim(); };
+  const labelOf=function(e){ return String(e.app_website||e.url||e.website||e.domain||e.host||e.app||e.application||e.name||e.title||"").trim(); };
   const minOf=function(e){ const m=Number(e.duration_minutes!=null?e.duration_minutes:(e.total_minutes!=null?e.total_minutes:(e.tracked_minutes!=null?e.tracked_minutes:(e.minutes!=null?e.minutes:(e.duration!=null?e.duration/60:NaN))))); return isFinite(m)?m:0; };
   const lvlOf=function(e){ const v=Number(e.activity_level!=null?e.activity_level:(e.activity!=null?e.activity:NaN)); return isFinite(v)?v:null; };
   const agg={}; let tot=0, lvlSum=0, lvlN=0;
