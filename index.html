@@ -388,6 +388,10 @@
       <div id="webActSummary" class="legend" style="margin-bottom:10px">…</div>
       <div id="webActList"></div>
     </div>
+    <div class="card" id="bonusOwnerCard">
+      <h2>&#128176; Bonus &mdash; enter month <span class="muted" style="font-weight:400;text-transform:none">&mdash; Victor's incentive comp; what you enter here shows on his My Work tab</span></h2>
+      <div id="bonusOwnerBody" class="legend">&hellip;</div>
+    </div>
     <div class="card" id="fraudCard" style="border-color:#5a2a2a">
       <h2>🛡️ Fraud Alert <span class="muted" style="font-weight:400;text-transform:none">— payout-account integrity + receipts (Gavin-only)</span></h2>
       <div class="legend" style="margin-bottom:10px">Records the <b>correct payout bank account</b> for each channel, then flags if a checked value ever differs. Also logs receipts (Amazon, MMS) for reconciliation. Victor can’t see this tab.</div>
@@ -1022,7 +1026,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1475,7 +1479,91 @@ async function deleteCall(key){
 // ===== Bonus tab (visible to Victor later; no Gavin login) =====
 function bEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 let WEEK_OFF=0;
-async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadWeekly(); loadTimeoff(); }
+async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadWeekly(); loadTimeoff(); loadBonusVictor(); }
+
+// ===== Bonus / incentive comp (owner entry + Victor summary) =====
+const BMONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const BFULL=['January','February','March','April','May','June','July','August','September','October','November','December'];
+var BONUS={terms:{revenueSharePct:1,cleanRate:5},data:{},isGavin:false};
+var BYEAR=new Date().getFullYear(), BMONTH=new Date().getMonth();
+var BNUMF=['gross','refunds','revAdj','cleans','covered','inspections','goodReviews','badReviews','minibar','guidebook'];
+function bNum(v){var n=parseFloat(v);return isFinite(n)?n:0;}
+function bMoney(n){var s=Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return (n<0?'-$':'$')+s;}
+function bKey(y,m){return y+'-'+String(m+1).padStart(2,'0');}
+function bAkey(y){return 'annual-'+y;}
+function bBlank(){return {gross:'',refunds:'',revAdj:'',cleans:'',covered:'',inspections:'',goodReviews:'',badReviews:'',minibar:'',guidebook:'',aiPct:0,selfPct:0,aiNote:'',selfNote:'',reviewNote:'',published:true,note:''};}
+function bBlankA(){return {healthAmount:'',healthNote:'',adjustment:'',published:true};}
+function bEntry(y,m){return Object.assign(bBlank(),BONUS.data[bKey(y,m)]||{});}
+function bAnnual(y){return Object.assign(bBlankA(),BONUS.data[bAkey(y)]||{});}
+function bNet(e){return bNum(e.gross)-bNum(e.refunds)+bNum(e.revAdj);}
+function bCalc(e){var pct=(BONUS.terms.revenueSharePct||1)/100,cr=(BONUS.terms.cleanRate||5),fl=function(v){return Math.max(0,v);};
+  var revenue=fl(bNet(e)*pct),cleaning=fl(bNum(e.cleans)*cr-bNum(e.covered)*25-bNum(e.inspections)*5),reviews=fl(bNum(e.goodReviews)*5-bNum(e.badReviews)*25),sales=fl(bNum(e.minibar)*0.1+bNum(e.guidebook)*0.1),ai=(bNum(e.aiPct)/100)*(1000/12),self=(bNum(e.selfPct)/100)*(500/12);
+  return {revenue:revenue,cleaning:cleaning,reviews:reviews,sales:sales,ai:ai,self:self,performance:ai+self,total:revenue+cleaning+reviews+sales+ai+self};}
+async function bLoad(){var h={};if(GPW)h['x-gavin-password']=GPW;try{var r=await fetch(api('bonus_get')+'&cb='+Date.now(),{headers:h});var j=await r.json();BONUS.terms=j.terms||BONUS.terms;BONUS.data=j.data||{};BONUS.isGavin=!!j.isGavin;}catch(e){}}
+async function bSave(payload){var h={'Content-Type':'application/json'};if(GPW)h['x-gavin-password']=GPW;try{var r=await fetch(api('bonus_save'),{method:'POST',headers:h,body:JSON.stringify(payload)});var j=await r.json();if(j&&j.terms)BONUS.terms=j.terms;return j;}catch(e){return {error:String(e)};}}
+
+async function loadBonusVictor(){ await bLoad(); renderBonusVictor(); }
+function renderBonusVictor(){ var el=document.getElementById('bonusBody'); if(!el) return;
+  var pub=[]; for(var i=0;i<12;i++){ var raw=BONUS.data[bKey(BYEAR,i)]; if(!raw||raw.published===false) continue; var e=Object.assign(bBlank(),raw); pub.push({i:i,e:e,c:bCalc(e)}); }
+  var ann=bAnnual(BYEAR), showA=ann.published!==false, health=showA?bNum(ann.healthAmount):0, annAdj=showA?bNum(ann.adjustment):0;
+  var sum=function(k){return pub.reduce(function(a,p){return a+p.c[k];},0);}; var cnt=function(k){return pub.reduce(function(a,p){return a+bNum(p.e[k]);},0);};
+  var ytd=sum('total')+health+annAdj, cr=BONUS.terms.cleanRate||5, pctL=BONUS.terms.revenueSharePct||1;
+  var amtS=function(n){return 'text-align:right;font-weight:600;color:'+(n<0?'#f4b942':'#e6edf6')+';';};
+  var grp=function(name,amount,foot,items){ return '<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:12px 14px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px"><span style="text-transform:uppercase;letter-spacing:.08em;font-size:11px;color:#f4633c;font-weight:700">'+name+'</span><b style="font-size:18px">'+bMoney(amount)+'</b></div>'+items.map(function(it){return '<div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:2px 0"><span class="muted">'+it.l+'</span><span style="'+amtS(it.a)+'">'+bMoney(it.a)+'</span></div>';}).join('')+'<div class="muted" style="font-size:11px;margin-top:8px">'+foot+'</div></div>'; };
+  var h='';
+  h+='<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px"><div><div class="muted" style="font-size:12px">Year-to-date incentive pay ('+BYEAR+')</div><div style="font-size:38px;font-weight:700;line-height:1">'+bMoney(ytd)+'</div></div><div><div class="muted" style="font-size:12px">Payout</div><div style="font-weight:600">Mid-December '+BYEAR+'</div></div><div><div class="muted" style="font-size:12px">Months logged</div><div style="font-weight:600">'+pub.length+' of 12</div></div></div>';
+  h+='<div style="font-size:12px;color:#7e8b9e;margin-bottom:14px">Not pro-ratable — payable mid-December. Each grouping is never reduced below $0 in a month. Tips are yours and not tracked here.</div>';
+  h+=grp('Revenue share',sum('revenue'),pctL+'% of net revenue, each month.',[{l:'Gross revenue',a:cnt('gross')},{l:'Refunds & chargebacks',a:-cnt('refunds')},{l:'Net revenue',a:cnt('gross')-cnt('refunds')+cnt('revAdj')},{l:'Your share ('+pctL+'%)',a:sum('revenue')}]);
+  h+=grp('Cleaning',sum('cleaning'),'Never below $0 in a month.',[{l:'Turnovers you cleaned ('+cnt('cleans')+' x $'+cr+')',a:cnt('cleans')*cr},{l:'Cleans we covered ('+cnt('covered')+' x -$25)',a:-cnt('covered')*25},{l:'Hired inspections ('+cnt('inspections')+' x -$5)',a:-cnt('inspections')*5}]);
+  h+=grp('Guest reviews',sum('reviews'),'Never below $0 in a month.',[{l:'Max-star reviews ('+cnt('goodReviews')+' x $5)',a:cnt('goodReviews')*5},{l:'Below-max reviews ('+cnt('badReviews')+' x -$25)',a:-cnt('badReviews')*25}]);
+  h+=grp('Sales commission',sum('sales'),'10% of minibar net income and guidebook upsells.',[{l:'Minibar net income ('+bMoney(cnt('minibar'))+' x 10%)',a:cnt('minibar')*0.1},{l:'Guidebook upsells ('+bMoney(cnt('guidebook'))+' x 10%)',a:cnt('guidebook')*0.1}]);
+  var perfCard=function(name,amt,cap,barPct,blurb){ return '<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:14px;flex:1;min-width:200px"><div style="font-weight:700">'+name+'</div><div style="font-size:26px;font-weight:700;line-height:1.1">'+bMoney(amt)+'</div><div class="muted" style="font-size:12px">'+cap+'</div><div style="height:6px;background:#1b2739;border-radius:99px;overflow:hidden;margin:6px 0"><div style="height:100%;width:'+Math.max(0,Math.min(100,barPct))+'%;background:#f4633c"></div></div><div class="muted" style="font-size:12px">'+blurb+'</div></div>'; };
+  h+='<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">';
+  h+=perfCard('AI score',sum('ai'),'of $1,000 annual cap',(sum('ai')/1000)*100,'Determined by AI from your daily grades.');
+  h+=perfCard('Self-management',sum('self'),'of $500 annual cap',(sum('self')/500)*100,'Running operations with minimal oversight.');
+  var awarded=showA&&health>0;
+  h+=perfCard('Property health',awarded?health:0,awarded?'awarded of $1,000':'Assessed at year end',(health/1000)*100,(showA&&ann.healthNote)?bEsc(ann.healthNote):'Gavin writes this up before the December payout.');
+  h+='</div>';
+  var notes=[]; pub.forEach(function(p){ var lbl=BMONTHS[p.i]+' '+BYEAR; if((p.e.note||'').trim())notes.push({l:lbl,t:p.e.note}); if((p.e.reviewNote||'').trim())notes.push({l:lbl+' reviews',t:p.e.reviewNote}); });
+  if(notes.length){ h+='<div style="margin-top:14px"><div class="muted" style="text-transform:uppercase;letter-spacing:.08em;font-size:11px;font-weight:700;margin-bottom:6px">Notes from Gavin</div>'+notes.map(function(n){return '<div style="font-size:13px;margin-bottom:4px"><span style="color:#f4633c;font-weight:700">'+bEsc(n.l)+'</span> <span>'+bEsc(n.t)+'</span></div>';}).join('')+'</div>'; }
+  el.innerHTML=h;
+}
+
+async function loadBonusOwner(){ await bLoad(); renderBonusOwner(); }
+function bOwnerSaveMonth(){ var e=bBlank(); BNUMF.forEach(function(k){ var el=document.getElementById('bo_'+k); if(el) e[k]=el.value; }); ['aiNote','reviewNote','note'].forEach(function(k){ var el=document.getElementById('bo_'+k); if(el) e[k]=el.value; }); var sn=document.getElementById('bo_selfNote'); if(sn) e.selfNote=sn.value; e.aiPct=bNum((document.getElementById('bo_aiPct')||{}).value); e.selfPct=bNum((document.getElementById('bo_selfPct')||{}).value); e.published=!!(document.getElementById('bo_published')||{}).checked; bSave({key:bKey(BYEAR,BMONTH),entry:e}).then(function(){ BONUS.data[bKey(BYEAR,BMONTH)]=e; renderBonusOwner(); }); }
+function bOwnerSaveAnnual(){ var a=bBlankA(); a.healthAmount=(document.getElementById('ba_healthAmount')||{}).value; a.adjustment=(document.getElementById('ba_adjustment')||{}).value; a.healthNote=(document.getElementById('ba_healthNote')||{}).value; a.published=!!(document.getElementById('ba_published')||{}).checked; bSave({key:bAkey(BYEAR),entry:a}).then(function(){ BONUS.data[bAkey(BYEAR)]=a; }); }
+function bOwnerSaveTerms(){ var t={revenueSharePct:bNum((document.getElementById('bt_pct')||{}).value),cleanRate:bNum((document.getElementById('bt_clean')||{}).value)}; bSave({terms:t}).then(function(){ renderBonusOwner(); }); }
+function bOwnerClear(){ if(confirm('Clear this month?')){ bSave({key:bKey(BYEAR,BMONTH),entry:null}).then(function(){ delete BONUS.data[bKey(BYEAR,BMONTH)]; renderBonusOwner(); }); } }
+function bOwnerYear(d){ BYEAR+=d; renderBonusOwner(); }
+function bOwnerMonth(i){ BMONTH=i; renderBonusOwner(); }
+function renderBonusOwner(){ var el=document.getElementById('bonusOwnerBody'); if(!el) return;
+  var e=bEntry(BYEAR,BMONTH), ann=bAnnual(BYEAR), c=bCalc(e), pctL=BONUS.terms.revenueSharePct||1, cr=BONUS.terms.cleanRate||5;
+  var inp=function(id,val,ph,type){ return '<input id="bo_'+id+'" type="'+(type||'number')+'" value="'+bEsc(val)+'" placeholder="'+(ph||'0')+'" onchange="bOwnerSaveMonth()" style="width:100%;box-sizing:border-box;background:#0e151d;border:1px solid #26354a;border-radius:6px;padding:7px 9px;color:#e6edf6">'; };
+  var lab=function(t,inner){ return '<label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#9aa7b9;margin-bottom:8px">'+t+inner+'</label>'; };
+  var fld=function(id,val){ return '<input id="'+id+'" type="number" value="'+bEsc(val)+'" onchange="bOwnerSaveAnnual()" style="width:100%;box-sizing:border-box;background:#0e151d;border:1px solid #26354a;border-radius:6px;padding:7px 9px;color:#e6edf6">'; };
+  var h='';
+  h+='<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px"><button class="ghost" onclick="bOwnerYear(-1)">&larr;</button><b style="font-size:18px">'+BYEAR+'</b><button class="ghost" onclick="bOwnerYear(1)">&rarr;</button><span class="muted" style="margin-left:auto;font-size:12px">Terms:</span><input id="bt_pct" type="number" step="0.25" value="'+pctL+'" onchange="bOwnerSaveTerms()" style="width:64px;background:#0e151d;border:1px solid #26354a;border-radius:6px;padding:5px;color:#e6edf6" title="Revenue share %"><span class="muted" style="font-size:12px">% rev</span><input id="bt_clean" type="number" value="'+cr+'" onchange="bOwnerSaveTerms()" style="width:56px;background:#0e151d;border:1px solid #26354a;border-radius:6px;padding:5px;color:#e6edf6" title="Clean rate $"><span class="muted" style="font-size:12px">$/clean</span></div>';
+  h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(82px,1fr));gap:6px;margin-bottom:14px">';
+  for(var i=0;i<12;i++){ var raw=BONUS.data[bKey(BYEAR,i)]; var tot=raw?bCalc(Object.assign(bBlank(),raw)).total:0; var on=i===BMONTH; h+='<button onclick="bOwnerMonth('+i+')" style="text-align:left;background:'+(on?'#20304a':'#0e151d')+';border:1px solid '+(on?'#f4633c':'#26354a')+';border-radius:7px;padding:7px 8px;color:#e6edf6;cursor:pointer"><div style="font-size:12px;font-weight:700">'+BMONTHS[i]+'</div><div style="font-size:10px;color:#8b98ab">'+(raw?(raw.published===false?'draft':bMoney(tot)):'&mdash;')+'</div></button>'; }
+  h+='</div>';
+  h+='<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px"><b style="font-size:16px">'+BFULL[BMONTH]+' '+BYEAR+'</b><span class="muted">Month total <b style="color:#f4633c">'+bMoney(c.total)+'</b></span></div>';
+  h+='<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px">';
+  h+='<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#f4633c;font-weight:700;margin-bottom:6px">Revenue share &middot; '+pctL+'%</div>'+lab('Gross revenue ($)',inp('gross',e.gross))+lab('Refunds / chargebacks ($)',inp('refunds',e.refunds))+lab('Other adjustments ($, +/-)',inp('revAdj',e.revAdj))+'<div class="muted" style="font-size:12px">Net '+bMoney(bNet(e))+' &rarr; credit <b>'+bMoney(c.revenue)+'</b></div></div>';
+  h+='<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#f4633c;font-weight:700;margin-bottom:6px">Cleaning</div>'+lab('Turnovers Victor cleaned (+$'+cr+' each)',inp('cleans',e.cleans))+lab('Cleans we covered (-$25 each)',inp('covered',e.covered))+lab('Hired inspections (-$5 each)',inp('inspections',e.inspections))+'<div class="muted" style="font-size:12px">Credit: <b>'+bMoney(c.cleaning)+'</b></div></div>';
+  h+='<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#f4633c;font-weight:700;margin-bottom:6px">Guest reviews</div>'+lab('5-star reviews (+$5 each)',inp('goodReviews',e.goodReviews))+lab('Below-max reviews (-$25 each)',inp('badReviews',e.badReviews))+lab('Which OTAs / notes',inp('reviewNote',e.reviewNote,'e.g. 3 Airbnb, 1 VRBO 4-star','text'))+'<div class="muted" style="font-size:12px">Credit: <b>'+bMoney(c.reviews)+'</b></div></div>';
+  h+='<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#f4633c;font-weight:700;margin-bottom:6px">Sales commission</div>'+lab('Minibar net income ($) &middot; 10%',inp('minibar',e.minibar))+lab('Guidebook upsell revenue ($) &middot; 10%',inp('guidebook',e.guidebook))+'<div class="muted" style="font-size:12px">Credit: <b>'+bMoney(c.sales)+'</b></div></div>';
+  h+='</div><div style="height:1px;background:#26354a;margin:16px 0"></div>';
+  h+='<div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#f4633c;font-weight:700;margin-bottom:8px">Monthly performance scoring</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px">';
+  h+='<div><div style="display:flex;justify-content:space-between;font-size:13px"><b>AI score</b><span class="muted">'+bNum(e.aiPct)+'% &middot; '+bMoney(c.ai)+'</span></div><input id="bo_aiPct" type="range" min="0" max="100" step="5" value="'+bNum(e.aiPct)+'" onchange="bOwnerSaveMonth()" style="width:100%;accent-color:#f4633c"><div class="muted" style="font-size:11px">up to $1,000/yr &middot; $83.33/mo</div>'+inp('aiNote',e.aiNote,'note (optional)','text')+'</div>';
+  h+='<div><div style="display:flex;justify-content:space-between;font-size:13px"><b>Self-management</b><span class="muted">'+bNum(e.selfPct)+'% &middot; '+bMoney(c.self)+'</span></div><input id="bo_selfPct" type="range" min="0" max="100" step="5" value="'+bNum(e.selfPct)+'" onchange="bOwnerSaveMonth()" style="width:100%;accent-color:#f4633c"><div class="muted" style="font-size:11px">up to $500/yr &middot; $41.67/mo</div><textarea id="bo_selfNote" onchange="bOwnerSaveMonth()" rows="2" placeholder="what drove the score - Victor sees this" style="width:100%;box-sizing:border-box;background:#0e151d;border:1px solid #26354a;border-radius:6px;padding:7px 9px;color:#e6edf6;resize:vertical">'+bEsc(e.selfNote)+'</textarea></div>';
+  h+='</div><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px"><label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#9aa7b9"><input id="bo_published" type="checkbox" onchange="bOwnerSaveMonth()" '+(e.published!==false?'checked':'')+'> Show to Victor</label><label style="display:flex;flex-direction:column;font-size:12px;color:#9aa7b9;flex:1;min-width:200px">Note for Victor'+inp('note',e.note,'e.g. great month on reviews','text')+'</label><button class="ghost" style="color:#c9736a;border-color:#3a2a2a" onclick="bOwnerClear()">Clear month</button></div>';
+  h+='<div style="height:1px;background:#26354a;margin:16px 0"></div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#d9a533;font-weight:700;margin-bottom:8px">Year-end assessment &middot; '+BYEAR+'</div><div class="muted" style="font-size:12px;margin-bottom:10px">Property health is judged once at year end (up to $1,000), not accrued monthly.</div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px">';
+  h+=lab('Property health award ($ of $1,000)',fld('ba_healthAmount',ann.healthAmount))+lab('Year-end adjustment ($, +/-)',fld('ba_adjustment',ann.adjustment))+'</div>';
+  h+=lab('Assessment note for Victor','<textarea id="ba_healthNote" onchange="bOwnerSaveAnnual()" rows="3" placeholder="whether properties improved this year, and why" style="width:100%;box-sizing:border-box;background:#0e151d;border:1px solid #26354a;border-radius:6px;padding:7px 9px;color:#e6edf6;resize:vertical">'+bEsc(ann.healthNote)+'</textarea>');
+  h+='<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#9aa7b9"><input id="ba_published" type="checkbox" onchange="bOwnerSaveAnnual()" '+(ann.published!==false?'checked':'')+'> Show year-end to Victor</label>';
+  el.innerHTML=h;
+}
+
 async function loadWeekly(){ try{ const r=await fetch(api('weekly_report')+'&week='+WEEK_OFF+'&cb='+Date.now()); const j=await r.json(); renderWeekly(j); }catch(e){} }
 function weekNav(delta){ WEEK_OFF=Math.max(0,WEEK_OFF+delta); loadWeekly(); }
 function toKindVis(){ var k=(document.getElementById('toKind')||{}).value; var w=document.getElementById('toHoursWrap'); if(w) w.style.display=(k==='hours')?'flex':'none'; }

@@ -867,6 +867,9 @@ async function getTodo(){
   return {text:"", source:"none"};
 }
 async function setTodo(text, by){ const doc={text:String(text||"").slice(0,20000), updated_at:new Date().toISOString(), updated_by:String(by||"").slice(0,40)}; try{ if(redis) await redis.set("parkside:todo", doc); }catch(e){} return doc; }
+async function getBonus(){ try{ if(redis){ const b=await redis.get("parkside:bonus"); if(b&&typeof b==="object") return b; } }catch(e){} return {}; }
+async function setBonus(o){ try{ if(redis) await redis.set("parkside:bonus", o); }catch(e){} return o; }
+function bonusTerms(o){ const t=(o&&o._terms)||{}; return { revenueSharePct:(t.revenueSharePct!=null?Number(t.revenueSharePct):1), cleanRate:(t.cleanRate!=null?Number(t.cleanRate):5) }; }
 // ===== Daily auto-grade + data-gap alert (recipients configurable in the panel / SCORE_ALERT_EMAILS) =====
 function scoreAlertRecipients(cfg){
   const raw=(cfg&&cfg.scoreAlertEmails)||process.env.SCORE_ALERT_EMAILS||"";
@@ -1914,6 +1917,21 @@ module.exports=async(req,res)=>{
     }
     // Shared to-do list. Victor-facing like cleans/refunds (panel is the access boundary); tags who edited.
     if(action==="todo_get"){ return res.status(200).json(await getTodo()); }
+    // ===== Bonus / incentive comp. bonus_get: Victor-readable (drafts hidden unless Gavin); bonus_save: Gavin-gated. =====
+    if(action==="bonus_get"){
+      const all=await getBonus(); const gv=(req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x");
+      const out={}; for(const k in all){ if(k==="_terms") continue; const e=all[k]; if(gv || !e || e.published!==false) out[k]=e; }
+      return res.status(200).json({ terms: bonusTerms(all), data: out, isGavin: gv });
+    }
+    if(action==="bonus_save"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
+      const all=await getBonus();
+      if(b.terms&&typeof b.terms==="object"){ all._terms=Object.assign({}, all._terms||{}, b.terms); }
+      if(b.key){ if(b.entry===null){ delete all[String(b.key)]; } else if(b.entry&&typeof b.entry==="object"){ all[String(b.key)]=b.entry; } }
+      await setBonus(all);
+      return res.status(200).json({ ok:true, terms: bonusTerms(all) });
+    }
     if(action==="todo_post"){
       const gv=(req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x");
       const ap=(req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__y");
