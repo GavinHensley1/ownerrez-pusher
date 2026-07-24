@@ -1212,7 +1212,7 @@ async function processGuestQuestion(req, p){
     if(_open){
       _open.ts=new Date().toISOString(); _open.lastGuestMsgAt=new Date().toISOString();
       await setApprovals(_al);
-      const vsms=await sendVictorEscalationSms(req, _open, {unit, guestName, complaint:!!_open.complaint, followup:true, newMsg:question});
+      const vsms=await sendVictorEscalationSms(req, _open, {complaint:!!_open.complaint, followup:true, newMsg:question});
       return {forwarded_to_manager:true, no_guest_reply:true, id:_open.id, victorSms:vsms, question};
     }
   }
@@ -1257,11 +1257,11 @@ async function sendVictorEscalationSms(req, item, ctx){
   const _ctx=[unit,guestName].filter(Boolean).join(" - ");
   if(ctx.followup){
     const _nm=String(ctx.newMsg||item.question||"").replace(/\s+/g," ").trim().slice(0,220);
-    const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 NEW guest message (you are already on this thread; I did NOT auto-reply):\n\""+_nm+"\"\n\nWaiting for you to respond to the guest.";
+    const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent another message:\n\""+_nm+"\"\n\nHow would you like me to respond? Reply \""+lbl+" <your answer>\" and I\u2019ll send you a suggested reply to approve \u2014 nothing goes to the guest until you reply \""+lbl+" yes\".";
     try{ return await sendSmsGateway(cfg, _ft); }catch(e){ return {sent:false, error:String(e.message||e)}; }
   }
   const _isComp=!!(ctx.complaint||item.complaint);
-  const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+(_isComp?" (COMPLAINT)":" (escalated)")+"\n"+_convo+"\n\n"+(_isComp?"I told the guest I'm sorry and a manager will follow up.":"I told the guest I'd check with a manager.")+" Reply \""+lbl+" <the answer/fact>\" and I'll draft a reply for you to approve before it goes to the guest.";
+  const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+(_isComp?" (COMPLAINT)":" (escalated)")+"\n"+_convo+"\n\n"+(_isComp?"I told the guest I'm sorry and a manager will follow up.":"I told the guest I'd check with a manager.")+" How would you like me to respond? Reply \""+lbl+" <your answer>\" and I\u2019ll send you a suggested reply to approve \u2014 nothing goes to the guest until you reply \""+lbl+" yes\".";
   try{ return await sendSmsGateway(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 
