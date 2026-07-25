@@ -28,6 +28,10 @@
   .day.pin{border-color:var(--pin);background:#1b1430} .day .pinmark{position:absolute;top:4px;right:5px;font-size:11px}
   .day.out{opacity:.28;border:1px dashed var(--line);cursor:default;background:transparent} .day.out .p{color:var(--muted)} .day.booked{background:#1a2230;border-style:dashed;border-color:var(--book);opacity:.8} .day.booked .p{color:var(--book)} .day .bk{position:absolute;top:4px;left:5px;font-size:9px;color:var(--book);text-transform:uppercase;letter-spacing:.05em} .day.gap{border-color:#d4a64a} .day.gap .p{color:#e6b85c} .day .gapmark{position:absolute;top:4px;left:5px;font-size:9px;color:#d4a64a;text-transform:uppercase;letter-spacing:.03em} @keyframes pf{0%{background:rgba(96,165,250,.30)}100%{background:transparent}} table.flash td{animation:pf .7s ease-out}
   .toggle{display:inline-flex;align-items:center;gap:8px}
+  .scdot{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin-right:4px}
+  .scday{aspect-ratio:1/1;background:#0c141d;border:1px solid var(--line);border-radius:7px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;font-size:12px;color:var(--mut)}
+  .scday:hover{border-color:var(--accent)} .scday.has{color:var(--ink)} .scday.sel{background:var(--accent);color:#fff;border-color:var(--accent)} .scday.empty{background:transparent;border:0;cursor:default}
+  .scday .dot{width:6px;height:6px;border-radius:50%}
   .switch{width:46px;height:26px;border-radius:999px;background:#3a4759;position:relative;transition:.15s;cursor:pointer}
   .switch.on{background:var(--ok)} .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:.15s}
   .switch.on .knob{left:23px}
@@ -346,6 +350,23 @@
         <span style="flex:1"></span>
         <label class="muted" style="font-size:12px"><input type="checkbox" id="monAuto" checked onchange="monAutoToggle()"> auto-refresh</label>
         <button class="ghost" onclick="loadMonitor()">Refresh</button>
+      </div>
+    </div>
+    <div class="card" id="scoredDaysCard">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px">
+        <h2 style="margin:0">🗓 Scored days <span class="muted" style="font-weight:400;text-transform:none">— click a day to review/grade it; navigate month to month</span></h2>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="seg-x" onclick="monCalStep(-1)" style="padding:2px 11px;cursor:pointer">‹</span>
+          <b id="monCalLabel" style="min-width:130px;text-align:center">…</b>
+          <span class="seg-x" onclick="monCalStep(1)" style="padding:2px 11px;cursor:pointer">›</span>
+        </div>
+      </div>
+      <div class="cal" id="monCalDow" style="margin-bottom:4px"></div>
+      <div class="cal" id="monCalGrid"></div>
+      <div class="legend" style="display:flex;gap:16px;margin-top:12px;flex-wrap:wrap">
+        <span><span class="scdot" style="background:#2ecc71"></span>graded</span>
+        <span><span class="scdot" style="background:#f4b942"></span>has data · needs review</span>
+        <span><span class="scdot" style="background:#2b3b52"></span>no data</span>
       </div>
     </div>
     <div class="card" style="padding:0;overflow:hidden">
@@ -1026,7 +1047,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); initMonCal(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1036,7 +1057,7 @@ async function populateDays(){ try{ const dev=(document.getElementById('monDevic
   const sel=document.getElementById('monDate'); if(!sel) return; const days=j.days||[];
   sel.innerHTML='<option value="">Today (live)</option>'+days.map(function(d){return '<option value="'+d+'">'+d+'</option>';}).join('');
 }catch(e){} }
-async function onDeviceChange(){ await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); }
+async function onDeviceChange(){ await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); await monCalLoadSets(); renderMonCal(); }
 function onDateChange(){ const d=(document.getElementById('monDate')||{}).value; const auto=document.getElementById('monAuto');
   if(d){ if(auto){auto.checked=false; auto.disabled=true;} if(MON_TIMER){clearInterval(MON_TIMER); MON_TIMER=null;} }
   else { if(auto){auto.disabled=false;} monAutoToggle(); } loadMonitor(); loadScorecard(); loadWebActivity(); }
@@ -1090,7 +1111,7 @@ async function runScore(){ const date=(document.getElementById('monDate')||{}).v
 async function saveGrade(){ const date=(document.getElementById('monDate')||{}).value||''; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const st=document.getElementById('gradeStatus'); if(st) st.textContent='Saving…';
   const val=(document.getElementById('gradeVal')||{}).value; const note=(document.getElementById('gradeNote')||{}).value||'';
   try{ const r=await fetch(api('grade_set')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):''),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({grade:val,note})}); const j=await r.json();
-    if(j&&j.ok){ if(st) st.textContent='Saved ✓'; const gp=document.getElementById('gradeProgress'); if(gp){ const c=j.graded_count||0; gp.textContent=c+' day'+(c===1?'':'s')+' graded'+(c<10?(' — grade ~'+(10-c)+' more to calibrate'):' — calibrated to your standard'); } }
+    if(j&&j.ok){ if(st) st.textContent='Saved ✓'; if(SC_GRADED&&j.date){SC_GRADED.add(j.date);} renderMonCal(); const gp=document.getElementById('gradeProgress'); if(gp){ const c=j.graded_count||0; gp.textContent=c+' day'+(c===1?'':'s')+' graded'+(c<10?(' — grade ~'+(10-c)+' more to calibrate'):' — calibrated to your standard'); } }
     else { if(st) st.textContent=(j&&j.error)||'Save failed'; }
   }catch(e){ if(st) st.textContent='Error: '+e.message; } }
 async function loadConn(){ if(!GPW) return; const st=document.getElementById('connStatus'); if(st) st.textContent='Checking\u2026'; try{ const r=await fetch(api('conn_check')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(st) st.textContent=''; renderConn(j); }catch(e){ if(st) st.textContent='error'; } }
@@ -1614,4 +1635,42 @@ async function loadRefunds(){
 async function refundsPost(payload){ try{ const r=await fetch(api('refunds_post'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); if(r.ok){ await loadRefunds(); return true; } }catch(e){} return false; }
 async function addRefund(){ const amt=(document.getElementById('refundAmt')||{}).value||''; const desc=(document.getElementById('refundDesc')||{}).value||''; if(!amt && !desc.trim()){ alert('Enter an amount or a description.'); return; } await refundsPost({op:'add', amount:amt, desc}); const a=document.getElementById('refundAmt'); if(a) a.value=''; const d=document.getElementById('refundDesc'); if(d) d.value=''; }
 async function delRefund(id){ if(!confirm('Delete this refund entry?')) return; await refundsPost({op:'delete', id}); }
+
+/* ===== Scored-days calendar (month-to-month) ===== */
+var MONCAL_Y, MONCAL_M, SC_GRADED=null, SC_DATA=null;
+function _scpad(n){return n<10?'0'+n:''+n;}
+async function monCalLoadSets(){ if(!GPW) return;
+  try{ var dev=(document.getElementById('monDevice')||{}).value||'victor';
+    var res=await Promise.all([
+      fetch(api('grades_list')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}).then(function(r){return r.json();}).catch(function(){return {dates:[]};}),
+      fetch(api('gps_days')+'&id='+encodeURIComponent(dev)+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}).then(function(r){return r.json();}).catch(function(){return {days:[]};})
+    ]);
+    SC_GRADED=new Set(res[0].dates||[]); SC_DATA=new Set(res[1].days||[]);
+  }catch(e){ SC_GRADED=SC_GRADED||new Set(); SC_DATA=SC_DATA||new Set(); }
+}
+function initMonCal(){ var now=new Date(); MONCAL_Y=now.getFullYear(); MONCAL_M=now.getMonth(); monCalLoadSets().then(renderMonCal); }
+function monCalStep(d){ if(MONCAL_Y==null){ initMonCal(); return; } var m=MONCAL_M+d, y=MONCAL_Y; while(m<0){m+=12;y--;} while(m>11){m-=12;y++;} MONCAL_Y=y; MONCAL_M=m; renderMonCal(); }
+function renderMonCal(){ var grid=document.getElementById('monCalGrid'); if(!grid||MONCAL_Y==null) return;
+  var lab=document.getElementById('monCalLabel'); if(lab) lab.textContent=BFULL[MONCAL_M]+' '+MONCAL_Y;
+  var dow=document.getElementById('monCalDow'); if(dow) dow.innerHTML=['S','M','T','W','T','F','S'].map(function(x){return '<div class="dow">'+x+'</div>';}).join('');
+  var sel=(document.getElementById('monDate')||{}).value||'';
+  var first=new Date(MONCAL_Y,MONCAL_M,1).getDay();
+  var dim=new Date(MONCAL_Y,MONCAL_M+1,0).getDate();
+  var h='';
+  for(var i=0;i<first;i++) h+='<div class="scday empty"></div>';
+  for(var d=1;d<=dim;d++){ var key=MONCAL_Y+'-'+_scpad(MONCAL_M+1)+'-'+_scpad(d);
+    var graded=!!(SC_GRADED&&SC_GRADED.has(key)); var hasData=!!(SC_DATA&&SC_DATA.has(key)); var isSel=key===sel;
+    var dot=graded?'#2ecc71':(hasData?'#f4b942':'#2b3b52');
+    var cls='scday'+((graded||hasData)?' has':'')+(isSel?' sel':'');
+    h+='<div class="'+cls+'" onclick="monCalPick(\''+key+'\')"><span>'+d+'</span><span class="dot" style="background:'+(isSel?'#fff':dot)+'"></span></div>';
+  }
+  grid.innerHTML=h;
+}
+function monCalPick(key){ var sel=document.getElementById('monDate');
+  if(sel){ var found=false; for(var i=0;i<sel.options.length;i++){ if(sel.options[i].value===key){found=true;break;} }
+    if(!found){ var o=document.createElement('option'); o.value=key; o.textContent=key; sel.appendChild(o); }
+    sel.value=key; }
+  if(typeof onDateChange==='function') onDateChange();
+  renderMonCal();
+}
 </script></body></html>
