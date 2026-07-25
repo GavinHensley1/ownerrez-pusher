@@ -100,8 +100,10 @@
   #gvDayGrid{display:grid;grid-template-columns:268px minmax(0,1fr);gap:20px;align-items:start}
   #gvside{position:sticky;top:56px;display:flex;flex-direction:column;gap:12px;min-width:0}
   #gvmain{display:flex;flex-direction:column;gap:16px;min-width:0}
-  #gvDetail{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;align-items:start}
+  /* item 3: Location (left) narrower, Admin time (right) wider, per Gavin's sketch. item 6: stretch so both columns are equal height and their last card fills to line the bottoms up flush. */
+  #gvDetail{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:16px;align-items:stretch}
   .gv-col{display:flex;flex-direction:column;gap:16px;min-width:0}
+  #gvDetail > .gv-col > :last-child{flex:1 1 auto}
   #gvside .cal{gap:3px} #scoredDaysCard .scday{aspect-ratio:1/1;font-size:10px}
   #gvConn>.card,#gvIntegrity>.card,#gvPricing>.card{margin-bottom:16px}
   /* item C2: stop the Connections tab from scrolling sideways past its content */
@@ -449,7 +451,9 @@
           <span style="width:7px;height:7px;border-radius:50%;display:block;background:#34d399"></span> Auto-grade on</div>
         <span style="font-size:11.5px;color:#64758d">Engine drafts a grade; you confirm below.</span>
         <span style="flex:1"></span>
-        <button class="ghost" onclick="loadScorecard();loadWebActivity();loadCalls();loadMonitor()" style="padding:5px 11px;font-size:12px">Hide this day</button>
+        <!-- item 8: real per-day hide toggle (persists to backend; hides the day's grade from Victor). -->
+        <button id="gvHideBtn" class="ghost" onclick="gvHideDay()" style="padding:5px 11px;font-size:12px">Hide this day</button>
+        <span id="gvHideStatus" class="muted" style="font-size:11px"></span>
       </div>
 
       <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px;padding:18px 20px">
@@ -463,8 +467,8 @@
           </div>
           <div style="flex:1"></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Hours worked</div><div id="stHours" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#e6ecf5">&mdash;</div></div>
-            <!-- item 6: on-location time (hours), sits right next to Hours worked -->
+            <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Admin Time</div><div id="stHours" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#e6ecf5">&mdash;</div></div>
+            <!-- item 6: on-location time (hours), sits right next to Admin Time -->
             <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Location time</div><div id="stLocHours" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#e6ecf5">&mdash;</div></div>
             <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Computer active</div><div id="stActive" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;">&mdash;</div></div>
             <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">On-site</div><div id="stOnsite" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#e6ecf5">&mdash;</div></div>
@@ -525,7 +529,7 @@
             </div>
             <div id="webActSummary" class="legend" style="margin-bottom:12px">&hellip;</div>
             <!-- item 10: sized to match the Location map box (320px) so the two boxes read as equal. -->
-            <div id="webActList" style="height:320px;overflow-y:auto"></div>
+            <div id="webActList" style="height:320px;overflow-y:auto;overscroll-behavior:contain"></div>
           </div>
 
           <!-- item 11: "What Victor said he did" self-report removed (redundant with the transcript). item 14: transcript in a fixed-height internal scroll box. Hidden scReport/scStatus retained as state holders so existing scoring JS keeps working. -->
@@ -535,7 +539,7 @@
               <span style="flex:1"></span><span id="callsStatus" class="muted" style="font-size:11px"></span>
             </div>
             <textarea id="scReport" style="display:none"></textarea><span id="scStatus" style="display:none"></span>
-            <div id="callsList" class="legend" style="height:320px;overflow-y:auto;padding-right:4px">&hellip;</div>
+            <div id="callsList" class="legend" style="height:320px;overflow-y:auto;overscroll-behavior:contain;padding-right:4px">&hellip;</div>
           </div>
 
         </div>
@@ -1254,6 +1258,15 @@ function gvAutoGrade(){ var c=document.getElementById('gvAutoChip'); if(!c) retu
   try{ localStorage.setItem('orp_autoGradeOff', on?'0':'1'); }catch(e){}
 }
 function gvAutoGradeInit(){ var off='0'; try{ off=localStorage.getItem('orp_autoGradeOff')||'0'; }catch(e){} gvApplyAutoGrade(off!=='1'); }
+// item 8: per-day "Hide this day" — persists to the backend (survives reload) and removes the day's grade
+// from Victor's month snippet. Uses the selected date, or today (ET) when viewing the live day.
+function gvEffDate(){ var d=(document.getElementById('monDate')||{}).value||''; if(d) return d; try{ return new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'}); }catch(e){ return new Date().toISOString().slice(0,10); } }
+function gvApplyHideBtn(hidden){ var b=document.getElementById('gvHideBtn'); if(!b) return; b.dataset.hidden=hidden?'1':'0';
+  if(hidden){ b.textContent='Hidden from Victor'; b.style.background='#2a2418'; b.style.borderColor='#45391f'; b.style.color='#e8c37a'; }
+  else { b.textContent='Hide this day'; b.style.background=''; b.style.borderColor=''; b.style.color=''; } }
+async function loadDayHide(){ if(!GPW) return; try{ var d=gvEffDate(); var r=await fetch(api('day_hide')+'&date='+encodeURIComponent(d)+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json(); gvApplyHideBtn(!!(j&&j.hidden)); }catch(e){} }
+async function gvHideDay(){ if(!GPW) return; var b=document.getElementById('gvHideBtn'); var cur=!!(b&&b.dataset.hidden==='1'); var want=!cur; var d=gvEffDate(); var st=document.getElementById('gvHideStatus'); if(st) st.textContent='Saving\u2026';
+  try{ var r=await fetch(api('day_hide'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({date:d,hidden:want})}); var j=await r.json(); if(j&&j.ok){ gvApplyHideBtn(!!j.hidden); if(st) st.textContent=(j.hidden?'Hidden from Victor \u00b7 ':'Visible \u00b7 ')+d; } else if(st) st.textContent='failed'; }catch(e){ if(st) st.textContent='error'; } }
 async function populateDays(){ try{ const dev=(document.getElementById('monDevice')||{}).value||'victor';
   const r=await fetch(api('gps_days')+'&id='+encodeURIComponent(dev)+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
   const sel=document.getElementById('monDate'); if(!sel) return; const days=j.days||[];
@@ -1297,7 +1310,15 @@ async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementB
       var eng = (engRaw!=null&&isFinite(engRaw)) ? Math.round(engRaw) : null;
       var engCol = eng==null?'#7f8fa6':(eng>=75?'#34d399':eng>=45?'#fbbf24':'#f87171');
       setT('stHours',hoursV,'#e6ecf5'); setT('stLocHours',locHoursV,'#e6ecf5'); setT('stActive',actV,actCol); setT('stOnsite',onsiteV,'#e6ecf5');
-      setT('stCleanings',gvCleaningCountForSel(),'#fbbf24'); setT('stGrade',gr==null?'\u2014':(''+gr),grCol); setT('stEngGrade',eng==null?'\u2014':(''+eng),engCol);
+      // item 2: don't grade a weekend day (Fri/Sat) that hasn't happened yet. Past weekend days grade normally;
+      // today or a future Fri/Sat shows "—" for both grade cards (weekdays are unaffected).
+      var _sel=(document.getElementById('monDate')||{}).value||'';
+      var _todayET; try{ _todayET=new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'}); }catch(e){ _todayET=new Date().toISOString().slice(0,10); }
+      var _effD=_sel||_todayET; var _dow=-1; try{ _dow=new Date(_effD+'T12:00:00').getDay(); }catch(e){}
+      var _passed=_sel?(_sel<_todayET):false; var _wkndPending=((_dow===5)||(_dow===6))&&!_passed;
+      setT('stCleanings',gvCleaningCountForSel(),'#fbbf24');
+      setT('stGrade', _wkndPending?'\u2014':(gr==null?'\u2014':(''+gr)), _wkndPending?'#7f8fa6':grCol);
+      setT('stEngGrade', _wkndPending?'\u2014':(eng==null?'\u2014':(''+eng)), _wkndPending?'#7f8fa6':engCol);
       var date=(document.getElementById('monDate')||{}).value||'';
       var isToday=!date;
       var dstr = date || (new Date()).toISOString().slice(0,10);
@@ -1319,6 +1340,7 @@ async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementB
     const gv=document.getElementById('gradeVal'); if(gv && document.activeElement!==gv) gv.value=(j.grade&&j.grade.grade!=null)?j.grade.grade:'';
     const gn=document.getElementById('gradeNote'); if(gn && document.activeElement!==gn) gn.value=(j.grade&&j.grade.note)||'';
     const gp=document.getElementById('gradeProgress'); if(gp){ const c=j.graded_count||0; gp.textContent=c+' day'+(c===1?'':'s')+' graded'+(c<10?(' — grade ~'+(10-c)+' more to calibrate the auto-grader'):' — auto-grader is calibrated to your standard'); }
+    loadDayHide();
   }catch(e){ const el=document.getElementById('scHours'); if(el) el.textContent='Error: '+e.message; }
 }
 async function loadWebActivity(){ if(!GPW) return;
@@ -1420,17 +1442,46 @@ function renderMonitor(j){ if(!MON_MAP) initMonMap(); MON_LAYERS.clearLayers();
     L.circleMarker([last.lat,last.lon],{radius:8,color:'#fff',fillColor:c,fillOpacity:1,weight:2}).addTo(MON_LAYERS).bindPopup('LATEST · '+(last.zone||'off')+' · '+fmtWhen(last.t)).openPopup(); MON_MAP.panTo([last.lat,last.lon]); }
   else if(j.lastSeen&&isFinite(j.lastSeen.lat)){ const ls=j.lastSeen; const c=ZONE_COLORS[ls.zone||'off']||'#94a3b8';
     L.circleMarker([ls.lat,ls.lon],{radius:7,color:'#fbbf24',fillColor:c,fillOpacity:0.55,weight:2,dashArray:'3 3'}).addTo(MON_LAYERS).bindPopup('LAST SEEN (not today) · '+(ls.zone||'off')+' · '+fmtWhen(ls.t)).openPopup(); MON_MAP.panTo([ls.lat,ls.lon]); }
-  const zoneNow=j.zone||(last&&last.zone)||null;
-  if(j.date){ document.getElementById('monNow').innerHTML = last ? ('<b>Last point:</b> <b style="color:'+(ZONE_COLORS[zoneNow]||'#94a3b8')+'">'+(zoneNow||'off')+'</b> at '+fmtWhen(last.t)) : ('<b>'+j.date+'</b> — no points that day.'); }
+  // item 1: show ONLY the last point TIME (no zone name, no step/point counts), directly beneath the
+  // Victor device selector. Live view keeps a small freshness dot; the zone still lives on the map markers.
+  if(j.date){ document.getElementById('monNow').innerHTML = last ? ('<b>Last point</b> '+fmtWhen(last.t)) : ('<b>'+j.date+'</b> — no points that day.'); }
   else {
     if(last){ var _ag=(Date.now()-new Date(last.t).getTime())/1000; var _fresh=_ag<900; var _dot=_fresh?'#4ade80':'#fbbf24';
-      document.getElementById('monNow').innerHTML = '<b style="color:'+_dot+'">\u25cf</b> Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#94a3b8')+'">'+(zoneNow||'off')+'</b> · updated '+agoStr(last.t)+(_fresh?'':' <span style="color:#fbbf24">(stale — phone may not be reporting)</span>'); }
-    else if(j.lastSeen){ document.getElementById('monNow').innerHTML = '<b style="color:#f87171">\u25cf</b> <b style="color:#fbbf24">No GPS yet today.</b> Last seen '+agoStr(j.lastSeen.t)+' — <b>'+((j.lastSeen.zone)||'off')+'</b> · '+fmtWhen(j.lastSeen.t); }
+      document.getElementById('monNow').innerHTML = '<b style="color:'+_dot+'">\u25cf</b> <b>Last point</b> '+fmtWhen(last.t)+(_fresh?'':' <span style="color:#fbbf24">(stale)</span>'); }
+    else if(j.lastSeen){ document.getElementById('monNow').innerHTML = '<b style="color:#f87171">\u25cf</b> <b>Last point</b> '+fmtWhen(j.lastSeen.t); }
     else { document.getElementById('monNow').innerHTML = 'No pings yet for this device.'; }
   }
-  const by=j.trailByZone||{}; const order=['office','tepees','maintenance','resort','off']; let h='';
-  for(const z of order){ if(by[z]) h+='<span class="pill" style="background:'+(ZONE_COLORS[z]||'#333')+';color:#0b1220;margin-right:8px">'+z+': '+by[z]+'</span>'; }
-  document.getElementById('monZones').innerHTML = h||'<span class="muted">No recent points.</span>';
+  // item 4: lay the zone "pings" out in a clean, aligned grid (uniform chips, colored dot + zone + minutes)
+  // instead of ragged wrapping pills. Every zone always occupies a cell so they line up; zones with no
+  // minutes render dimmed. This is the aligned grid Gavin asked for ("they are all over the place now").
+  const by=j.trailByZone||{}; const order=['office','tepees','maintenance','resort','off'];
+  const anyData=order.some(function(z){ return by[z]!=null; });
+  let cells='';
+  for(const z of order){ const has=(by[z]!=null); const col=ZONE_COLORS[z]||'#94a3b8';
+    cells+='<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #223047;border-radius:8px;background:#0d1523'+(has?'':';opacity:.4')+'">'
+      +'<span style="width:9px;height:9px;border-radius:50%;flex:none;background:'+col+'"></span>'
+      +'<span style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;letter-spacing:.02em;color:#cbd5e5">'+z+'</span>'
+      +'<span style="flex:1"></span>'
+      +'<span style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;color:#8a9bb2">'+(has?(by[z]+'m'):'—')+'</span></div>';
+  }
+  document.getElementById('monZones').innerHTML = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px">'+cells+'</div>'+(anyData?'':'<div class="muted" style="font-size:11px;margin-top:8px">No recent points.</div>');
+  // item 7: populate the "Day timeline" fine-line from the day's GPS trail (was dead — never filled).
+  try{ renderTimeline(j); }catch(e){}
+}
+// item 7: build the 7 AM–7 PM hourly zone bar from the trail points. Each hour slot is coloured by the
+// zone with the most points that hour; empty slots keep the striped placeholder. Graceful no-op if no trail.
+function renderTimeline(j){ var el=document.getElementById('gvTimeline'); if(!el) return;
+  var trail=(j&&j.trail)||[];
+  if(!trail.length){ el.innerHTML=''; return; }
+  var slots=[]; for(var s=0;s<12;s++) slots.push({});
+  trail.forEach(function(p){ if(!p||!p.t) return; var d=new Date(p.t); if(isNaN(d)) return; var hr=d.getHours(); if(hr<7||hr>=19) return; var zn=p.zone||'off'; var sl=slots[hr-7]; sl[zn]=(sl[zn]||0)+1; });
+  var html='';
+  for(var i=0;i<12;i++){ var sc=slots[i]; var best=null,bc=0; for(var k in sc){ if(sc[k]>bc){bc=sc[k];best=k;} }
+    var col=best?(ZONE_COLORS[best]||'#94a3b8'):'transparent';
+    var lbl=(7+i)+':00 '+(best||'no data');
+    html+='<div title="'+lbl+'" style="flex:1;height:100%;background:'+col+';border-right:1px solid rgba(9,15,24,.5)"></div>';
+  }
+  el.innerHTML=html;
 }
 function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function renderMessaging(){ KB=JSON.parse(JSON.stringify(STATE.kb||{format:"",items:[]})); document.getElementById('kbFormat').value=KB.format||""; drawKb(); setMsgUI();

@@ -2015,6 +2015,25 @@ if(action==="email_recipients"){
       if(Object.prototype.hasOwnProperty.call(b,"hidden")){ const hid=!!b.hidden; try{ if(redis){ if(hid) await redis.set("parkside:weekly_hidden","1"); else await redis.del("parkside:weekly_hidden"); } }catch(e){} return res.status(200).json({ok:true, hidden:hid}); }
       let hid=false; try{ if(redis) hid=!!(await redis.get("parkside:weekly_hidden")); }catch(e){} return res.status(200).json({hidden:hid});
     }
+    // item 8: per-day hide (Gavin-gated). Persists a JSON list of hidden dates so "Hide this day" survives reload.
+    // POST {date,hidden} toggles; GET ?date=YYYY-MM-DD -> {hidden}; GET (no date) -> {dates:[...]}.
+    if(action==="day_hide"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
+      const _qd=String((req.query&&req.query.date)||b.date||"").slice(0,10);
+      let _set=[]; try{ if(redis){ const raw=await redis.get("parkside:day_hidden"); _set=Array.isArray(raw)?raw:(raw?JSON.parse(raw):[]); } }catch(e){ _set=[]; }
+      if(!Array.isArray(_set)) _set=[];
+      if(req.method==="POST" && Object.prototype.hasOwnProperty.call(b,"hidden")){
+        if(!/^\d{4}-\d{2}-\d{2}$/.test(_qd)) return res.status(400).json({error:"date required (YYYY-MM-DD)"});
+        const hid=!!b.hidden;
+        _set=_set.filter(function(d){return d!==_qd;});
+        if(hid) _set.push(_qd);
+        try{ if(redis) await redis.set("parkside:day_hidden", JSON.stringify(_set)); }catch(e){ return res.status(500).json({error:"db error"}); }
+        return res.status(200).json({ok:true, date:_qd, hidden:hid});
+      }
+      if(_qd) return res.status(200).json({date:_qd, hidden:_set.indexOf(_qd)!==-1, dates:_set});
+      return res.status(200).json({dates:_set});
+    }
     // Victor time-off log. app-gated (Victor) or Gavin. GET=list; POST add {date,kind:day|hours,hours,note}; POST del {id,del:1}.
     if(action==="timeoff_list"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
@@ -2055,6 +2074,11 @@ if(action==="email_recipients"){
       let dates=[]; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); dates=(z||[]).filter(function(d){ return d>=first && d<=last; }); } }catch(e){}
       const graded=[]; for(const d of dates){ try{ const g=await redis.get("parkside:grade:"+d); if(g&&g.grade!=null) graded.push({date:d, grade:Number(g.grade), note:String(g.note||"")}); }catch(e){} }
       graded.sort(function(a,b){ return String(a.date).localeCompare(String(b.date)); });
+      // item 8: days Gavin hid are removed from VICTOR's month snippet (Gavin still sees them in his own view).
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")){
+        let _hid=[]; try{ if(redis){ const _raw=await redis.get("parkside:day_hidden"); _hid=Array.isArray(_raw)?_raw:(_raw?JSON.parse(_raw):[]); } }catch(e){ _hid=[]; }
+        if(Array.isArray(_hid)&&_hid.length){ for(let _i=graded.length-1;_i>=0;_i--){ if(_hid.indexOf(graded[_i].date)!==-1) graded.splice(_i,1); } }
+      }
       const count=graded.length;
       const average=count?Math.round(graded.reduce(function(s,x){return s+x.grade;},0)/count):null;
       const fmt=function(x){ return x.date+" — "+x.grade+"/100"+(x.note?(" ("+x.note+")"):""); };
