@@ -808,6 +808,7 @@ async function runVictorVerifyReminder(nowIso){
   // Dedup: one reminder per day max.
   const dk="parkside:verify_reminder_sent:"+date;
   try{ if(redis){ const already=await redis.get(dk); if(already) return {sent:false, skipped:"already reminded today", date, at:already}; } }catch(e){}
+  const _ef=await getEmailFlags(); if(_ef.verifyReminder===false){ console.log("[email_flags] verify reminder suppressed for "+date); return {sent:false, skipped:"verify-reminder email turned off (email_flags.verifyReminder=false)", date}; }
   const r=await sendVictorVerifyReminderEmail();
   try{ if(redis) await redis.set(dk, new Date().toISOString()); }catch(e){}
   return {sent:!!(r&&r.sent===true), date, weekday:wd, email:r};
@@ -882,6 +883,11 @@ function scoreAlertRecipients(cfg){
 let _memER=null;
 async function getEmailRecipients(){ try{ return (redis?(await redis.get("parkside:email_recipients")):_memER)||{}; }catch(e){ return {}; } }
 async function setEmailRecipients(o){ if(redis) await redis.set("parkside:email_recipients",o); else _memER=o; return o; }
+// ===== Master on/off flags for each automatic (non-guest) system email. DEFAULT TRUE so behavior is unchanged unless toggled off. =====
+let _memEF=null;
+const EMAIL_FLAG_DEFAULTS={gapAlert:true, monthlyReport:true, verifyReminder:true};
+async function getEmailFlags(){ try{ const f=redis?(await redis.get("parkside:email_flags")):_memEF; if(f&&typeof f==="object") return Object.assign({}, EMAIL_FLAG_DEFAULTS, f); }catch(e){} return Object.assign({}, EMAIL_FLAG_DEFAULTS); }
+async function setEmailFlags(o){ o=o||{}; const clean={ gapAlert:(o.gapAlert!==false), monthlyReport:(o.monthlyReport!==false), verifyReminder:(o.verifyReminder!==false) }; try{ if(redis) await redis.set("parkside:email_flags", clean); else _memEF=clean; }catch(e){} return clean; }
 const EMAIL_CATALOG=[
   {key:"gap_alert", name:"Daily data-gap alert", desc:"When the engine can't fully grade a day (missing WebWork, GPS, or Victor's report)."},
   {key:"monthly", name:"Monthly work report", desc:"Full month summary of Victor's grades, emailed on the 1st."},
@@ -930,7 +936,7 @@ async function runDailyScore(nowIso){
   if(!hours.available && !(screen&&screen.available)) gaps.push("WebWork data (hours + screen activity) — desktop app may not be running");
   if(!zones || zones.points===0) gaps.push("GPS location data — tracking may be off");
   let result;
-  if(gaps.length){ const email=await sendScoreGapEmail(date, gaps, cfg); result={date, graded:false, gaps, email}; }
+  if(gaps.length){ const _ef=await getEmailFlags(); let email; if(_ef.gapAlert===false){ console.log("[email_flags] gap alert suppressed for "+date); email={sent:false, skipped:"gap-alert email turned off (email_flags.gapAlert=false)"}; } else { email=await sendScoreGapEmail(date, gaps, cfg); } result={date, graded:false, gaps, email}; }
   else { const out=await scoreDay(date, device); result={date, graded:!out.error, score:out, gaps:[]}; }
   try{ if(redis) await redis.set(dk, new Date().toISOString()); }catch(e){}
   return result;
@@ -1020,6 +1026,7 @@ async function runMonthlyReportIfDue(nowIso){
   const d=new Date(today+"T12:00:00Z"); d.setUTCDate(0); const prev=d.toISOString().slice(0,7);
   const dk="parkside:monthly_sent:"+prev;
   try{ if(redis){ const done=await redis.get(dk); if(done) return {skipped:"already sent", prev, at:done}; } }catch(e){}
+  const _ef=await getEmailFlags(); if(_ef.monthlyReport===false){ console.log("[email_flags] monthly report suppressed for "+prev); return {skipped:"monthly-report email turned off (email_flags.monthlyReport=false)", prev}; }
   const r=await sendMonthlyReport(prev, null);
   try{ if(redis) await redis.set(dk, new Date().toISOString()); }catch(e){}
   return {month:prev, email:r};
@@ -1995,6 +2002,12 @@ if(action==="email_recipients"){
     const _out=EMAIL_CATALOG.map(it=>({key:it.key,name:it.name,desc:it.desc,to:(_er[it.key]&&_er[it.key].to)||"",victor:!!(_er[it.key]&&_er[it.key].victor),enabled:!(_er[it.key]&&_er[it.key].enabled===false),effective:resolveRecipients(_er,it.key,_cfg)}));
     return res.status(200).json({victorEmail:_cfg.to, emails:_out});
   }
+  // Master on/off flags for each automatic system email. Gavin-gated. GET returns flags; POST {flags:{...}} saves. Defaults all TRUE.
+  if(action==="email_flags"){
+    if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(403).json({error:"gavin only"});
+    if(req.method==="POST"){ let _b=req.body; if(typeof _b==="string"){ try{ _b=JSON.parse(_b);}catch(e){ _b={}; } } _b=_b||{}; const _src=(_b&&_b.flags&&typeof _b.flags==="object")?_b.flags:_b; const _saved=await setEmailFlags(_src); return res.status(200).json({ok:true, flags:_saved}); }
+    return res.status(200).json({flags:await getEmailFlags()});
+  }
   if(action==="weekly_hide"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
@@ -2031,6 +2044,30 @@ if(action==="email_recipients"){
       const month=String((req.query&&req.query.month)||"")||etDate(new Date().toISOString()).slice(0,7);
       if((req.query&&req.query.send)==="1"){ return res.status(200).json(await sendMonthlyReport(month, null)); }
       return res.status(200).json(await buildMonthlyReport(month));
+    }
+    // Month summary: average grade + good/bad lists + optional AI prose. Gavin-gated. ?month=YYYY-MM (default current).
+    if(action==="score_summary"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const month=String((req.query&&req.query.month)||"")||etDate(new Date().toISOString()).slice(0,7);
+      const first=month+"-01", last=monthLastDay(month);
+      let dates=[]; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); dates=(z||[]).filter(function(d){ return d>=first && d<=last; }); } }catch(e){}
+      const graded=[]; for(const d of dates){ try{ const g=await redis.get("parkside:grade:"+d); if(g&&g.grade!=null) graded.push({date:d, grade:Number(g.grade), note:String(g.note||"")}); }catch(e){} }
+      graded.sort(function(a,b){ return String(a.date).localeCompare(String(b.date)); });
+      const count=graded.length;
+      const average=count?Math.round(graded.reduce(function(s,x){return s+x.grade;},0)/count):null;
+      const fmt=function(x){ return x.date+" — "+x.grade+"/100"+(x.note?(" ("+x.note+")"):""); };
+      const good=graded.filter(function(x){return x.grade>=80;}).map(fmt);
+      const bad=graded.filter(function(x){return x.grade<60;}).map(fmt);
+      let summary="";
+      const key=process.env.ANTHROPIC_API_KEY;
+      if(key && count){
+        const lines=graded.map(function(x){ return x.date+": "+x.grade+"/100"+(x.note?(" — "+x.note):""); }).join("\n");
+        const sys="You summarize a maintenance/operations worker's month at a glamping resort using the owner's daily grades (0-100) and notes. Write 3-5 short sentences: what went well this month, and what to work on / improve next month. Honest, specific, constructive. Plain prose paragraph, no lists, no JSON.";
+        try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0.3,system:sys,messages:[{role:"user",content:"Month "+month+". Average grade: "+(average!=null?(average+"/100"):"n/a")+" across "+count+" graded day(s).\nDaily grades:\n"+lines}]})});
+          const j=await r.json(); if(r.ok) summary=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
+        }catch(e){}
+      }
+      return res.status(200).json({month, average, count, good, bad, summary});
     }
     // Gavin's manual grade for a day (ground truth the auto-grader learns from). Gavin-gated.
     if(action==="grade_get"){
@@ -2891,6 +2928,18 @@ if(action==="email_recipients"){
       if(!key) return res.status(400).json({error:"need id"});
       try{ if(redis){ let log=(await redis.get("parkside:calllog"))||[]; const before=log.length; log=log.filter(c=>String(c.id||"")!==String(key) && String(c.at||"")!==String(key)); await redis.set("parkside:calllog", log); return res.status(200).json({deleted:before-log.length, remaining:log.length}); } }catch(e){ return res.status(500).json({error:String(e.message||e)}); }
       return res.status(200).json({deleted:0});
+    }
+    // Reassign a phoned-in call/transcript to a different ET day. Gavin-gated. POST {id, date:"YYYY-MM-DD"}. Flat list -> just update the date field (keeps text + recording).
+    if(action==="call_move"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ b={}; } } b=b||{};
+      const id=String(b.id||(req.query&&req.query.id)||"");
+      const date=String(b.date||(req.query&&req.query.date)||"").slice(0,10);
+      if(!id) return res.status(400).json({error:"need id"});
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:"need date YYYY-MM-DD"});
+      try{ if(redis){ let log=(await redis.get("parkside:calllog"))||[]; let found=false, oldDate=""; for(const c of log){ if(c && (String(c.id||"")===id || String(c.at||"")===id)){ oldDate=String(c.date||""); c.date=date; found=true; break; } }
+        if(!found) return res.status(404).json({error:"call not found"}); await redis.set("parkside:calllog", log); return res.status(200).json({ok:true, id, from:oldDate, to:date}); } }catch(e){ return res.status(500).json({error:String(e.message||e)}); }
+      return res.status(200).json({ok:false, error:"no redis"});
     }
     if(action==="mms_media"){
       const gp=(req.query&&req.query.gp)||(req.headers["x-gavin-password"]||"");

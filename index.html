@@ -607,14 +607,33 @@
       <div id="emailRecipList" class="legend"><span class="muted">Loading...</span></div>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:center"><button onclick="saveEmailRecip()">Save recipients</button><span id="emailRecipStatus" class="muted"></span></div>
     </div>
+    <div class="card" id="sysEmailCard">
+      <h2>&#128276; System emails <span class="muted" style="font-weight:400;text-transform:none">- master on/off for each automatic engine email (guest-messaging emails are separate &amp; unaffected)</span></h2>
+      <div class="legend" style="margin-bottom:6px">Switch any automatic email off without losing its recipient list above. Default is on.</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #26354a">
+        <div><b>Daily data-gap alert</b><div class="muted" style="font-size:12px">When a day can’t be fully graded (missing WebWork / GPS / Victor’s report).</div></div>
+        <div class="switch" id="efSwitch_gapAlert" onclick="toggleEmailFlag('gapAlert')"><div class="knob"></div></div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #26354a">
+        <div><b>Monthly work report</b><div class="muted" style="font-size:12px">Auto-emailed on the 1st. (The “Email now” button below still works.)</div></div>
+        <div class="switch" id="efSwitch_monthlyReport" onclick="toggleEmailFlag('monthlyReport')"><div class="knob"></div></div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-top:1px solid #26354a">
+        <div><b>Daily verify reminder</b><div class="muted" style="font-size:12px">Evening nudge to Victor when the day wasn’t verified by call or email.</div></div>
+        <div class="switch" id="efSwitch_verifyReminder" onclick="toggleEmailFlag('verifyReminder')"><div class="knob"></div></div>
+      </div>
+      <div style="margin-top:8px"><span id="sysEmailStatus" class="muted"></span></div>
+    </div>
     <div class="card" id="monthlyCard">
       <h2>🗓 Monthly report <span class="muted" style="font-weight:400;text-transform:none">— Victor\u2019s month of grades; auto-emailed to you + Victor on the 1st</span></h2>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
         <input id="monthlyMonth" type="month" style="width:auto">
         <button class="ghost" onclick="loadMonthly()">View</button>
+        <button class="ghost" onclick="scoreSummary()">Month summary</button>
         <button onclick="emailMonthly()">Email now to me + Victor</button>
         <span id="monthlyStatus" class="muted"></span>
       </div>
+      <div id="scoreSummaryBody" class="legend" style="margin-bottom:8px"></div>
       <div id="monthlyBody" class="legend">…</div>
     </div>
     <div class="card" id="todoDocCard">
@@ -1192,7 +1211,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); initMonCal(); gvNav('day'); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); loadEmailFlags(); monAutoToggle(); initMonCal(); gvNav('day'); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1683,7 +1702,8 @@ function renderCalls(calls){
       var rec=c.recordingUrl?(' · <a href="'+frEsc(c.recordingUrl)+'" target="_blank">audio</a>'):'';
       var key=frEsc(c.id||c.at||'');
       var del=key?(' · <a href="#" onclick="deleteCall(\''+key+'\');return false" style="color:#ff8f6b">delete</a>'):'';
-      html+='<div style="border-bottom:1px solid #22303c;padding:8px 0 8px 10px"><div style="margin-bottom:2px">'+who+' <span class="muted">'+when+'</span>'+rec+del+'</div><div>'+txt+'</div></div>';
+      var mv=key?('<div style="margin-top:5px;font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="muted">Move to:</span><input type="date" id="mv_'+key+'" value="'+frEsc(c.date||d)+'" style="width:auto;font-size:12px"><a href="#" onclick="moveCall(\''+key+'\');return false" style="color:#8ab4f8">move</a></div>'):'';
+      html+='<div style="border-bottom:1px solid #22303c;padding:8px 0 8px 10px"><div style="margin-bottom:2px">'+who+' <span class="muted">'+when+'</span>'+rec+del+'</div><div>'+txt+'</div>'+mv+'</div>';
     });
   });
   el.innerHTML=html;
@@ -1692,6 +1712,11 @@ async function deleteCall(key){
   if(!GPW||!key) return; if(!confirm('Delete this transcript? (for removing test calls)')) return;
   try{ await fetch(api('calls_delete')+'&id='+encodeURIComponent(key),{method:'POST',headers:{'x-gavin-password':GPW}}); }catch(e){}
   loadCalls();
+}
+async function moveCall(key){
+  if(!GPW||!key) return; var inp=document.getElementById('mv_'+key); var date=inp?inp.value:''; if(!date){ alert('Pick a date first.'); return; }
+  if(!confirm('Move this transcript to '+date+'?')) return;
+  try{ var r=await fetch(api('call_move'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({id:key,date:date})}); var j=await r.json(); if(j&&j.ok){ loadCalls(); } else { alert((j&&j.error)||'Move failed'); } }catch(e){ alert('Error: '+e.message); }
 }
 // ===== Bonus tab (visible to Victor later; no Gavin login) =====
 function bEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -1791,6 +1816,14 @@ var EMAILROWS=[];
 async function loadEmailRecip(){ if(!GPW) return; var el=document.getElementById('emailRecipList'); if(!el) return; try{ var r=await fetch(api('email_recipients')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json(); EMAILROWS=(j&&j.emails)||[]; var vic=(j&&j.victorEmail)||''; el.innerHTML=EMAILROWS.map(function(e,i){ var on=(e.enabled!==false); return '<div style="padding:9px 0;border-top:1px solid #26354a"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="er_on_'+i+'"'+(on?' checked':'')+' onchange="erToggle('+i+')"> <b>'+esc(e.name)+'</b></label><div class="muted" style="font-size:12px;margin:2px 0 6px">'+esc(e.desc)+'</div><div id="er_body_'+i+'" style="'+(on?'':'opacity:.45;pointer-events:none')+'"><input id="er_to_'+i+'" type="text" value="'+esc(e.to)+'" placeholder="email addresses, comma-separated" style="width:100%;box-sizing:border-box"><label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:5px"><input type="checkbox" id="er_v_'+i+'"'+(e.victor?' checked':'')+'> Also send to Victor'+(vic?(' ('+esc(vic)+')'):' (no Victor email set)')+'</label></div><div class="muted" style="font-size:11px;margin-top:3px">'+(on?('Currently goes to: '+(e.effective&&e.effective.length?esc(e.effective.join(', ')):'<i>nobody</i>')):'<i>Off - not sent</i>')+'</div></div>'; }).join(''); }catch(e){ el.textContent='Error: '+e.message; } }
 function erToggle(i){ var on=!!(document.getElementById('er_on_'+i)||{}).checked; var b=document.getElementById('er_body_'+i); if(b){ b.style.opacity=on?'':'.45'; b.style.pointerEvents=on?'':'none'; } }
 async function saveEmailRecip(){ if(!GPW) return; var st=document.getElementById('emailRecipStatus'); if(st) st.textContent='Saving...'; var recipients={}; EMAILROWS.forEach(function(e,i){ recipients[e.key]={ to:(document.getElementById('er_to_'+i)||{}).value||'', victor:!!(document.getElementById('er_v_'+i)||{}).checked, enabled:!!(document.getElementById('er_on_'+i)||{}).checked }; }); try{ var r=await fetch(api('email_recipients'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({recipients:recipients})}); var j=await r.json(); if(j&&j.ok){ EMAILROWS=j.emails||EMAILROWS; if(st) st.textContent='Saved'; loadEmailRecip(); } else if(st) st.textContent=(j&&j.error)||'failed'; }catch(e){ if(st) st.textContent='Error: '+e.message; } }
+// ===== System-email master on/off flags (Feature 1) =====
+var EMAILFLAGS={gapAlert:true,monthlyReport:true,verifyReminder:true};
+async function loadEmailFlags(){ if(!GPW) return; try{ var r=await fetch(api('email_flags')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json(); EMAILFLAGS=Object.assign({gapAlert:true,monthlyReport:true,verifyReminder:true},(j&&j.flags)||{}); renderEmailFlags(); }catch(e){} }
+function renderEmailFlags(){ ['gapAlert','monthlyReport','verifyReminder'].forEach(function(k){ var s=document.getElementById('efSwitch_'+k); if(s){ if(EMAILFLAGS[k]!==false) s.classList.add('on'); else s.classList.remove('on'); } }); }
+async function toggleEmailFlag(k){ if(!GPW) return; EMAILFLAGS[k]=(EMAILFLAGS[k]===false); renderEmailFlags(); var st=document.getElementById('sysEmailStatus'); if(st) st.textContent='Saving…'; try{ var r=await fetch(api('email_flags'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({flags:EMAILFLAGS})}); var j=await r.json(); if(j&&j.flags){ EMAILFLAGS=j.flags; renderEmailFlags(); } if(st) st.textContent='Saved ✓'; }catch(e){ if(st) st.textContent='error'; } }
+// ===== Month summary: average grade + good/bad (Feature 2) =====
+async function scoreSummary(){ if(!GPW) return; var el=document.getElementById('scoreSummaryBody'); if(el) el.innerHTML='<span class="muted">Loading…</span>'; var mo=(document.getElementById('monthlyMonth')||{}).value||''; try{ var r=await fetch(api('score_summary')+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json(); renderScoreSummary(j); }catch(e){ if(el) el.textContent='error'; } }
+function renderScoreSummary(j){ var el=document.getElementById('scoreSummaryBody'); if(!el) return; if(!j||j.average==null||j.count===0){ el.innerHTML='<span class="muted">No graded days for '+esc((j&&j.month)||'this month')+' yet.</span>'; return; } var avg=j.average; var col=avg>=75?'#4ade80':avg>=45?'#f4b942':'#f87171'; var lst=function(arr,c){ return (arr&&arr.length)?('<ul style="margin:4px 0 8px 18px;color:'+c+'">'+arr.map(function(x){return '<li>'+esc(x)+'</li>';}).join('')+'</ul>'):'<div class="muted" style="font-size:12px;margin:2px 0 8px">none</div>'; }; el.innerHTML='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><div style="font-size:40px;font-weight:800;color:'+col+'">'+avg+'<span style="font-size:16px;color:var(--mut)">/100</span></div><div><div style="font-weight:600">Average grade · '+esc(j.month||'')+'</div><div class="muted" style="font-size:12px">'+j.count+' graded day'+(j.count===1?'':'s')+'</div></div></div>'+(j.summary?('<div class="legend" style="margin-top:8px;white-space:pre-wrap">'+esc(j.summary)+'</div>'):'')+'<div style="margin-top:8px;font-size:13px"><b style="color:#4ade80">✓ What went well</b>'+lst(j.good,'#a7d9b5')+'</div><div style="font-size:13px"><b style="color:#f87171">⚠ To work on</b>'+lst(j.bad,'#e6a5a5')+'</div>'; }
 async function loadWeeklyHide(){ if(!GPW) return; try{ var r=await fetch(api('weekly_hide')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json(); var c=document.getElementById('weeklyHideChk'); if(c) c.checked=!!(j&&j.hidden); }catch(e){} }
 async function setWeeklyHide(){ if(!GPW) return; var c=document.getElementById('weeklyHideChk'); var st=document.getElementById('weeklyHideStatus'); if(st) st.textContent='Saving...'; try{ var r=await fetch(api('weekly_hide'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({hidden:!!(c&&c.checked)})}); var j=await r.json(); if(st) st.textContent=(j&&j.ok)?((j.hidden)?'Hidden from Victor':'Visible to Victor'):'failed'; }catch(e){ if(st) st.textContent='error'; } }
 
