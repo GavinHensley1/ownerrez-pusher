@@ -135,13 +135,13 @@
 <header style="display:none" id="app">
   <h1>🏕️ Victor&rsquo;s</h1>
   <div id="viewTabs" style="display:inline-flex;gap:6px;margin-left:4px">
+    <button id="tabBonus" class="seg" onclick="switchView('bonus')">My Work</button>
     <button id="tabPricing" class="seg on" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
-    <button id="tabMon" class="seg" onclick="switchView('monitoring')">Gavin</button>
-    <button id="tabBonus" class="seg" onclick="switchView('bonus')">My Work</button>
   </div>
   <span class="muted" id="horizon"></span>
   <span class="sp"></span>
+  <button id="tabMon" class="seg" onclick="switchView('monitoring')">Gavin</button>
   <div class="toggle" id="syncWrap">
     <span class="muted">Auto-sync to OwnerRez</span>
     <div class="switch" id="syncSwitch" onclick="toggleSync()"><div class="knob"></div></div>
@@ -314,13 +314,6 @@
     <textarea id="aiQ" class="full" style="min-height:60px" placeholder="Type a sample guest question, e.g. 'What time is checkout and is there parking?'"></textarea>
     <div style="margin-top:10px;display:flex;gap:10px"><button onclick="aiPreview()">Preview AI answer</button><span id="aiStatus" class="muted" style="align-self:center"></span></div>
     <div id="aiOut" class="legend" style="white-space:pre-wrap;margin-top:10px"></div>
-  </div>
-  <div class="card">
-    <h2>Test the approval pipeline</h2>
-    <div class="legend">Simulate an incoming guest question. Known answers auto-send (and never bother Victor); unknown ones get queued above. Works without a live SMS number.</div>
-    <textarea id="askQ" class="full" style="min-height:54px" placeholder="e.g. 'Do you allow dogs?' or 'Is there a fire pit?'"></textarea>
-    <div style="margin-top:10px;display:flex;gap:10px"><button onclick="askTest()">Send to pipeline</button><span id="askStatus" class="muted" style="align-self:center"></span></div>
-    <div id="askOut" class="legend" style="white-space:pre-wrap;margin-top:10px"></div>
   </div>
 
   <div class="card">
@@ -684,6 +677,11 @@
     <div id="todoText" class="legend" style="white-space:pre-wrap;min-height:60px;background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:10px 12px">…</div>
     <div id="todoStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
   </div>
+  <div class="card" id="bonusCard" style="border-color:#45291f">
+    <h2 style="color:#e8c37a">🏆 Bonus</h2>
+    <div id="bonusBody" class="legend"></div>
+  </div>
+
   <div class="card" id="weeklyCard">
     <h2>📊 Weekly report <span class="muted" style="font-weight:400;text-transform:none">— your daily grades, what went well and what to work on</span></h2>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
@@ -709,10 +707,6 @@
     <div id="timeoffList" class="legend"></div>
   </div>
 
-  <div class="card">
-    <h2>🏆 Bonus</h2>
-    <div id="bonusBody" class="legend"></div>
-  </div>
 
   <div class="card">
     <h2>🧹 Cleans this month by Parkside <span class="muted" style="font-weight:400;text-transform:none">— two logs, reset automatically each month</span></h2>
