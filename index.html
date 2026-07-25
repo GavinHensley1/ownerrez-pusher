@@ -3,8 +3,10 @@
 <title>Parkside Tepees</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  :root{--bg:#0f1720;--card:#16212e;--ink:#e7eef6;--mut:#9fb0c0;--line:#26354a;--accent:#ff6b4a;--ok:#2ecc71;--warn:#f4b942;--pin:#8b5cf6;--book:#5a6675}
+  :root{--bg:#0a1018;--card:#101a29;--ink:#e6ecf5;--mut:#93a2b8;--line:#1e2b3f;--accent:#f4643c;--ok:#34d399;--warn:#fbbf24;--pin:#8b5cf6;--book:#5a6675}
   *{box-sizing:border-box} body{margin:0;font:14px/1.45 system-ui,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--ink)}
   header{display:flex;align-items:center;gap:16px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--card);flex-wrap:wrap}
   h1{font-size:16px;margin:0;font-weight:700} .sp{flex:1}
@@ -61,6 +63,25 @@
 .roster th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
 .roster td.l{text-align:left} .roster td.email{word-break:break-all;font-size:13px} .roster td.agr{white-space:nowrap;font-weight:700;font-size:13px}
 @media(max-width:640px){.roster th,.roster td{padding:6px 7px;font-size:13px} .roster td.email,.roster td.agr{font-size:11px}}
+
+  /* ===== New look — mock design (dark navy + IBM Plex) ===== */
+  body{font-family:"IBM Plex Sans","Helvetica Neue",Helvetica,system-ui,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  header#app,header{background:#0d1522;border-bottom-color:#1b2536}
+  h1{letter-spacing:-.01em}
+  a{color:var(--accent);text-decoration:none} a:hover{color:#ff8663}
+  .card{border-radius:12px;border-color:#1e2b3f;background:var(--card)}
+  .card h2{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;letter-spacing:.08em;color:var(--mut)}
+  button{border-radius:8px}
+  select,input,textarea,.kbitem textarea,textarea.full{background:#0d1523;border-color:#263248;border-radius:8px}
+  .seg,.seg-x{border-color:#263248} .seg-x{border-radius:8px}
+  .pill{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:11px;letter-spacing:.02em}
+  th,.roster th{font-family:"IBM Plex Mono",ui-monospace,monospace;letter-spacing:.06em}
+  .day,.scday{background:#0d1523;border-color:#1e2b3f}
+  .legend{color:var(--mut)}
+  #gate{background:#0a1018}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#223047;border-radius:6px}
+  ::-webkit-scrollbar-track{background:transparent}
 </style></head><body>
 
 <!-- PUBLIC default: read-only booking roster pulled live from OwnerRez (no password) -->
