@@ -392,6 +392,7 @@
       <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;padding:2px 6px;border-radius:20px;background:#2a1c18;color:#f4a08c;border:1px solid #45291f">!</span></div>
     <div id="gvTabPri" class="gvtab" onclick="gvNav('pricing')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Pricing tuning</div>
     <div id="gvTabRep" class="gvtab" onclick="gvNav('conn')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Connections &amp; reports</div>
+    <div id="gvTabBonus" class="gvtab" onclick="gvNav('bonus')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Bonus</div>
     <div style="flex:1"></div>
   </div>
   <div id="gvDay" class="gv-subview">
@@ -501,7 +502,7 @@
               <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Cleaning ground-truth</div>
               <div style="font-size:11.5px;color:#64758d">from OwnerRez &mdash; checkouts = real turnovers</div>
             </div>
-            <div class="muted" style="font-size:12px;margin-top:10px;color:#7f8fa6">Full per-day cleaning detail (occupied units, checkouts, arrivals) lives on the <b>Integrity &amp; receipts</b> tab.</div>
+            <div id="gvCleanDay" style="margin-top:4px"><div class="muted" style="font-size:12px;margin-top:10px;color:#7f8fa6">Loading cleaning ground-truth…</div></div>
           </div>
 
         </div>
@@ -514,7 +515,7 @@
               <span id="webActStatus" class="muted" style="font-size:11px"></span>
             </div>
             <div id="webActSummary" class="legend" style="margin-bottom:12px">&hellip;</div>
-            <div id="webActList"></div>
+            <div id="webActList" style="max-height:300px;overflow-y:auto"></div>
           </div>
 
           <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
@@ -559,27 +560,8 @@
   </div>
   <div id="gvIntegrity" class="gv-subview" style="display:none">
     <div class="card" id="fraudCard" style="border-color:#5a2a2a">
-      <h2>🛡️ Fraud Alert <span class="muted" style="font-weight:400;text-transform:none">— payout-account integrity + receipts (Gavin-only)</span></h2>
-      <div class="legend" style="margin-bottom:10px">Records the <b>correct payout bank account</b> for each channel, then flags if a checked value ever differs. Also logs receipts (Amazon, MMS) for reconciliation. Victor can’t see this tab.</div>
-      <div id="fraudAlerts" style="margin-bottom:12px"></div>
-      <h3 style="margin:8px 0 4px">Payout accounts (baselines)</h3>
-      <div id="fraudAccounts" class="legend" style="margin-bottom:8px"></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:14px">
-        <select id="frAccCh" style="width:auto"><option value="airbnb">Airbnb</option><option value="ownerrez">OwnerRez / Stripe</option><option value="vrbo">Vrbo</option><option value="bookingcom">Booking.com</option><option value="direct">Direct</option></select>
-        <input id="frAccBank" placeholder="Bank name" style="width:150px">
-        <input id="frAccLast4" placeholder="Acct last4" maxlength="4" style="width:100px">
-        <button onclick="fraudSetAccount()">Save baseline</button>
-      </div>
-      <h3 style="margin:8px 0 4px">Verify a payout account</h3>
-      <div class="legend" style="margin-bottom:6px">Enter what a channel’s payout settings currently show; the system compares to the baseline and raises an alert on any mismatch.</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
-        <select id="frChkCh" style="width:auto"><option value="airbnb">Airbnb</option><option value="ownerrez">OwnerRez / Stripe</option><option value="vrbo">Vrbo</option><option value="bookingcom">Booking.com</option><option value="direct">Direct</option></select>
-        <input id="frChkBank" placeholder="Observed bank" style="width:150px">
-        <input id="frChkLast4" placeholder="Observed last4" maxlength="4" style="width:120px">
-        <button onclick="fraudRunCheck()">Check now</button>
-        <span id="frChkStatus" class="muted" style="font-weight:600"></span>
-      </div>
-      <div id="fraudChecks" class="legend" style="margin-bottom:14px"></div>
+      <h2>🧾 Receipts &amp; cleaning ground-truth <span class="muted" style="font-weight:400;text-transform:none">— receipt log + real turnovers (Gavin-only)</span></h2>
+      <div class="legend" style="margin-bottom:10px">Logs receipts (Amazon, MMS) for reconciliation and shows the real per-day cleaning ground-truth from OwnerRez. Victor can’t see this tab.</div>
       <h3 style="margin:8px 0 4px">Receipts</h3>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
         <input id="frRcVendor" placeholder="Vendor (e.g. Amazon)" style="width:150px">
@@ -589,7 +571,7 @@
         <button onclick="fraudAddReceipt()">Log receipt</button>
       </div>
       <div class="legend" style="margin-bottom:6px">Receipts texted via MMS to the StayDeck number will land here automatically once phone intake is live.</div>
-      <div id="fraudReceipts"></div>
+      <div id="fraudReceipts" style="max-height:260px;overflow-y:auto"></div>
       <h3 style="margin:16px 0 4px">🧹 Cleaning ground-truth <span class="muted" style="font-weight:400;text-transform:none">— actual checkouts per day = units that truly needed a turnover clean</span></h3>
       <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings. Sanity-check Victor’s cleaning claims &amp; supply receipts against this: a unit only needs a full clean when a guest checked <b>out</b> that day.</div>
       <div id="fraudCleaning" class="legend">…</div>
@@ -646,11 +628,8 @@
       <div class="legend" style="margin:8px 0 2px;font-size:12px">Or upload the .docx once (one-time snapshot, won\u2019t auto-update): <input id="todoDocFile" type="file" accept=".docx" onchange="uploadTodoDocx(this)"></div>
       <div id="todoDocPreview" class="legend" style="white-space:pre-wrap;margin-top:8px;max-height:160px;overflow:auto"></div>
     </div>
-    <div class="card" id="weeklyHideCard">
-      <h2>&#128202; Weekly report visibility <span class="muted" style="font-weight:400;text-transform:none">- hide Victor's weekly report while you edit it</span></h2>
-      <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="weeklyHideChk" onchange="setWeeklyHide()"> <span>Hide the Weekly report from Victor's My Work tab</span></label>
-      <div id="weeklyHideStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
-    </div>
+  </div>
+  <div id="gvBonus" class="gv-subview" style="display:none">
     <div class="card" id="bonusOwnerCard">
       <h2>&#128176; Bonus &mdash; enter month <span class="muted" style="font-weight:400;text-transform:none">&mdash; Victor's incentive comp; what you enter here shows on his My Work tab</span></h2>
       <div id="bonusOwnerBody" class="legend">&hellip;</div>
@@ -1219,8 +1198,8 @@ async function gavinUnlock(){
   catch(e){ err.textContent='Error: '+e.message; }
 }
 function gvNav(v){
-  var map={day:'gvDay',integrity:'gvIntegrity',pricing:'gvPricing',conn:'gvConn'};
-  var tabs={day:'gvTabDay',integrity:'gvTabInt',pricing:'gvTabPri',conn:'gvTabRep'};
+  var map={day:'gvDay',integrity:'gvIntegrity',pricing:'gvPricing',conn:'gvConn',bonus:'gvBonus'};
+  var tabs={day:'gvTabDay',integrity:'gvTabInt',pricing:'gvTabPri',conn:'gvTabRep',bonus:'gvTabBonus'};
   for(var k in map){ var el=document.getElementById(map[k]); if(el) el.style.display=(k===v)?'':'none';
     var t=document.getElementById(tabs[k]); if(t) t.className='gvtab'+(k===v?' on':''); }
   if(v==='day'&&MON_MAP){ setTimeout(function(){ try{MON_MAP.invalidateSize();}catch(e){} },60); }
@@ -1238,7 +1217,7 @@ async function populateDays(){ try{ const dev=(document.getElementById('monDevic
 async function onDeviceChange(){ await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); await monCalLoadSets(); renderMonCal(); }
 function onDateChange(){ const d=(document.getElementById('monDate')||{}).value; const auto=document.getElementById('monAuto');
   if(d){ if(auto){auto.checked=false; auto.disabled=true;} if(MON_TIMER){clearInterval(MON_TIMER); MON_TIMER=null;} }
-  else { if(auto){auto.disabled=false;} monAutoToggle(); } loadMonitor(); loadScorecard(); loadWebActivity(); }
+  else { if(auto){auto.disabled=false;} monAutoToggle(); } loadMonitor(); loadScorecard(); loadWebActivity(); loadCalls(); renderDayCleaning(); var _sc=document.getElementById('stCleanings'); if(_sc) _sc.innerHTML=gvCleaningCountForSel(); }
 async function populateDevices(){
   try{ const r=await fetch(api('gps_devices')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
     const sel=document.getElementById('monDevice'); if(!sel) return; const cur=sel.value;
@@ -1263,7 +1242,7 @@ async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementB
       var gr = (j.grade&&j.grade.grade!=null)?j.grade.grade:null;
       var grCol = gr==null?'#7f8fa6':(gr>=75?'#34d399':gr>=45?'#fbbf24':'#f87171');
       setT('stHours',hoursV,'#e6ecf5'); setT('stActive',actV,actCol); setT('stOnsite',onsiteV,'#e6ecf5');
-      setT('stCleanings','\u2014','#fbbf24'); setT('stGrade',gr==null?'\u2014':(''+gr),grCol);
+      setT('stCleanings',gvCleaningCountForSel(),'#fbbf24'); setT('stGrade',gr==null?'\u2014':(''+gr),grCol);
       var date=(document.getElementById('monDate')||{}).value||'';
       var isToday=!date;
       var dstr = date || (new Date()).toISOString().slice(0,10);
@@ -1616,8 +1595,23 @@ async function loadFraud(){
   if(!GPW) return;
   try{ const r=await fetch(api('fraud_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; FRAUD=await r.json(); renderFraud(); }catch(e){}
 }
+var GVCLEAN=null;
+function gvCleanDayObj(){ if(!GVCLEAN||!GVCLEAN.days) return null; var d=(document.getElementById('monDate')||{}).value||''; var days=GVCLEAN.days;
+  for(var i=0;i<days.length;i++){ if(d? days[i].date===d : days[i].isToday) return days[i]; }
+  if(!d){ var t=(new Date()).toISOString().slice(0,10); for(var k=0;k<days.length;k++){ if(days[k].date===t) return days[k]; } }
+  return null; }
+function gvCleaningCountForSel(){ var o=gvCleanDayObj(); return (o&&o.cleaningsNeeded!=null)?(''+o.cleaningsNeeded):'\u2014'; }
+function renderDayCleaning(){ var el=document.getElementById('gvCleanDay'); if(!el) return; var o=gvCleanDayObj(); var uc=(GVCLEAN&&GVCLEAN.unitCount)||10;
+  if(!GVCLEAN){ el.innerHTML='<div class="muted" style="font-size:12px;margin-top:10px;color:#7f8fa6">Loading cleaning ground-truth\u2026</div>'; return; }
+  if(!o){ el.innerHTML='<div class="muted" style="font-size:12px;margin-top:10px;color:#7f8fa6">No cleaning ground-truth for this day.</div>'; return; }
+  var box=function(lbl,val,col){ return '<div style="flex:1;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:\'IBM Plex Mono\',monospace;font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:#64758d">'+lbl+'</div><div style="font-family:\'IBM Plex Mono\',monospace;font-size:17px;font-weight:600;margin-top:3px'+(col?(';color:'+col):'')+'">'+val+'</div></div>'; };
+  var h='<div style="display:flex;gap:10px;margin:12px 0 12px">'+box('Occupied',(o.occupied!=null?o.occupied:0)+'/'+uc)+box('Cleanings due',(o.cleaningsNeeded!=null?o.cleaningsNeeded:0),'#fbbf24')+box('Arrivals',(o.arrivals!=null?o.arrivals:0))+'</div>';
+  var units=o.checkoutUnits||[];
+  if(units.length){ h+='<div style="display:flex;flex-wrap:wrap;gap:6px">'+units.map(function(u){return '<span style="font-size:12px;padding:5px 10px;border-radius:7px;background:#142033;border:1px solid #223047;color:#cfd9e8">'+frEsc(u)+'</span>';}).join('')+'</div>'; }
+  else { h+='<div class="muted" style="font-size:12px;color:#7f8fa6">No checkouts (turnover cleans) this day.</div>'; }
+  el.innerHTML=h; }
 async function loadCleaning(){ if(!GPW) return;
-  try{ const r=await fetch(api('cleaning_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; const j=await r.json(); renderCleaning(j); }catch(e){} }
+  try{ const r=await fetch(api('cleaning_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; const j=await r.json(); GVCLEAN=j; renderCleaning(j); renderDayCleaning(); var sc=document.getElementById('stCleanings'); if(sc) sc.innerHTML=gvCleaningCountForSel(); }catch(e){} }
 async function loadAgreements(force){ const st=document.getElementById('agreementsStatus'); if(st) st.textContent='…';
   try{ const _h=PW?{'x-app-password':PW}:(GPW?{'x-gavin-password':GPW}:{}); const r=await fetch(api('agreements_status')+(force?'&nocache=1':'')+'&cb='+Date.now(),{headers:_h}); const j=await r.json(); if(!r.ok){ if(st) st.textContent=(j&&j.error)||('error '+r.status); const el=document.getElementById('agreementsList'); if(el) el.innerHTML='<span class="muted">'+frEsc((j&&j.error)||'Could not load bookings.')+'</span>'; return; } renderAgreements(j); }catch(e){ if(st) st.textContent='error'; } }
 function renderAgreements(j){ const el=document.getElementById('agreementsList'); const st=document.getElementById('agreementsStatus'); if(!el) return;
@@ -1673,7 +1667,10 @@ async function loadCalls(){
 }
 function renderCalls(calls){
   const el=document.getElementById('callsList'); if(!el) return;
-  if(!calls.length){ el.innerHTML='<span class="muted">No calls logged yet. Victor’s daily call transcript will appear here once phone intake is wired.</span>'; return; }
+  var selRaw=(document.getElementById('monDate')||{}).value||'';
+  var sel=selRaw||(new Date()).toISOString().slice(0,10);
+  calls=(calls||[]).filter(function(c){ var d=c.date||((c.at||'').slice(0,10)); return d===sel; });
+  if(!calls.length){ el.innerHTML='<span class="muted">No call transcripts for this day. Victor’s daily call transcript will appear here once phone intake is wired.</span>'; return; }
   var groups={}, order=[];
   calls.forEach(function(c){ var d=c.date||((c.at||'').slice(0,10))||'(no date)'; if(!groups[d]){groups[d]=[];order.push(d);} groups[d].push(c); });
   var html='';
