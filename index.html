@@ -90,16 +90,21 @@
   #bonusMain>#weeklyCard{grid-column:1}
   #bonusMain>#timeoffCard{grid-column:2}
   #bonusMain>.card:not(#todoCard):not(#weeklyCard):not(#timeoffCard){grid-column:1 / -1}
+  #bonusMain>#bwStatusPair{grid-column:1 / -1;order:-1}
   @media(max-width:860px){ #bonusMain{grid-template-columns:1fr} #bonusMain>.card{grid-column:1 / -1 !important} }
 
-  /* ===== Gavin Daily-Review — mock two-panel Day View ===== */
-  #gavinBody{display:grid;grid-template-columns:340px minmax(0,1fr);gap:16px;align-items:start}
-  #gvside{position:sticky;top:12px;display:flex;flex-direction:column;gap:16px;min-width:0}
-  #gvmain{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;grid-auto-flow:dense;min-width:0}
-  #gvside>.card,#gvmain>.card{margin-bottom:0}
-  #gvmain>.card:has(#monMap),#gvmain>.card:has(table),#gvmain>.card:has(.tgrid),#gvmain>.card:has(#scReport){grid-column:1 / -1}
-  #scoredDaysCard .scday{aspect-ratio:1/1;font-size:10px}
-  @media(max-width:900px){ #gavinBody{grid-template-columns:1fr} #gvside{position:static} #gvmain{grid-template-columns:1fr} }
+  /* ===== Gavin Daily-Review — redesigned Day View (matches design.html) ===== */
+  #gavinBody{display:grid;grid-template-columns:1fr;gap:0;align-items:start}
+  #gvSubnav .gvtab{color:#7f8fa6}
+  #gvSubnav .gvtab.on{color:#e6ecf5;border-bottom-color:var(--accent)!important}
+  #gvDayGrid{display:grid;grid-template-columns:268px minmax(0,1fr);gap:20px;align-items:start}
+  #gvside{position:sticky;top:56px;display:flex;flex-direction:column;gap:12px;min-width:0}
+  #gvmain{display:flex;flex-direction:column;gap:16px;min-width:0}
+  #gvDetail{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;align-items:start}
+  .gv-col{display:flex;flex-direction:column;gap:16px;min-width:0}
+  #gvside .cal{gap:3px} #scoredDaysCard .scday{aspect-ratio:1/1;font-size:10px}
+  #gvConn>.card,#gvIntegrity>.card,#gvPricing>.card{margin-bottom:16px}
+  @media(max-width:900px){ #gvDayGrid{grid-template-columns:1fr} #gvside{position:static} #gvDetail{grid-template-columns:1fr} }
 </style></head><body>
 
 <!-- PUBLIC default: read-only booking roster pulled live from OwnerRez (no password) -->
@@ -381,80 +386,178 @@
     </div>
   </div>
   <div id="gavinBody" style="display:none">
-  <div id="gvside">
-    <div class="card">
-      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
-        <div><b>Device</b> <select id="monDevice" onchange="onDeviceChange()" style="width:auto"><option value="victor">victor</option><option value="test">test</option></select></div>
-        <div><b>Day</b> <select id="monDate" onchange="onDateChange()" style="width:auto"><option value="">Today (live)</option></select></div>
-        <div id="monNow" class="legend" style="margin:0">Loading…</div>
-        <span style="flex:1"></span>
-        <label class="muted" style="font-size:12px"><input type="checkbox" id="monAuto" checked onchange="monAutoToggle()"> auto-refresh</label>
-        <button class="ghost" onclick="loadMonitor()">Refresh</button>
+  <div id="gvSubnav" style="display:flex;gap:26px;padding:0 4px 0 4px;height:44px;align-items:center;border-bottom:1px solid #1b2536;position:sticky;top:0;z-index:20;background:var(--bg);margin-bottom:20px">
+    <div id="gvTabDay" class="gvtab" onclick="gvNav('day')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Daily review</div>
+    <div id="gvTabInt" class="gvtab" onclick="gvNav('integrity')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;gap:8px;border-bottom:2px solid transparent;cursor:pointer">Integrity &amp; receipts
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;padding:2px 6px;border-radius:20px;background:#2a1c18;color:#f4a08c;border:1px solid #45291f">!</span></div>
+    <div id="gvTabPri" class="gvtab" onclick="gvNav('pricing')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Pricing tuning</div>
+    <div id="gvTabRep" class="gvtab" onclick="gvNav('conn')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Connections &amp; reports</div>
+    <div style="flex:1"></div>
+  </div>
+  <div id="gvDay" class="gv-subview">
+    <div id="gvDayGrid">
+    <div id="gvside">
+      <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px;padding:14px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:2px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Device / day</div><span style="flex:1"></span>
+          <label class="muted" style="font-size:11px"><input type="checkbox" id="monAuto" checked onchange="monAutoToggle()"> auto</label>
+          <span class="seg-x" onclick="loadMonitor()" style="padding:3px 9px;cursor:pointer;font-size:12px">Refresh</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <select id="monDevice" onchange="onDeviceChange()" style="flex:1;min-width:0"><option value="victor">victor</option><option value="test">test</option></select>
+          <select id="monDate" onchange="onDateChange()" style="flex:1;min-width:0"><option value="">Today (live)</option></select>
+        </div>
+        <div id="monNow" class="legend" style="margin:8px 0 0;font-size:11.5px;color:#7f8fa6">Loading&hellip;</div>
       </div>
-    </div>
-    <div class="card" id="scoredDaysCard">
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px">
-        <h2 style="margin:0">🗓 Scored days <span class="muted" style="font-weight:400;text-transform:none">— click a day to review/grade it; navigate month to month</span></h2>
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="seg-x" onclick="monCalStep(-1)" style="padding:2px 11px;cursor:pointer">‹</span>
-          <b id="monCalLabel" style="min-width:130px;text-align:center">…</b>
-          <span class="seg-x" onclick="monCalStep(1)" style="padding:2px 11px;cursor:pointer">›</span>
+
+      <div id="scoredDaysCard" style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px;padding:14px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div style="font-size:13px;font-weight:600"><span id="monCalLabel">&hellip;</span></div>
+          <div style="display:flex;gap:6px;color:#64758d;font-size:13px">
+            <span onclick="monCalStep(-1)" style="padding:0 5px;cursor:pointer">&lsaquo;</span>
+            <span onclick="monCalStep(1)" style="padding:0 5px;cursor:pointer">&rsaquo;</span>
+          </div>
+        </div>
+        <div class="cal" id="monCalDow" style="margin-bottom:6px"></div>
+        <div class="cal" id="monCalGrid"></div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid #1c2839;font-size:10.5px;color:#7f8fa6">
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:#34d399;display:block"></span>graded good</span>
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:#fbbf24;display:block"></span>needs review</span>
+          <span style="display:flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:#2c3a51;display:block"></span>no data</span>
         </div>
       </div>
-      <div class="cal" id="monCalDow" style="margin-bottom:4px"></div>
-      <div class="cal" id="monCalGrid"></div>
-      <div class="legend" style="display:flex;gap:16px;margin-top:12px;flex-wrap:wrap">
-        <span><span class="scdot" style="background:#2ecc71"></span>graded</span>
-        <span><span class="scdot" style="background:#f4b942"></span>has data · needs review</span>
-        <span><span class="scdot" style="background:#2b3b52"></span>no data</span>
+
+      <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px;padding:14px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:10px">Last 14 days</div>
+        <div id="kpi14" style="display:flex;flex-direction:column;gap:8px;font-size:12px">
+          <div style="display:flex;justify-content:space-between"><span style="color:#93a2b8">Days with full data</span><span id="kpiFull" style="font-family:'IBM Plex Mono',monospace;font-weight:600">&mdash;</span></div>
+          <div style="display:flex;justify-content:space-between"><span style="color:#93a2b8">Avg hours / day</span><span id="kpiHours" style="font-family:'IBM Plex Mono',monospace;font-weight:600">&mdash;</span></div>
+          <div style="display:flex;justify-content:space-between"><span style="color:#93a2b8">Avg computer active</span><span id="kpiActive" style="font-family:'IBM Plex Mono',monospace;font-weight:600">&mdash;</span></div>
+          <div style="display:flex;justify-content:space-between"><span style="color:#93a2b8">Days you graded</span><span id="kpiGraded" style="font-family:'IBM Plex Mono',monospace;font-weight:600">&mdash;</span></div>
+        </div>
       </div>
+    </div>
+    <div id="gvmain">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px;padding:8px 12px">
+        <div id="gvAutoChip" onclick="gvAutoGrade()" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:5px 11px;border-radius:7px;font-size:12px;font-weight:600;background:#12271e;border:1px solid #1f4634;color:#6ee7b7">
+          <span style="width:7px;height:7px;border-radius:50%;display:block;background:#34d399"></span> Auto-grade on</div>
+        <span style="font-size:11.5px;color:#64758d">Engine drafts a grade; you confirm below.</span>
+        <span style="flex:1"></span>
+        <button class="ghost" onclick="loadScorecard();loadWebActivity();loadCalls();loadMonitor()" style="padding:5px 11px;font-size:12px">Hide this day</button>
+      </div>
+
+      <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px;padding:18px 20px">
+        <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
+          <div style="min-width:220px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div id="gvDayTitle" style="font-size:22px;font-weight:700;letter-spacing:-.02em">&mdash;</div>
+              <span id="gvLive" style="font-family:'IBM Plex Mono',monospace;font-size:10px;padding:3px 8px;border-radius:20px;background:#2a1c18;color:#ffa588;border:1px solid #45291f;display:none">LIVE</span>
+            </div>
+            <div id="gvSource" style="font-size:12.5px;color:#7f8fa6;margin-top:4px">Select a day to review.</div>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Hours worked</div><div id="stHours" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#e6ecf5">&mdash;</div></div>
+            <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Computer active</div><div id="stActive" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;">&mdash;</div></div>
+            <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">On-site</div><div id="stOnsite" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#e6ecf5">&mdash;</div></div>
+            <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Cleanings due</div><div id="stCleanings" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#fbbf24">&mdash;</div></div>
+            <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Your grade</div><div id="stGrade" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;">&mdash;</div></div>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:2px;margin-top:14px;padding-top:14px;border-top:1px solid #1c2839">
+          <div id="scHours" class="legend" style="font-size:12px;color:#7f8fa6">&hellip;</div>
+          <div id="scZones" class="legend" style="font-size:12px;color:#7f8fa6"></div>
+          <div id="scScreen" class="legend" style="font-size:12px;color:#7f8fa6"></div>
+        </div>
+      </div>
+
+      <div id="gvDetail">
+        <div class="gv-col">
+
+          <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;overflow:hidden">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:14px 16px 12px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Location</div>
+              <div style="display:flex;align-items:center;gap:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:#64758d">
+                <span style="width:6px;height:6px;border-radius:50%;background:#34d399;display:block"></span><span>GPS trail</span>
+              </div>
+            </div>
+            <div id="monMap" style="height:320px;margin:0 16px;border-radius:10px;overflow:hidden;border:1px solid #223047;background:#0c141d"></div>
+            <div style="padding:16px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d;margin-bottom:8px">Zone minutes</div>
+              <div id="monZones" class="legend"></div>
+            </div>
+          </div>
+
+          <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:14px">Day timeline &middot; 7 AM &ndash; 7 PM</div>
+            <div id="gvTimeline" style="display:flex;height:30px;border-radius:8px;overflow:hidden;border:1px solid #223047;background:repeating-linear-gradient(45deg,#121c2b 0 10px,#0f1826 10px 20px)"></div>
+            <div style="display:flex;justify-content:space-between;margin-top:6px;font-family:'IBM Plex Mono',monospace;font-size:10px;color:#566a84">
+              <span>7a</span><span>10a</span><span>1p</span><span>4p</span><span>7p</span></div>
+            <div class="muted" style="font-size:11.5px;margin-top:10px;color:#4c5c73">Per-hour zone timeline populates as GPS + WebWork segments accumulate for the day.</div>
+          </div>
+
+          <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
+            <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Cleaning ground-truth</div>
+              <div style="font-size:11.5px;color:#64758d">from OwnerRez &mdash; checkouts = real turnovers</div>
+            </div>
+            <div class="muted" style="font-size:12px;margin-top:10px;color:#7f8fa6">Full per-day cleaning detail (occupied units, checkouts, arrivals) lives on the <b>Integrity &amp; receipts</b> tab.</div>
+          </div>
+
+        </div>
+        <div class="gv-col">
+
+          <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Computer activity &middot; WebWork</div><span style="flex:1"></span>
+              <span class="seg-x" onclick="loadWebActivity()" style="padding:3px 9px;cursor:pointer;font-size:12px">Refresh</span>
+              <span id="webActStatus" class="muted" style="font-size:11px"></span>
+            </div>
+            <div id="webActSummary" class="legend" style="margin-bottom:12px">&hellip;</div>
+            <div id="webActList"></div>
+          </div>
+
+          <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
+            <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">What Victor said he did</div>
+              <span style="flex:1"></span><span id="scStatus" class="muted" style="font-size:11px"></span>
+            </div>
+            <label class="muted" style="font-size:11.5px;display:block;margin-bottom:6px;color:#7f8fa6">Self-report (phone intake will fill this automatically):</label>
+            <textarea id="scReport" class="full" style="min-height:70px" placeholder="Type or paste his report for this day&hellip;"></textarea>
+            <div style="display:flex;gap:10px;margin:10px 0 4px;flex-wrap:wrap;align-items:center">
+              <button onclick="saveReport()">Save report</button>
+              <button onclick="runScore()">&#9878;&#65039; Score this day</button>
+            </div>
+            <div id="callsStatus" class="muted" style="font-size:11px;margin-top:6px"></div>
+            <div id="callsList" class="legend" style="margin-top:8px">&hellip;</div>
+          </div>
+
+          <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Engine verdict</div><span style="flex:1"></span>
+            </div>
+            <div id="scResult"></div>
+          </div>
+
+          <div style="background:#101a29;border:1px solid #2c3a51;border-radius:12px;padding:16px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:6px">Grade this day</div>
+            <div id="gradeProgress" style="font-size:12px;color:#7f8fa6;line-height:1.6;margin-bottom:12px">How productive was this day, at an hour-by-hour level? The engine learns your standard.</div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+              <input id="gradeVal" type="number" min="0" max="100" step="1" placeholder="0-100" style="width:90px">
+              <input id="gradeNote" type="text" placeholder="Why? (optional &mdash; teaches the engine)" style="flex:1;min-width:160px">
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+              <button onclick="saveGrade()">Save grade</button>
+              <span id="gradeStatus" class="muted" style="font-size:11.5px"></span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
     </div>
   </div>
-  <div id="gvmain">
-    <div class="card" style="padding:0;overflow:hidden">
-      <div id="monMap" style="height:520px;width:100%;background:#0c141d"></div>
-    </div>
-    <div class="card">
-      <h2>Zone summary (recent trail)</h2>
-      <div id="monZones" class="legend"></div>
-    </div>
-    <div class="card">
-      <h2>📋 Daily scorecard <span class="muted" style="font-weight:400;text-transform:none">— hours + truthfulness for the selected device &amp; day</span></h2>
-      <div id="scHours" class="legend" style="margin-bottom:6px">…</div>
-      <div id="scZones" class="legend" style="margin-bottom:12px"></div>
-      <div id="scScreen" class="legend" style="margin-bottom:12px"></div>
-      <label class="muted" style="font-size:12px;display:block;margin-bottom:4px">What Victor said he did (self-report) — the phone intake will fill this automatically later:</label>
-      <textarea id="scReport" class="full" style="min-height:70px" placeholder="Type or paste his report for this day…"></textarea>
-      <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;align-items:center">
-        <button onclick="saveReport()">Save report</button>
-        <button onclick="runScore()">⚖️ Score this day</button>
-        <span id="scStatus" class="muted" style="align-self:center"></span>
-      </div>
-      <div id="gradeBox" style="margin-top:12px;padding-top:10px;border-top:1px solid #26354a">
-        <label class="muted" style="font-size:12px;display:block;margin-bottom:4px">Your grade for this day (0–100) — how productive do YOU think it was, at an hour/two-hour level? The engine learns your standard.</label>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <input id="gradeVal" type="number" min="0" max="100" step="1" placeholder="0-100" style="width:90px">
-          <input id="gradeNote" type="text" placeholder="Why? (optional — teaches the engine)" style="flex:1;min-width:180px">
-          <button onclick="saveGrade()">Save my grade</button>
-          <span id="gradeStatus" class="muted"></span>
-        </div>
-        <div id="gradeProgress" class="muted" style="font-size:12px;margin-top:6px"></div>
-      </div>
-      <div id="scResult" style="margin-top:12px"></div>
-    </div>
-    <div class="card" id="webActCard">
-      <h2>🖥 Admin web activity <span class="muted" style="font-weight:400;text-transform:none">— URLs visited, time on each, and total activity level (WebWork). The admin-activity signal we grade on.</span></h2>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
-        <button class="ghost" onclick="loadWebActivity()">Refresh</button>
-        <span id="webActStatus" class="muted"></span>
-      </div>
-      <div id="webActSummary" class="legend" style="margin-bottom:10px">…</div>
-      <div id="webActList"></div>
-    </div>
-    <div class="card" id="bonusOwnerCard">
-      <h2>&#128176; Bonus &mdash; enter month <span class="muted" style="font-weight:400;text-transform:none">&mdash; Victor's incentive comp; what you enter here shows on his My Work tab</span></h2>
-      <div id="bonusOwnerBody" class="legend">&hellip;</div>
-    </div>
+  <div id="gvIntegrity" class="gv-subview" style="display:none">
     <div class="card" id="fraudCard" style="border-color:#5a2a2a">
       <h2>🛡️ Fraud Alert <span class="muted" style="font-weight:400;text-transform:none">— payout-account integrity + receipts (Gavin-only)</span></h2>
       <div class="legend" style="margin-bottom:10px">Records the <b>correct payout bank account</b> for each channel, then flags if a checked value ever differs. Also logs receipts (Amazon, MMS) for reconciliation. Victor can’t see this tab.</div>
@@ -491,14 +594,24 @@
       <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings. Sanity-check Victor’s cleaning claims &amp; supply receipts against this: a unit only needs a full clean when a guest checked <b>out</b> that day.</div>
       <div id="fraudCleaning" class="legend">…</div>
     </div>
-    <div class="card" id="callsCard">
-      <h2>📞 Daily call transcripts <span class="muted" style="font-weight:400;text-transform:none">— Victor’s phoned-in updates; also feeds the scorecard</span></h2>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
-        <button class="ghost" onclick="loadCalls()">Refresh</button>
-        <span id="callsStatus" class="muted"></span>
+  </div>
+  <div id="gvPricing" class="gv-subview" style="display:none">
+      <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px;border-color:#3a2a1a">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;color:#e8c37a">Pricing tuning &middot; Gavin-only &mdash; changes live pricing</div>
       </div>
-      <div id="callsList" class="legend">…</div>
+    <div class="card" id="tuneCard">
+    <h2>🎚 Filter tuning <span class="muted" style="font-weight:400;text-transform:none">— manual strength knobs now; the learning system will drive these automatically later</span></h2>
+    <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then click <b>Update prices</b> to recalculate them with the new settings and preview the result here in the calendar &amp; breakdown. <b>Nothing is sent to OwnerRez</b> — review the updated prices, then push separately when you&rsquo;re ready.</div>
+    <div id="tuneGrid"></div>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center">
+      <button onclick="saveKnobs()">Save knobs</button>
+      <button onclick="updateKnobPrices()">⟳ Update prices</button>
+      <button class="ghost" onclick="resetKnobs()">Reset to defaults</button>
+      <span id="tuneStatus" class="muted" style="align-self:center"></span>
     </div>
+  </div>
+  </div>
+  <div id="gvConn" class="gv-subview" style="display:none">
     <div class="card" id="connCard">
       <h2>🔌 Data connection check <span class="muted" style="font-weight:400;text-transform:none">— is WebWork + Traccar actually reaching the engine?</span></h2>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
@@ -506,11 +619,6 @@
         <span id="connStatus" class="muted"></span>
       </div>
       <div id="connBody" class="legend">…</div>
-    </div>
-    <div class="card" id="weeklyHideCard">
-      <h2>&#128202; Weekly report visibility <span class="muted" style="font-weight:400;text-transform:none">- hide Victor's weekly report while you edit it</span></h2>
-      <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="weeklyHideChk" onchange="setWeeklyHide()"> <span>Hide the Weekly report from Victor's My Work tab</span></label>
-      <div id="weeklyHideStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
     </div>
     <div class="card" id="emailRecipCard">
       <h2>&#9993; Report emails <span class="muted" style="font-weight:400;text-transform:none">- who receives the data-gap alert &amp; monthly report (guest-messaging emails live on the Messaging tab)</span></h2>
@@ -538,25 +646,40 @@
       <div class="legend" style="margin:8px 0 2px;font-size:12px">Or upload the .docx once (one-time snapshot, won\u2019t auto-update): <input id="todoDocFile" type="file" accept=".docx" onchange="uploadTodoDocx(this)"></div>
       <div id="todoDocPreview" class="legend" style="white-space:pre-wrap;margin-top:8px;max-height:160px;overflow:auto"></div>
     </div>
-    <div class="card" style="border-color:#3a2a1a">
-      <h2>🎚 Pricing tuning <span class="muted" style="font-weight:400;text-transform:none">— moved here from the main tab; changes pricing (Gavin-only)</span></h2>
+    <div class="card" id="weeklyHideCard">
+      <h2>&#128202; Weekly report visibility <span class="muted" style="font-weight:400;text-transform:none">- hide Victor's weekly report while you edit it</span></h2>
+      <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="weeklyHideChk" onchange="setWeeklyHide()"> <span>Hide the Weekly report from Victor's My Work tab</span></label>
+      <div id="weeklyHideStatus" class="muted" style="font-size:12px;margin-top:6px"></div>
     </div>
-  <div class="card" id="tuneCard">
-    <h2>🎚 Filter tuning <span class="muted" style="font-weight:400;text-transform:none">— manual strength knobs now; the learning system will drive these automatically later</span></h2>
-    <div class="legend" id="tuneNote" style="margin-bottom:10px">Adjust how hard each filter pushes price, then click <b>Update prices</b> to recalculate them with the new settings and preview the result here in the calendar &amp; breakdown. <b>Nothing is sent to OwnerRez</b> — review the updated prices, then push separately when you&rsquo;re ready.</div>
-    <div id="tuneGrid"></div>
-    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center">
-      <button onclick="saveKnobs()">Save knobs</button>
-      <button onclick="updateKnobPrices()">⟳ Update prices</button>
-      <button class="ghost" onclick="resetKnobs()">Reset to defaults</button>
-      <span id="tuneStatus" class="muted" style="align-self:center"></span>
+    <div class="card" id="bonusOwnerCard">
+      <h2>&#128176; Bonus &mdash; enter month <span class="muted" style="font-weight:400;text-transform:none">&mdash; Victor's incentive comp; what you enter here shows on his My Work tab</span></h2>
+      <div id="bonusOwnerBody" class="legend">&hellip;</div>
     </div>
   </div>
-  </div>
-  </div>
+</div>
 </div>
 
 <div class="wrap" id="bonusMain" style="display:none">
+  <div id="bwStatusPair" style="grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px">
+    <div style="background:#101a29;border:1px solid #1f4634;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="width:9px;height:9px;border-radius:50%;background:#34d399;display:block"></span>
+        <div style="font-size:13px;font-weight:600">Location working</div>
+        <span style="flex:1"></span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#7f8fa6">GPS tracking</span>
+      </div>
+      <div class="muted" style="font-size:12px;color:#7f8fa6">Your phone's GPS is reporting to the engine. Gavin reviews your on-site time on the Daily review tab.</div>
+    </div>
+    <div style="background:#101a29;border:1px solid #1f4634;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="width:9px;height:9px;border-radius:50%;background:#34d399;display:block"></span>
+        <div style="font-size:13px;font-weight:600">WebWork working</div>
+        <span style="flex:1"></span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#7f8fa6">Computer activity</span>
+      </div>
+      <div class="muted" style="font-size:12px;color:#7f8fa6">The WebWork desktop app is tracking your computer time. Keep it running while you work.</div>
+    </div>
+  </div>
   <div class="card" id="todoCard">
     <h2>📋 To-Do list <span class="muted" style="font-weight:400;text-transform:none">— pulled from Gavin's document; the daily grader reads this</span></h2>
     <div class="legend" style="margin-bottom:8px">Your task list, pulled live from Gavin's document. The engine reads it each day to understand and grade your work.</div>
@@ -1090,10 +1213,22 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); initMonCal(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); initMonCal(); gvNav('day'); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
+}
+function gvNav(v){
+  var map={day:'gvDay',integrity:'gvIntegrity',pricing:'gvPricing',conn:'gvConn'};
+  var tabs={day:'gvTabDay',integrity:'gvTabInt',pricing:'gvTabPri',conn:'gvTabRep'};
+  for(var k in map){ var el=document.getElementById(map[k]); if(el) el.style.display=(k===v)?'':'none';
+    var t=document.getElementById(tabs[k]); if(t) t.className='gvtab'+(k===v?' on':''); }
+  if(v==='day'&&MON_MAP){ setTimeout(function(){ try{MON_MAP.invalidateSize();}catch(e){} },60); }
+}
+function gvAutoGrade(){ var c=document.getElementById('gvAutoChip'); if(!c) return;
+  var on=c.dataset.off!=='1'; on=!on; c.dataset.off=on?'':'1';
+  if(on){ c.style.background='#12271e';c.style.borderColor='#1f4634';c.style.color='#6ee7b7'; c.innerHTML='<span style="width:7px;height:7px;border-radius:50%;display:block;background:#34d399"></span> Auto-grade on'; }
+  else { c.style.background='#1b2739';c.style.borderColor='#2c3a51';c.style.color='#93a2b8'; c.innerHTML='<span style="width:7px;height:7px;border-radius:50%;display:block;background:#64758d"></span> Auto-grade off'; }
 }
 async function populateDays(){ try{ const dev=(document.getElementById('monDevice')||{}).value||'victor';
   const r=await fetch(api('gps_days')+'&id='+encodeURIComponent(dev)+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
@@ -1118,6 +1253,27 @@ async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementB
     const h=j.hours||{}; document.getElementById('scHours').innerHTML = h.available ? ('<b>Hours worked (WebWork):</b> '+h.hours+'h &middot; '+h.active_pct+'% active ('+h.active_min+' of '+h.tracked_min+' min)') : ('<b>Hours worked:</b> <span class="muted">no WebWork data yet'+(h.error?(' ('+esc(h.error)+')'):'')+'</span>');
     const z=j.zones||{}; const bz=z.byZoneMin||{};
     document.getElementById('scZones').innerHTML = '<b>On-site:</b> '+(z.on_site_min||0)+' of '+(z.total_min||0)+' tracked min &nbsp;&middot;&nbsp; office '+(bz.office||0)+' &middot; tepees '+(bz.tepees||0)+' &middot; maintenance '+(bz.maintenance||0)+' &middot; resort '+(bz.resort||0)+' &middot; off '+(bz.off||0)+' (min)';
+    // ---- redesigned day-header: stat boxes + title/source/LIVE ----
+    (function(){
+      var setT=function(id,v,col){ var el=document.getElementById(id); if(el){ el.innerHTML=v; if(col) el.style.color=col; } };
+      var hoursV = h.available ? (h.hours+'h') : '\u2014';
+      var actV = h.available ? (h.active_pct+'%') : '\u2014';
+      var actCol = h.available ? (h.active_pct>=60?'#34d399':'#fbbf24') : '#e6ecf5';
+      var onsiteV = (z.on_site_min!=null) ? (z.on_site_min+'m') : '\u2014';
+      var gr = (j.grade&&j.grade.grade!=null)?j.grade.grade:null;
+      var grCol = gr==null?'#7f8fa6':(gr>=75?'#34d399':gr>=45?'#fbbf24':'#f87171');
+      setT('stHours',hoursV,'#e6ecf5'); setT('stActive',actV,actCol); setT('stOnsite',onsiteV,'#e6ecf5');
+      setT('stCleanings','\u2014','#fbbf24'); setT('stGrade',gr==null?'\u2014':(''+gr),grCol);
+      var date=(document.getElementById('monDate')||{}).value||'';
+      var isToday=!date;
+      var dstr = date || (new Date()).toISOString().slice(0,10);
+      var title='\u2014'; try{ var dt=new Date(dstr+'T12:00:00'); title=dt.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}); }catch(e){ title=dstr; }
+      setT('gvDayTitle',title); var lv=document.getElementById('gvLive'); if(lv) lv.style.display=isToday?'':'none';
+      var tracked=(h.tracked_min!=null)?h.tracked_min:(z.total_min||0);
+      var src=(isToday?'Live \u2014 ':'')+((z.total_min!=null?z.total_min:0)?'':'')+
+        ( (h.available||z.total_min) ? (tracked+' min tracked on computer'+(z.on_site_min!=null?(' \u00b7 '+z.on_site_min+' on-site min'):'')) : 'No tracked data yet for this day.');
+      setT('gvSource',src);
+    })();
     const sScreen=j.screen||{}; const sApps=j.apps||{}; const hh=j.hours||{}; const scEl=document.getElementById('scScreen'); if(scEl){
       var actRate = hh.available ? (hh.active_pct+'% active') : (sScreen.avg_activity_pct!=null ? (sScreen.avg_activity_pct+'% activity') : (sApps.avg_activity_pct!=null?(sApps.avg_activity_pct+'% activity'):''));
       var head = '<b>Computer activity (WebWork \u2014 verifies he was actually working):</b> '+(sScreen.available?(sScreen.active_min+' active min'):'\u2014')+(actRate?(' &middot; '+actRate):'');
