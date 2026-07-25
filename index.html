@@ -82,6 +82,15 @@
   ::-webkit-scrollbar{width:10px;height:10px}
   ::-webkit-scrollbar-thumb{background:#223047;border-radius:6px}
   ::-webkit-scrollbar-track{background:transparent}
+
+  /* ===== My Work — mock two-column dashboard ===== */
+  #bonusMain{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+  #bonusMain>.card{margin-bottom:0}
+  #bonusMain>#todoCard{grid-column:1 / -1}
+  #bonusMain>#weeklyCard{grid-column:1}
+  #bonusMain>#timeoffCard{grid-column:2}
+  #bonusMain>.card:not(#todoCard):not(#weeklyCard):not(#timeoffCard){grid-column:1 / -1}
+  @media(max-width:860px){ #bonusMain{grid-template-columns:1fr} #bonusMain>.card{grid-column:1 / -1 !important} }
 </style></head><body>
 
 <!-- PUBLIC default: read-only booking roster pulled live from OwnerRez (no password) -->
