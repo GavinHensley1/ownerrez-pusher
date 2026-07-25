@@ -84,7 +84,7 @@
   ::-webkit-scrollbar-track{background:transparent}
 
   /* ===== My Work — mock two-column dashboard ===== */
-  #bonusMain{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+  #bonusMain{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;grid-auto-flow:dense}
   #bonusMain>.card{margin-bottom:0}
   #bonusMain>#todoCard{grid-column:1 / -1}
   #bonusMain>#weeklyCard{grid-column:1}
@@ -93,7 +93,7 @@
   @media(max-width:860px){ #bonusMain{grid-template-columns:1fr} #bonusMain>.card{grid-column:1 / -1 !important} }
 
   /* ===== Gavin tab — mock dense dashboard grid ===== */
-  #gavinBody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+  #gavinBody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;grid-auto-flow:dense}
   #gavinBody>.card{margin-bottom:0}
   #gavinBody>.card:has(#monMap),#gavinBody>.card:has(table),#gavinBody>.card:has(.tgrid),#gavinBody>.card:has(#scReport){grid-column:1 / -1}
   @media(max-width:860px){ #gavinBody{grid-template-columns:1fr} #gavinBody>.card{grid-column:1 / -1 !important} }
@@ -1065,7 +1065,7 @@ function switchView(v){
   document.getElementById('main').style.display=isP?'block':'none';
   document.getElementById('msgMain').style.display=isM?'block':'none';
   document.getElementById('monMain').style.display=isMon?'block':'none';
-  const bm=document.getElementById('bonusMain'); if(bm) bm.style.display=isB?'block':'none';
+  const bm=document.getElementById('bonusMain'); if(bm) bm.style.display=isB?'grid':'none';
   document.getElementById('tabPricing').className='seg'+(isP?' on':'');
   document.getElementById('tabMsg').className='seg'+(isM?' on':'');
   const tm=document.getElementById('tabMon'); if(tm) tm.className='seg'+(isMon?' on':'');
@@ -1083,7 +1083,7 @@ const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='block'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); initMonCal(); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); monAutoToggle(); initMonCal(); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
