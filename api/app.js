@@ -1918,7 +1918,8 @@ module.exports=async(req,res)=>{
     }
     // WebWork screen-activity (Gavin-gated): what Victor was doing on the computer for a date.
     if(action==="ww_activity"){
-      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      // Victor may read his OWN WebWork activity (My Work panel), as well as Gavin.
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
       return res.status(200).json(Object.assign(await wwScreenActivity(date), {apps: await wwAppsWebsites(date)}));
     }
@@ -2047,7 +2048,8 @@ if(action==="email_recipients"){
     }
     // Month summary: average grade + good/bad lists + optional AI prose. Gavin-gated. ?month=YYYY-MM (default current).
     if(action==="score_summary"){
-      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      // Victor sees his own month AI-score snippet (My Work), plus Gavin.
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const month=String((req.query&&req.query.month)||"")||etDate(new Date().toISOString()).slice(0,7);
       const first=month+"-01", last=monthLastDay(month);
       let dates=[]; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); dates=(z||[]).filter(function(d){ return d>=first && d<=last; }); } }catch(e){}
