@@ -92,11 +92,14 @@
   #bonusMain>.card:not(#todoCard):not(#weeklyCard):not(#timeoffCard){grid-column:1 / -1}
   @media(max-width:860px){ #bonusMain{grid-template-columns:1fr} #bonusMain>.card{grid-column:1 / -1 !important} }
 
-  /* ===== Gavin tab — mock dense dashboard grid ===== */
-  #gavinBody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;grid-auto-flow:dense}
-  #gavinBody>.card{margin-bottom:0}
-  #gavinBody>.card:has(#monMap),#gavinBody>.card:has(table),#gavinBody>.card:has(.tgrid),#gavinBody>.card:has(#scReport){grid-column:1 / -1}
-  @media(max-width:860px){ #gavinBody{grid-template-columns:1fr} #gavinBody>.card{grid-column:1 / -1 !important} }
+  /* ===== Gavin Daily-Review — mock two-panel Day View ===== */
+  #gavinBody{display:grid;grid-template-columns:340px minmax(0,1fr);gap:16px;align-items:start}
+  #gvside{position:sticky;top:12px;display:flex;flex-direction:column;gap:16px;min-width:0}
+  #gvmain{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;grid-auto-flow:dense;min-width:0}
+  #gvside>.card,#gvmain>.card{margin-bottom:0}
+  #gvmain>.card:has(#monMap),#gvmain>.card:has(table),#gvmain>.card:has(.tgrid),#gvmain>.card:has(#scReport){grid-column:1 / -1}
+  #scoredDaysCard .scday{aspect-ratio:1/1;font-size:10px}
+  @media(max-width:900px){ #gavinBody{grid-template-columns:1fr} #gvside{position:static} #gvmain{grid-template-columns:1fr} }
 </style></head><body>
 
 <!-- PUBLIC default: read-only booking roster pulled live from OwnerRez (no password) -->
@@ -378,6 +381,7 @@
     </div>
   </div>
   <div id="gavinBody" style="display:none">
+  <div id="gvside">
     <div class="card">
       <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
         <div><b>Device</b> <select id="monDevice" onchange="onDeviceChange()" style="width:auto"><option value="victor">victor</option><option value="test">test</option></select></div>
@@ -405,6 +409,8 @@
         <span><span class="scdot" style="background:#2b3b52"></span>no data</span>
       </div>
     </div>
+  </div>
+  <div id="gvmain">
     <div class="card" style="padding:0;overflow:hidden">
       <div id="monMap" style="height:520px;width:100%;background:#0c141d"></div>
     </div>
@@ -545,6 +551,7 @@
       <button class="ghost" onclick="resetKnobs()">Reset to defaults</button>
       <span id="tuneStatus" class="muted" style="align-self:center"></span>
     </div>
+  </div>
   </div>
   </div>
 </div>
