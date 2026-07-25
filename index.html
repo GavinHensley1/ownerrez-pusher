@@ -148,12 +148,6 @@
   <span class="muted" id="horizon"></span>
   <span class="sp"></span>
   <button id="tabMon" class="seg" onclick="switchView('monitoring')">Gavin</button>
-  <div class="toggle" id="syncWrap">
-    <span class="muted">Auto-sync to OwnerRez</span>
-    <div class="switch" id="syncSwitch" onclick="toggleSync()"><div class="knob"></div></div>
-    <span class="pill" id="syncState">OFF</span>
-    <button id="syncNow" class="ghost" onclick="syncNow()" style="display:none">Sync now</button>
-  </div>
 </header>
 
 <div class="wrap" id="main" style="display:none">
@@ -164,8 +158,14 @@
         <div class="legend" id="statusSub" style="margin-top:4px"></div>
         <div class="legend" id="statusGap" style="margin-top:6px"></div>
       </div>
-      <!-- item P10: uniform control row — controls pulled out of the status headline text -->
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <!-- item P10 (follow-up): single uniform control row — Auto-sync toggle + Sync now relocated here from the top nav, alongside gap-nights + Push now -->
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <div class="toggle" id="syncWrap">
+          <span class="muted">Auto-sync to OwnerRez</span>
+          <div class="switch" id="syncSwitch" onclick="toggleSync()"><div class="knob"></div></div>
+          <span class="pill" id="syncState">OFF</span>
+          <button id="syncNow" class="ghost" onclick="syncNow()" style="display:none">Sync now</button>
+        </div>
         <button class="ghost" id="gapToggleBtn" onclick="toggleGap(true)">Enable gap-nights</button>
         <button class="ghost" onclick="syncNow()" id="pushNow">⟳ Push now</button>
       </div>
