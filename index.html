@@ -381,8 +381,7 @@
   <div id="gavinBody" style="display:none">
   <div id="gvSubnav" style="display:flex;gap:26px;padding:0 4px 0 4px;height:44px;align-items:center;border-bottom:1px solid #1b2536;position:sticky;top:0;z-index:20;background:var(--bg);margin-bottom:20px">
     <div id="gvTabDay" class="gvtab" onclick="gvNav('day')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Daily review</div>
-    <div id="gvTabInt" class="gvtab" onclick="gvNav('integrity')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;gap:8px;border-bottom:2px solid transparent;cursor:pointer">Integrity &amp; receipts
-      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;padding:2px 6px;border-radius:20px;background:#2a1c18;color:#f4a08c;border:1px solid #45291f">!</span></div>
+    <div id="gvTabInt" class="gvtab" onclick="gvNav('integrity')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;gap:8px;border-bottom:2px solid transparent;cursor:pointer">Integrity &amp; receipts</div>
     <div id="gvTabPri" class="gvtab" onclick="gvNav('pricing')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Pricing tuning</div>
     <div id="gvTabRep" class="gvtab" onclick="gvNav('conn')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Connections &amp; reports</div>
     <div id="gvTabBonus" class="gvtab" onclick="gvNav('bonus')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Bonus</div>
@@ -399,7 +398,8 @@
         </div>
         <div style="display:flex;gap:8px;margin-top:8px">
           <select id="monDevice" onchange="onDeviceChange()" style="flex:1;min-width:0"><option value="victor">victor</option><option value="test">test</option></select>
-          <select id="monDate" onchange="onDateChange()" style="flex:1;min-width:0"><option value="">Today (live)</option></select>
+          <!-- date dropdown removed from UI (item 3): the calendar widget below is the picker. Kept hidden as the selected-date state holder that monCalPick() drives. -->
+          <select id="monDate" onchange="onDateChange()" style="display:none"><option value="">Today (live)</option></select>
         </div>
         <div id="monNow" class="legend" style="margin:8px 0 0;font-size:11.5px;color:#7f8fa6">Loading&hellip;</div>
       </div>
@@ -421,13 +421,17 @@
         </div>
       </div>
 
-      <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px;padding:14px">
-        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:10px">Last 14 days</div>
-        <div id="kpi14" style="display:flex;flex-direction:column;gap:8px;font-size:12px">
-          <div style="display:flex;justify-content:space-between"><span style="color:#93a2b8">Days with full data</span><span id="kpiFull" style="font-family:'IBM Plex Mono',monospace;font-weight:600">&mdash;</span></div>
-          <div style="display:flex;justify-content:space-between"><span style="color:#93a2b8">Avg hours / day</span><span id="kpiHours" style="font-family:'IBM Plex Mono',monospace;font-weight:600">&mdash;</span></div>
-          <div style="display:flex;justify-content:space-between"><span style="color:#93a2b8">Avg computer active</span><span id="kpiActive" style="font-family:'IBM Plex Mono',monospace;font-weight:600">&mdash;</span></div>
-          <div style="display:flex;justify-content:space-between"><span style="color:#93a2b8">Days you graded</span><span id="kpiGraded" style="font-family:'IBM Plex Mono',monospace;font-weight:600">&mdash;</span></div>
+      <!-- item 12: "Grade this day" moved here, into the slot the "Last 14 days" box used to occupy (item 5 removed that box). -->
+      <div style="background:#101a29;border:1px solid #2c3a51;border-radius:12px;padding:16px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:6px">Grade this day</div>
+        <div id="gradeProgress" style="font-size:12px;color:#7f8fa6;line-height:1.6;margin-bottom:12px">How productive was this day, at an hour-by-hour level? The engine learns your standard.</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+          <input id="gradeVal" type="number" min="0" max="100" step="1" placeholder="0-100" style="width:90px">
+          <input id="gradeNote" type="text" placeholder="Why? (optional &mdash; teaches the engine)" style="flex:1;min-width:120px">
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+          <button onclick="saveGrade()">Save grade</button>
+          <span id="gradeStatus" class="muted" style="font-size:11.5px"></span>
         </div>
       </div>
     </div>
@@ -452,10 +456,14 @@
           <div style="flex:1"></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Hours worked</div><div id="stHours" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#e6ecf5">&mdash;</div></div>
+            <!-- item 6: on-location time (hours), sits right next to Hours worked -->
+            <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Location time</div><div id="stLocHours" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#e6ecf5">&mdash;</div></div>
             <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Computer active</div><div id="stActive" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;">&mdash;</div></div>
             <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">On-site</div><div id="stOnsite" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#e6ecf5">&mdash;</div></div>
             <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Cleanings due</div><div id="stCleanings" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;color:#fbbf24">&mdash;</div></div>
             <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Your grade</div><div id="stGrade" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;">&mdash;</div></div>
+            <!-- item 8: engine's own computed grade, shown side-by-side with Your grade -->
+            <div style="min-width:104px;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d">Engine grade</div><div id="stEngGrade" style="font-family:'IBM Plex Mono',monospace;font-size:17px;font-weight:600;margin-top:4px;">&mdash;</div></div>
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:2px;margin-top:14px;padding-top:14px;border-top:1px solid #1c2839">
@@ -503,49 +511,32 @@
 
           <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
-              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Computer activity &middot; WebWork</div><span style="flex:1"></span>
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Admin time</div><span style="flex:1"></span>
               <span class="seg-x" onclick="loadWebActivity()" style="padding:3px 9px;cursor:pointer;font-size:12px">Refresh</span>
               <span id="webActStatus" class="muted" style="font-size:11px"></span>
             </div>
             <div id="webActSummary" class="legend" style="margin-bottom:12px">&hellip;</div>
-            <div id="webActList" style="max-height:300px;overflow-y:auto"></div>
+            <!-- item 10: sized to match the Location map box (320px) so the two boxes read as equal. -->
+            <div id="webActList" style="height:320px;overflow-y:auto"></div>
           </div>
 
+          <!-- item 11: "What Victor said he did" self-report removed (redundant with the transcript). item 14: transcript in a fixed-height internal scroll box. Hidden scReport/scStatus retained as state holders so existing scoring JS keeps working. -->
           <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
             <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">
-              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">What Victor said he did</div>
-              <span style="flex:1"></span><span id="scStatus" class="muted" style="font-size:11px"></span>
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Transcript</div>
+              <span style="flex:1"></span><span id="callsStatus" class="muted" style="font-size:11px"></span>
             </div>
-            <label class="muted" style="font-size:11.5px;display:block;margin-bottom:6px;color:#7f8fa6">Self-report (phone intake will fill this automatically):</label>
-            <textarea id="scReport" class="full" style="min-height:70px" placeholder="Type or paste his report for this day&hellip;"></textarea>
-            <div style="display:flex;gap:10px;margin:10px 0 4px;flex-wrap:wrap;align-items:center">
-              <button onclick="saveReport()">Save report</button>
-              <button onclick="runScore()">&#9878;&#65039; Score this day</button>
-            </div>
-            <div id="callsStatus" class="muted" style="font-size:11px;margin-top:6px"></div>
-            <div id="callsList" class="legend" style="margin-top:8px">&hellip;</div>
+            <textarea id="scReport" style="display:none"></textarea><span id="scStatus" style="display:none"></span>
+            <div id="callsList" class="legend" style="height:320px;overflow-y:auto;padding-right:4px">&hellip;</div>
           </div>
 
-          <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
-            <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
-              <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Engine verdict</div><span style="flex:1"></span>
-            </div>
-            <div id="scResult"></div>
+        </div>
+        <!-- item 13: Engine verdict spans the whole row beneath both columns (grid-column:1/-1), flush with the transcript. -->
+        <div style="grid-column:1 / -1;background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Engine verdict</div><span style="flex:1"></span>
           </div>
-
-          <div style="background:#101a29;border:1px solid #2c3a51;border-radius:12px;padding:16px">
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:6px">Grade this day</div>
-            <div id="gradeProgress" style="font-size:12px;color:#7f8fa6;line-height:1.6;margin-bottom:12px">How productive was this day, at an hour-by-hour level? The engine learns your standard.</div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-              <input id="gradeVal" type="number" min="0" max="100" step="1" placeholder="0-100" style="width:90px">
-              <input id="gradeNote" type="text" placeholder="Why? (optional &mdash; teaches the engine)" style="flex:1;min-width:160px">
-            </div>
-            <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
-              <button onclick="saveGrade()">Save grade</button>
-              <span id="gradeStatus" class="muted" style="font-size:11.5px"></span>
-            </div>
-          </div>
-
+          <div id="scResult"></div>
         </div>
       </div>
     </div>
@@ -563,7 +554,6 @@
         <input id="frRcNote" placeholder="note / item" style="width:170px">
         <button onclick="fraudAddReceipt()">Log receipt</button>
       </div>
-      <div class="legend" style="margin-bottom:6px">Receipts texted via MMS to the StayDeck number will land here automatically once phone intake is live.</div>
       <div id="fraudReceipts" style="max-height:260px;overflow-y:auto"></div>
       <h3 style="margin:16px 0 4px">🧹 Cleaning ground-truth <span class="muted" style="font-weight:400;text-transform:none">— actual checkouts per day = units that truly needed a turnover clean</span></h3>
       <div class="legend" style="margin-bottom:6px">Pulled live from OwnerRez bookings. Sanity-check Victor’s cleaning claims &amp; supply receipts against this: a unit only needs a full clean when a guest checked <b>out</b> that day.</div>
@@ -1201,11 +1191,14 @@ function switchView(v){
 }
 // ===== Monitoring (Gavin) tab: GPS map overlay =====
 let GPW='', MON_MAP=null, MON_LAYERS=null, MON_TIMER=null;
-const ZONE_COLORS={office:'#4ade80', tepees:'#60a5fa', maintenance:'#f4b942', resort:'#a78bfa', off:'#f87171'};
+// item 9: coherent, legible zone palette. Each location gets one distinct hue and off-site is a
+// neutral slate (not alarming red) so location pings are never misread as good/bad grade signals
+// (green=good / red=bad is reserved for grades & calendar status, not locations).
+const ZONE_COLORS={office:'#60a5fa', tepees:'#22d3ee', maintenance:'#f59e0b', resort:'#a78bfa', off:'#94a3b8'};
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); loadEmailFlags(); monAutoToggle(); initMonCal(); gvNav('day'); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); loadEmailFlags(); monAutoToggle(); initMonCal(); gvAutoGradeInit(); gvNav('day'); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1217,11 +1210,18 @@ function gvNav(v){
     var t=document.getElementById(tabs[k]); if(t) t.className='gvtab'+(k===v?' on':''); }
   if(v==='day'&&MON_MAP){ setTimeout(function(){ try{MON_MAP.invalidateSize();}catch(e){} },60); }
 }
-function gvAutoGrade(){ var c=document.getElementById('gvAutoChip'); if(!c) return;
-  var on=c.dataset.off!=='1'; on=!on; c.dataset.off=on?'':'1';
+// item 7: auto-grade toggle now persists. Apply state, toggle+save, and restore on load
+// so once it's switched OFF it STAYS off across refreshes/reloads instead of springing back on.
+function gvApplyAutoGrade(on){ var c=document.getElementById('gvAutoChip'); if(!c) return;
+  c.dataset.off=on?'':'1';
   if(on){ c.style.background='#12271e';c.style.borderColor='#1f4634';c.style.color='#6ee7b7'; c.innerHTML='<span style="width:7px;height:7px;border-radius:50%;display:block;background:#34d399"></span> Auto-grade on'; }
   else { c.style.background='#1b2739';c.style.borderColor='#2c3a51';c.style.color='#93a2b8'; c.innerHTML='<span style="width:7px;height:7px;border-radius:50%;display:block;background:#64758d"></span> Auto-grade off'; }
 }
+function gvAutoGrade(){ var c=document.getElementById('gvAutoChip'); if(!c) return;
+  var on=c.dataset.off!=='1'; on=!on; gvApplyAutoGrade(on);
+  try{ localStorage.setItem('orp_autoGradeOff', on?'0':'1'); }catch(e){}
+}
+function gvAutoGradeInit(){ var off='0'; try{ off=localStorage.getItem('orp_autoGradeOff')||'0'; }catch(e){} gvApplyAutoGrade(off!=='1'); }
 async function populateDays(){ try{ const dev=(document.getElementById('monDevice')||{}).value||'victor';
   const r=await fetch(api('gps_days')+'&id='+encodeURIComponent(dev)+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
   const sel=document.getElementById('monDate'); if(!sel) return; const days=j.days||[];
@@ -1252,10 +1252,16 @@ async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementB
       var actV = h.available ? (h.active_pct+'%') : '\u2014';
       var actCol = h.available ? (h.active_pct>=60?'#34d399':'#fbbf24') : '#e6ecf5';
       var onsiteV = (z.on_site_min!=null) ? (z.on_site_min+'m') : '\u2014';
+      // item 6: on-location time in hours, shown next to Hours worked
+      var locHoursV = (z.on_site_min!=null) ? ((z.on_site_min/60).toFixed(1)+'h') : '\u2014';
       var gr = (j.grade&&j.grade.grade!=null)?j.grade.grade:null;
       var grCol = gr==null?'#7f8fa6':(gr>=75?'#34d399':gr>=45?'#fbbf24':'#f87171');
-      setT('stHours',hoursV,'#e6ecf5'); setT('stActive',actV,actCol); setT('stOnsite',onsiteV,'#e6ecf5');
-      setT('stCleanings',gvCleaningCountForSel(),'#fbbf24'); setT('stGrade',gr==null?'\u2014':(''+gr),grCol);
+      // item 8: engine's own computed grade (its productivity score; falls back to truth score)
+      var engRaw = (j.score&&j.score.productivity_score!=null) ? j.score.productivity_score : ((j.score&&j.score.truth_score!=null) ? j.score.truth_score : null);
+      var eng = (engRaw!=null&&isFinite(engRaw)) ? Math.round(engRaw) : null;
+      var engCol = eng==null?'#7f8fa6':(eng>=75?'#34d399':eng>=45?'#fbbf24':'#f87171');
+      setT('stHours',hoursV,'#e6ecf5'); setT('stLocHours',locHoursV,'#e6ecf5'); setT('stActive',actV,actCol); setT('stOnsite',onsiteV,'#e6ecf5');
+      setT('stCleanings',gvCleaningCountForSel(),'#fbbf24'); setT('stGrade',gr==null?'\u2014':(''+gr),grCol); setT('stEngGrade',eng==null?'\u2014':(''+eng),engCol);
       var date=(document.getElementById('monDate')||{}).value||'';
       var isToday=!date;
       var dstr = date || (new Date()).toISOString().slice(0,10);
@@ -1373,16 +1379,16 @@ function renderMonitor(j){ if(!MON_MAP) initMonMap(); MON_LAYERS.clearLayers();
   const res=zones.find(function(z){return z.name==='resort';}); if(res) L.circle([res.lat,res.lon],{radius:res.radius_m,color:'#a78bfa',weight:1,dashArray:'6 6',fill:false}).addTo(MON_LAYERS);
   const trail=(j.trail||[]).filter(function(p){return p&&isFinite(p.lat)&&isFinite(p.lon);});
   if(trail.length>1) L.polyline(trail.map(function(p){return [p.lat,p.lon];}),{color:'#ffffff',weight:2,opacity:0.55}).addTo(MON_LAYERS);
-  for(const p of trail){ const c=ZONE_COLORS[p.zone||'off']||'#f87171'; L.circleMarker([p.lat,p.lon],{radius:4,color:c,fillColor:c,fillOpacity:0.9,weight:1}).addTo(MON_LAYERS).bindPopup((p.zone||'off')+' · '+fmtWhen(p.t)); }
-  const last=j.last; if(last&&isFinite(last.lat)){ const c=ZONE_COLORS[last.zone||'off']||'#f87171';
+  for(const p of trail){ const c=ZONE_COLORS[p.zone||'off']||'#94a3b8'; L.circleMarker([p.lat,p.lon],{radius:4,color:c,fillColor:c,fillOpacity:0.9,weight:1}).addTo(MON_LAYERS).bindPopup((p.zone||'off')+' · '+fmtWhen(p.t)); }
+  const last=j.last; if(last&&isFinite(last.lat)){ const c=ZONE_COLORS[last.zone||'off']||'#94a3b8';
     L.circleMarker([last.lat,last.lon],{radius:8,color:'#fff',fillColor:c,fillOpacity:1,weight:2}).addTo(MON_LAYERS).bindPopup('LATEST · '+(last.zone||'off')+' · '+fmtWhen(last.t)).openPopup(); MON_MAP.panTo([last.lat,last.lon]); }
   else if(j.lastSeen&&isFinite(j.lastSeen.lat)){ const ls=j.lastSeen; const c=ZONE_COLORS[ls.zone||'off']||'#94a3b8';
     L.circleMarker([ls.lat,ls.lon],{radius:7,color:'#fbbf24',fillColor:c,fillOpacity:0.55,weight:2,dashArray:'3 3'}).addTo(MON_LAYERS).bindPopup('LAST SEEN (not today) · '+(ls.zone||'off')+' · '+fmtWhen(ls.t)).openPopup(); MON_MAP.panTo([ls.lat,ls.lon]); }
   const zoneNow=j.zone||(last&&last.zone)||null;
-  if(j.date){ document.getElementById('monNow').innerHTML = last ? ('<b>'+j.date+'</b> — '+(j.count||0)+' points · ended in <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> at '+fmtWhen(last.t)) : ('<b>'+j.date+'</b> — no points that day.'); }
+  if(j.date){ document.getElementById('monNow').innerHTML = last ? ('<b>Last point:</b> <b style="color:'+(ZONE_COLORS[zoneNow]||'#94a3b8')+'">'+(zoneNow||'off')+'</b> at '+fmtWhen(last.t)) : ('<b>'+j.date+'</b> — no points that day.'); }
   else {
     if(last){ var _ag=(Date.now()-new Date(last.t).getTime())/1000; var _fresh=_ag<900; var _dot=_fresh?'#4ade80':'#fbbf24';
-      document.getElementById('monNow').innerHTML = '<b style="color:'+_dot+'">\u25cf</b> Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#f87171')+'">'+(zoneNow||'off')+'</b> · updated '+agoStr(last.t)+(_fresh?'':' <span style="color:#fbbf24">(stale — phone may not be reporting)</span>')+' · '+(j.count||0)+' points today'; }
+      document.getElementById('monNow').innerHTML = '<b style="color:'+_dot+'">\u25cf</b> Currently: <b style="color:'+(ZONE_COLORS[zoneNow]||'#94a3b8')+'">'+(zoneNow||'off')+'</b> · updated '+agoStr(last.t)+(_fresh?'':' <span style="color:#fbbf24">(stale — phone may not be reporting)</span>'); }
     else if(j.lastSeen){ document.getElementById('monNow').innerHTML = '<b style="color:#f87171">\u25cf</b> <b style="color:#fbbf24">No GPS yet today.</b> Last seen '+agoStr(j.lastSeen.t)+' — <b>'+((j.lastSeen.zone)||'off')+'</b> · '+fmtWhen(j.lastSeen.t); }
     else { document.getElementById('monNow').innerHTML = 'No pings yet for this device.'; }
   }
