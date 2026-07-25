@@ -82,6 +82,23 @@
   ::-webkit-scrollbar{width:10px;height:10px}
   ::-webkit-scrollbar-thumb{background:#223047;border-radius:6px}
   ::-webkit-scrollbar-track{background:transparent}
+
+  /* ===== Layout pass — match mock density + two-column dashboards ===== */
+  body{font-size:13px}
+  .wrap{max-width:1340px;padding:20px 24px}
+  .card{padding:14px 16px;margin-bottom:16px}
+  header#app{padding:10px 20px;gap:12px;align-items:center}
+  header#app h1{font-size:15px}
+  #viewTabs{gap:4px}
+  #viewTabs .seg{padding:6px 12px;font-size:13px}
+  .legend{font-size:12px}
+  /* My Work + Gavin monitoring: dense two-column dashboard like the mock */
+  #bonusMain,#gavinBody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+  #bonusMain>.card,#gavinBody>.card{margin-bottom:0}
+  /* wide content (tables, maps, calendars) spans both columns */
+  #bonusMain>.card:has(table),#bonusMain>.card:has(.cal),#bonusMain>.card:has(textarea),
+  #gavinBody>.card:has(table),#gavinBody>.card:has(#monMap),#gavinBody>.card:has(.cal){grid-column:1 / -1}
+  @media(max-width:860px){ #bonusMain,#gavinBody{grid-template-columns:1fr} }
 </style></head><body>
 
 <!-- PUBLIC default: read-only booking roster pulled live from OwnerRez (no password) -->
