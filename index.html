@@ -620,28 +620,26 @@
       <div style="margin-top:8px"><span id="sysEmailStatus" class="muted"></span></div>
     </div>
     <div class="card" id="monthlyCard">
-      <h2>🗓 Monthly report <span class="muted" style="font-weight:400;text-transform:none">— Victor\u2019s month of grades; auto-emailed to you + Victor on the 1st</span></h2>
+      <!-- item R1: on-demand "Generate month report" replaces the old always-rendered monthly section. -->
+      <h2>🗓 Generate month report <span class="muted" style="font-weight:400;text-transform:none">— on-demand AI summary of the month’s daily grades: recurring strengths &amp; weaknesses</span></h2>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
         <input id="monthlyMonth" type="month" style="width:auto">
-        <button class="ghost" onclick="loadMonthly()">View</button>
-        <button class="ghost" onclick="scoreSummary()">Month summary</button>
-        <button onclick="emailMonthly()">Email now to me + Victor</button>
+        <button onclick="genMonthReport()">Generate month report</button>
+        <button class="ghost" onclick="emailMonthly()">Email to me + Victor</button>
         <span id="monthlyStatus" class="muted"></span>
       </div>
-      <div id="scoreSummaryBody" class="legend" style="margin-bottom:8px"></div>
-      <div id="monthlyBody" class="legend">…</div>
+      <div id="genMonthBody" class="legend"><span class="muted">Pick a month and generate — the engine averages that month’s daily grades and writes a short summary of the strengths &amp; weaknesses that recurred across the month.</span></div>
     </div>
     <div class="card" id="todoDocCard">
-      <h2>📋 Victor\u2019s to-do document <span class="muted" style="font-weight:400;text-transform:none">— auto-syncs from your Word doc daily</span></h2>
+      <h2>📋 Victor\u2019s to-do document <span class="muted" style="font-weight:400;text-transform:none">— a link to your Dropbox doc; the daily grader reads it directly</span></h2>
       <div class="legend" style="margin-bottom:6px">Paste a Dropbox link to your to-do <b>.docx</b> and the engine re-reads it every day \u2014 edit the file and the changes flow through automatically, no re-uploading. In Dropbox: right-click the file \u2192 Copy link, paste it below, Save. Stays a Word file; never Google Docs.</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <input id="todoDocUrl" type="text" placeholder="https://www.dropbox.com/scl/fi/\u2026/to-do.docx?\u2026" style="flex:1;min-width:220px">
         <button onclick="saveTodoDoc()">Save link</button>
         <span id="todoDocStatus" class="muted"></span>
       </div>
-      <div class="legend" style="margin:8px 0 2px;font-size:12px">Or upload the .docx once (one-time snapshot, won\u2019t auto-update): <input id="todoDocFile" type="file" accept=".docx" onchange="uploadTodoDocx(this)"></div>
       <!-- item C1: link to the doc instead of auto-populating its text; the daily grader reads the doc server-side -->
-      <a id="todoDocOpen" href="#" target="_blank" rel="noopener" style="display:none;margin-top:10px;padding:8px 14px;border-radius:8px;border:1px solid #2c3a51;color:#cfd9e8;font-size:12.5px;font-weight:600;text-decoration:none">Open the to-do document ↗</a>
+      <a id="todoDocOpen" href="#" target="_blank" rel="noopener" style="display:none;margin-top:10px;padding:8px 14px;border-radius:8px;border:1px solid #2c3a51;color:#cfd9e8;font-size:12.5px;font-weight:600;text-decoration:none">Open the Dropbox document ↗</a>
     </div>
   </div>
   <div id="gvBonus" class="gv-subview" style="display:none">
@@ -660,9 +658,10 @@
         <span style="width:9px;height:9px;border-radius:50%;background:#34d399;display:block"></span>
         <div style="font-size:13px;font-weight:600">Location working</div>
         <span style="flex:1"></span>
-        <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#7f8fa6">GPS tracking</span>
+        <span id="mwOnsite" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#7f8fa6">GPS tracking</span>
       </div>
-      <div class="muted" style="font-size:12px;color:#7f8fa6">Your phone's GPS is reporting to the engine. Gavin reviews your on-site time on the Daily review tab.</div>
+      <!-- item MW5: today's time in each zone (bubbles) from the phone's GPS. -->
+      <div id="mwZones" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:8px"><span class="muted" style="font-size:12px">Loading…</span></div>
     </div>
     <div style="background:#101a29;border:1px solid #1f4634;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px">
       <div style="display:flex;align-items:center;gap:10px">
@@ -689,14 +688,23 @@
     <div id="bonusBody" class="legend"></div>
   </div>
 
-  <!-- item MW6: Victor gets a small AI-score snippet (month average + short verdict), not the full grade calendar -->
+  <!-- item MW6: AI-score is now a clickable month calendar — tap a day to see its short explanation. -->
   <div class="card" id="aiScoreCard">
     <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px">
       <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">AI score</div>
       <span style="flex:1"></span>
       <span id="aiScoreAvg" style="font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:600;color:#7f8fa6">&mdash;</span>
     </div>
-    <div id="aiScoreBody" class="legend" style="font-size:12.5px;color:#b9c6d8"><span class="muted">Loading…</span></div>
+    <div style="display:flex;align-items:center;gap:8px;margin:4px 0 10px">
+      <span onclick="aiCalStep(-1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:15px">&lsaquo;</span>
+      <span id="aiCalLabel" style="font-size:12.5px;font-weight:600">&hellip;</span>
+      <span onclick="aiCalStep(1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:15px">&rsaquo;</span>
+      <span style="flex:1"></span>
+      <span style="font-size:11px;color:#64758d">tap a day for its explanation</span>
+    </div>
+    <div class="cal" id="aiCalDow" style="margin-bottom:6px"></div>
+    <div class="cal" id="aiCalGrid"></div>
+    <div id="aiScoreBody" class="legend" style="font-size:12.5px;color:#b9c6d8;margin-top:12px"><span class="muted">Loading…</span></div>
   </div>
 
   <div class="card" id="weeklyCard">
@@ -1234,7 +1242,7 @@ const ZONE_COLORS={office:'#60a5fa', tepees:'#22d3ee', maintenance:'#f59e0b', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadMonthly(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); loadEmailFlags(); monAutoToggle(); initMonCal(); gvAutoGradeInit(); gvNav('day'); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); loadEmailFlags(); monAutoToggle(); initMonCal(); gvAutoGradeInit(); gvNav('day'); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1400,6 +1408,19 @@ function renderMonthly(j){ const el=document.getElementById('monthlyBody'); if(!
   el.innerHTML=weeks.map(function(w){ const days=(w.days||[]).map(function(d){ return '<tr><td style="white-space:nowrap;color:var(--mut)">'+esc((d.weekday||'').slice(0,3))+' '+esc((d.date||'').slice(5))+'</td><td style="font-weight:600;white-space:nowrap">'+(d.grade==null?'\u2014':d.grade+'/100')+'</td><td style="word-break:break-word">'+esc(d.explanation||'')+'</td></tr>'; }).join('');
     return '<div style="margin-bottom:12px"><b>Week of '+esc(w.weekStart)+' \u2013 '+esc(w.weekEnd)+'</b>'+(w.avgGrade!=null?(' \u00b7 avg '+w.avgGrade+'/100'):'')+(w.narrative?('<div class="muted" style="font-size:12px;margin:2px 0">'+esc(w.narrative)+'</div>'):'')+'<table style="width:100%;table-layout:fixed"><colgroup><col style="width:64px"><col style="width:62px"><col></colgroup>'+days+'</table></div>'; }).join(''); }
 async function emailMonthly(){ if(!GPW) return; if(!confirm('Email the monthly report to you and Victor now?')) return; const st=document.getElementById('monthlyStatus'); if(st) st.textContent='Sending\u2026'; const mo=(document.getElementById('monthlyMonth')||{}).value||''; try{ const r=await fetch(api('monthly_report')+'&send=1'+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(st) st.textContent=(j&&j.sent)?('Emailed \u2713 to '+((j.to||[]).join(', '))):((j&&j.reason)||(j&&j.detail)||'send failed'); }catch(e){ if(st) st.textContent='error'; } }
+// item R1: on-demand month report generation (Gavin). Averages the month's dailies + AI 2-sentence recurring summary.
+async function genMonthReport(){ if(!GPW) return; var st=document.getElementById('monthlyStatus'); var body=document.getElementById('genMonthBody');
+  var mo=(document.getElementById('monthlyMonth')||{}).value||'';
+  if(st) st.textContent='Generating…'; if(body) body.innerHTML='<span class="muted">Averaging the month’s dailies and summarizing…</span>';
+  try{ var r=await fetch(api('gen_month_report')+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json();
+    if(st) st.textContent='';
+    if(!j||j.average==null||j.count===0){ if(body) body.innerHTML='<span class="muted">No graded days for '+esc((j&&j.month)||mo||'this month')+' yet.</span>'; return; }
+    var avg=j.average; var col=avg>=75?'#4ade80':avg>=45?'#f4b942':'#f87171';
+    var h='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px"><div style="font-size:40px;font-weight:800;color:'+col+'">'+avg+'<span style="font-size:16px;color:var(--mut)">/100</span></div><div><div style="font-weight:600">Average grade · '+esc(j.month||'')+'</div><div class="muted" style="font-size:12px">'+j.count+' graded day'+(j.count===1?'':'s')+'</div></div></div>';
+    h+=j.report?('<div class="legend" style="line-height:1.7;white-space:pre-wrap">'+esc(j.report)+'</div>'):'<span class="muted">No summary generated (no AI key or no notes).</span>';
+    if(body) body.innerHTML=h;
+  }catch(e){ if(st) st.textContent='error'; }
+}
 async function loadTodoDoc(){ if(!GPW) return; try{ const r=await fetch(api('todo_doc')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); const u=document.getElementById('todoDocUrl'); if(u && document.activeElement!==u) u.value=(j&&j.url)||''; const o=document.getElementById('todoDocOpen'); const uu=(j&&j.url)||((document.getElementById('todoDocUrl')||{}).value)||''; if(o){ if(uu){ o.href=uu; o.style.display='inline-block'; } else { o.style.display='none'; } } }catch(e){} }
 async function saveTodoDoc(){ if(!GPW) return; const st=document.getElementById('todoDocStatus'); if(st) st.textContent='Saving\u2026'; const url=(document.getElementById('todoDocUrl')||{}).value||''; try{ const r=await fetch(api('todo_doc'),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({url})}); const j=await r.json(); if(st) st.textContent=(j&&j.ok)?('Saved \u2713 \u00b7 '+(j.chars||0)+' chars read from your doc \u00b7 re-checked daily'):'Save failed'; const o=document.getElementById('todoDocOpen'); const uu=(j&&j.url)||((document.getElementById('todoDocUrl')||{}).value)||''; if(o){ if(uu){ o.href=uu; o.style.display='inline-block'; } else { o.style.display='none'; } } }catch(e){ if(st) st.textContent='error'; } }
 async function uploadTodoDocx(inp){ if(!GPW||!inp||!inp.files||!inp.files[0]) return; var f=inp.files[0]; var st=document.getElementById('todoDocStatus'); if(st) st.textContent='Reading '+f.name+'\u2026'; var rd=new FileReader(); rd.onload=async function(){ try{ var b64=String(rd.result||'').replace(/^data:[^,]*,/,''); if(st) st.textContent='Uploading\u2026'; var r=await fetch(api('todo_docx_upload'),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,data:b64})}); var j=await r.json(); if(j&&j.ok){ if(st) st.textContent='Loaded \u2713 \u00b7 '+j.chars+' chars from '+f.name; var p=document.getElementById('todoDocPreview'); if(p) p.textContent=j.text||''; } else if(st) st.textContent='Failed: '+((j&&j.error)||'error'); }catch(e){ if(st) st.textContent='Error: '+e.message; } inp.value=''; }; rd.onerror=function(){ if(st) st.textContent='Could not read file'; }; rd.readAsDataURL(f); }
@@ -1808,7 +1829,7 @@ async function moveCall(key){
 // ===== Bonus tab (visible to Victor later; no Gavin login) =====
 function bEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 let WEEK_OFF=0;
-async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadWeekly(); loadTimeoff(); loadBonusVictor(); loadWebworkVictor(); loadAiScoreVictor(); }
+async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadWeekly(); loadTimeoff(); loadBonusVictor(); loadWebworkVictor(); loadAiScoreVictor(); loadLocationVictor(); }
 // item MW3: Victor's WebWork card — real activity level + last 3 sites (uses ww_activity, now Victor-authorized)
 async function loadWebworkVictor(){ var el=document.getElementById('wwAppsList'); if(!el) return; var h={}; if(PW) h['x-app-password']=PW;
   try{ var r=await fetch(api('ww_activity')+'&cb='+Date.now(),{headers:h}); var j=await r.json(); var a=j.apps||{};
@@ -1818,18 +1839,58 @@ async function loadWebworkVictor(){ var el=document.getElementById('wwAppsList')
   }catch(e){}
 }
 // item MW6: Victor's small AI-score snippet — month average + short verdict (uses score_summary, now Victor-authorized)
-async function loadAiScoreVictor(){ var el=document.getElementById('aiScoreBody'), av=document.getElementById('aiScoreAvg'); if(!el) return; var h={}; if(PW) h['x-app-password']=PW;
-  try{ var j=await (await fetch(api('score_summary')+'&cb='+Date.now(),{headers:h})).json();
-    if(!j||j.average==null){ if(av){ av.textContent='—'; av.style.color='#7f8fa6'; } el.innerHTML='<span class="muted">No graded days yet this month.</span>'; return; }
-    var c=j.average>=75?'#34d399':j.average>=45?'#fbbf24':'#f87171'; if(av){ av.textContent=j.average; av.style.color=c; }
-    el.innerHTML='<div style="font-size:11.5px;color:#64758d;margin-bottom:6px">month average · '+j.count+' graded day'+(j.count===1?'':'s')+'</div>'+(j.summary?('<div style="line-height:1.7">'+esc(j.summary)+'</div>'):'');
+// item MW5: today's per-zone time (minutes) in the Location working card (uses my_location; Victor-authorized).
+var MW_ZC={office:'#60a5fa',tepees:'#22d3ee',maintenance:'#f59e0b',resort:'#a78bfa',off:'#94a3b8'};
+async function loadLocationVictor(){ var el=document.getElementById('mwZones'); if(!el) return; var hh={}; if(PW) hh['x-app-password']=PW;
+  try{ var j=await (await fetch(api('my_location')+'&cb='+Date.now(),{headers:hh})).json();
+    var by=(j&&j.byZoneMin)||{}; var order=['office','tepees','maintenance','resort','off'];
+    var os=document.getElementById('mwOnsite'); if(os) os.textContent=(j&&j.on_site_min!=null)?(j.on_site_min+'m on-site today'):'GPS tracking';
+    var any=order.some(function(z){ return by[z]!=null && by[z]>0; });
+    if(!any){ el.innerHTML='<span class="muted" style="font-size:12px">No GPS time logged yet today.</span>'; return; }
+    var cells='';
+    for(var i=0;i<order.length;i++){ var z=order[i]; var has=(by[z]!=null); var col=MW_ZC[z]||'#94a3b8';
+      cells+='<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #223047;border-radius:8px;background:#0d1523'+(has&&by[z]>0?'':';opacity:.4')+'"><span style="width:9px;height:9px;border-radius:50%;flex:none;background:'+col+'"></span><span style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;color:#cbd5e5">'+z+'</span><span style="flex:1"></span><span style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;color:#8a9bb2">'+(has?(by[z]+'m'):'—')+'</span></div>';
+    }
+    el.innerHTML=cells;
   }catch(e){}
+}
+// item MW6: AI-score month calendar — click a day for its short explanation (owner note or auto-grade summary).
+var AICAL={y:new Date().getFullYear(), m:new Date().getMonth(), map:{}, avg:null, count:0, sel:null};
+function aiCalMonthStr(){ return AICAL.y+'-'+String(AICAL.m+1).padStart(2,'0'); }
+async function loadAiScoreVictor(){ var av=document.getElementById('aiScoreAvg'); var hh={}; if(PW) hh['x-app-password']=PW;
+  try{ var j=await (await fetch(api('score_calendar')+'&month='+aiCalMonthStr()+'&cb='+Date.now(),{headers:hh})).json();
+    AICAL.map={}; ((j&&j.days)||[]).forEach(function(d){ AICAL.map[d.date]=d; }); AICAL.avg=(j&&j.average); AICAL.count=(j&&j.count)||0; AICAL.sel=null;
+    var c=(AICAL.avg==null)?'#7f8fa6':(AICAL.avg>=75?'#34d399':AICAL.avg>=45?'#fbbf24':'#f87171'); if(av){ av.textContent=(AICAL.avg==null?'—':AICAL.avg); av.style.color=c; }
+    renderAiCal();
+  }catch(e){}
+}
+function aiCalStep(d){ AICAL.m+=d; if(AICAL.m<0){AICAL.m=11;AICAL.y--;} if(AICAL.m>11){AICAL.m=0;AICAL.y++;} loadAiScoreVictor(); }
+function renderAiCal(){ var lbl=document.getElementById('aiCalLabel'); var dow=document.getElementById('aiCalDow'); var grid=document.getElementById('aiCalGrid'); var body=document.getElementById('aiScoreBody');
+  if(lbl) lbl.textContent=BFULL[AICAL.m]+' '+AICAL.y;
+  if(dow) dow.innerHTML=['S','M','T','W','T','F','S'].map(function(x){return '<div class="dow">'+x+'</div>';}).join('');
+  if(grid){ var first=new Date(AICAL.y,AICAL.m,1).getDay(); var dim=new Date(AICAL.y,AICAL.m+1,0).getDate(); var cells='';
+    for(var i=0;i<first;i++) cells+='<div class="scday empty"></div>';
+    for(var day=1;day<=dim;day++){ var ds=aiCalMonthStr()+'-'+String(day).padStart(2,'0'); var rec=AICAL.map[ds]; var has=!!rec;
+      var col=has?(rec.grade>=75?'#34d399':rec.grade>=45?'#fbbf24':'#f87171'):'#2c3a51';
+      cells+='<div class="scday'+(has?' has':'')+(AICAL.sel===ds?' sel':'')+'" '+(has?('onclick="aiCalPick(\''+ds+'\')"'):'')+'><div>'+day+'</div>'+(has?('<div class="dot" style="background:'+col+'"></div>'):'')+'</div>';
+    }
+    grid.innerHTML=cells;
+  }
+  if(body && !AICAL.sel){ body.innerHTML=(AICAL.count===0)?'<span class="muted">No graded days this month yet.</span>':('<span class="muted">'+AICAL.count+' graded day'+(AICAL.count===1?'':'s')+' · tap a day above for its explanation.</span>'); }
+}
+function aiCalPick(ds){ AICAL.sel=ds; renderAiCal(); var rec=AICAL.map[ds]; var body=document.getElementById('aiScoreBody'); if(!body) return;
+  if(!rec){ body.innerHTML='<span class="muted">No grade for this day.</span>'; return; }
+  var col=rec.grade>=75?'#34d399':rec.grade>=45?'#fbbf24':'#f87171';
+  var wd=''; try{ wd=new Date(ds+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}); }catch(e){ wd=ds; }
+  body.innerHTML='<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><b style="color:'+col+';font-size:18px">'+rec.grade+'</b><span class="muted" style="font-size:12px">/100 · '+esc(wd)+(rec.source==='owner'?' · graded by Gavin':' · auto-grade')+'</span></div>'+(rec.explanation?('<div style="line-height:1.6">'+esc(rec.explanation)+'</div>'):'<span class="muted">No explanation recorded for this day.</span>');
 }
 
 // ===== Bonus / incentive comp (owner entry + Victor summary) =====
 const BMONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const BFULL=['January','February','March','April','May','June','July','August','September','October','November','December'];
 var BONUS={terms:{revenueSharePct:1,cleanRate:5},data:{},isGavin:false};
+var BVYEAR=new Date().getFullYear(), BVMONTH=new Date().getMonth(); // item 4: Victor bonus month toggle
+function bvMonthStep(d){ BVMONTH+=d; if(BVMONTH<0){BVMONTH=11;BVYEAR--;} if(BVMONTH>11){BVMONTH=0;BVYEAR++;} renderBonusVictor(); }
 var BYEAR=new Date().getFullYear(), BMONTH=new Date().getMonth();
 var BNUMF=['gross','refunds','revAdj','cleans','covered','inspections','goodReviews','badReviews','minibar','guidebook'];
 function bNum(v){var n=parseFloat(v);return isFinite(n)?n:0;}
@@ -1856,6 +1917,22 @@ function renderBonusVictor(){ var el=document.getElementById('bonusBody'); if(!e
   var amtS=function(n){return 'text-align:right;font-weight:600;color:'+(n<0?'#f4b942':'#e6edf6')+';';};
   var grp=function(name,amount,foot,items){ return '<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:12px 14px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px"><span style="text-transform:uppercase;letter-spacing:.08em;font-size:11px;color:#f4633c;font-weight:700">'+name+'</span><b style="font-size:18px">'+bMoney(amount)+'</b></div>'+items.map(function(it){return '<div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:2px 0"><span class="muted">'+it.l+'</span><span style="'+amtS(it.a)+'">'+bMoney(it.a)+'</span></div>';}).join('')+'<div class="muted" style="font-size:11px;margin-top:8px">'+foot+'</div></div>'; };
   var h='';
+  // item 4: month toggle — view a single month's AI% / self% and that month's notes.
+  var mE=Object.assign(bBlank(),BONUS.data[bKey(BVYEAR,BVMONTH)]||{});
+  var mHas=!!BONUS.data[bKey(BVYEAR,BVMONTH)]; var mPub=mHas && mE.published!==false;
+  h+='<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:12px 14px;margin-bottom:14px">';
+  h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span onclick="bvMonthStep(-1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:16px">‹</span><b style="font-size:13px">'+BFULL[BVMONTH]+' '+BVYEAR+'</b><span onclick="bvMonthStep(1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:16px">›</span><span style="flex:1"></span><span class="muted" style="font-size:11px">by month</span></div>';
+  if(!mPub){ h+='<div class="muted" style="font-size:12px">No published bonus entry for this month yet.</div>'; }
+  else { var mc=bCalc(mE);
+    h+='<div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:8px">';
+    h+='<div><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">AI score</div><div style="font-size:20px;font-weight:700">'+bNum(mE.aiPct)+'%</div><div class="muted" style="font-size:11px">'+bMoney(mc.ai)+'</div></div>';
+    h+='<div><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">Self-management</div><div style="font-size:20px;font-weight:700">'+bNum(mE.selfPct)+'%</div><div class="muted" style="font-size:11px">'+bMoney(mc.self)+'</div></div>';
+    h+='</div>';
+    var mn=[]; if((mE.note||'').trim())mn.push({l:'Note',t:mE.note}); if((mE.selfNote||'').trim())mn.push({l:'Self-management',t:mE.selfNote}); if((mE.aiNote||'').trim())mn.push({l:'AI score',t:mE.aiNote}); if((mE.reviewNote||'').trim())mn.push({l:'Reviews',t:mE.reviewNote});
+    if(mn.length){ h+='<div style="border-top:1px solid #1c2839;padding-top:8px">'+mn.map(function(n){return '<div style="font-size:12.5px;margin-bottom:3px"><span style="color:#f4633c;font-weight:700">'+bEsc(n.l)+'</span> <span>'+bEsc(n.t)+'</span></div>';}).join('')+'</div>'; }
+    else { h+='<div class="muted" style="font-size:12px">No notes for this month.</div>'; }
+  }
+  h+='</div>';
   h+='<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px"><div><div class="muted" style="font-size:12px">Year-to-date incentive pay ('+BYEAR+')</div><div style="font-size:38px;font-weight:700;line-height:1">'+bMoney(ytd)+'</div></div><div><div class="muted" style="font-size:12px">Payout</div><div style="font-weight:600">Mid-December '+BYEAR+'</div></div><div><div class="muted" style="font-size:12px">Months logged</div><div style="font-weight:600">'+pub.length+' of 12</div></div></div>';
   h+='<div style="font-size:12px;color:#7e8b9e;margin-bottom:14px">Not pro-ratable — payable mid-December. Each grouping is never reduced below $0 in a month. Tips are yours and not tracked here.</div>';
   // item MW5: breakdown is collapsed on first load, expandable via this toggle (matches design's bonusOpen=false)
@@ -1872,7 +1949,7 @@ function renderBonusVictor(){ var el=document.getElementById('bonusBody'); if(!e
   var awarded=showA&&health>0;
   h+=perfCard('Property health',awarded?health:0,awarded?'awarded of $1,000':'Assessed at year end',(health/1000)*100,(showA&&ann.healthNote)?bEsc(ann.healthNote):'Gavin writes this up before the December payout.');
   h+='</div>';
-  var notes=[]; pub.forEach(function(p){ var lbl=BMONTHS[p.i]+' '+BYEAR; if((p.e.note||'').trim())notes.push({l:lbl,t:p.e.note}); if((p.e.reviewNote||'').trim())notes.push({l:lbl+' reviews',t:p.e.reviewNote}); });
+  var notes=[]; pub.forEach(function(p){ var lbl=BMONTHS[p.i]+' '+BYEAR; if((p.e.note||'').trim())notes.push({l:lbl,t:p.e.note}); if((p.e.selfNote||'').trim())notes.push({l:lbl+' self-management',t:p.e.selfNote}); if((p.e.aiNote||'').trim())notes.push({l:lbl+' AI score',t:p.e.aiNote}); if((p.e.reviewNote||'').trim())notes.push({l:lbl+' reviews',t:p.e.reviewNote}); });
   if(notes.length){ h+='<div style="margin-top:14px"><div class="muted" style="text-transform:uppercase;letter-spacing:.08em;font-size:11px;font-weight:700;margin-bottom:6px">Notes from Gavin</div>'+notes.map(function(n){return '<div style="font-size:13px;margin-bottom:4px"><span style="color:#f4633c;font-weight:700">'+bEsc(n.l)+'</span> <span>'+bEsc(n.t)+'</span></div>';}).join('')+'</div>'; }
   h+='</div>';   // close #bonusDetail (collapsed breakdown)
   el.innerHTML=h;

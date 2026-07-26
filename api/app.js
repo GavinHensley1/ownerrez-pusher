@@ -1923,6 +1923,14 @@ module.exports=async(req,res)=>{
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
       return res.status(200).json(Object.assign(await wwScreenActivity(date), {apps: await wwAppsWebsites(date)}));
     }
+    // item MW5 (My Work): today's per-zone TIME (minutes) for the Location working card. Victor + Gavin.
+    if(action==="my_location"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
+      const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const z=await gpsZoneSummary(device, date);
+      return res.status(200).json({date, device, byZoneMin:(z&&z.byZoneMin)||{}, on_site_min:(z&&z.on_site_min)||0, total_min:(z&&z.total_min)||0, last:(z&&z.last)||null});
+    }
     // Shared to-do list. Victor-facing like cleans/refunds (panel is the access boundary); tags who edited.
     if(action==="todo_get"){ return res.status(200).json(await getTodo()); }
     // ===== Bonus / incentive comp. bonus_get: Victor-readable (drafts hidden unless Gavin); bonus_save: Gavin-gated. =====
@@ -2094,6 +2102,56 @@ if(action==="email_recipients"){
         }catch(e){}
       }
       return res.status(200).json({month, average, count, good, bad, summary});
+    }
+    // item R1 (Connections): on-demand month report. Averages the month's dailies (owner grade, else AI
+    // productivity score) and writes a ~2-sentence summary of the RECURRING strengths & weaknesses across
+    // the month (patterns that repeat, not one-off days). Gavin-gated.
+    if(action==="gen_month_report"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const month=String((req.query&&req.query.month)||"")||etDate(new Date().toISOString()).slice(0,7);
+      const first=month+"-01", last=monthLastDay(month);
+      const days=[]; let d=first;
+      while(d<=last){
+        let score=null, grade=null; try{ if(redis){ score=await redis.get("parkside:score:"+d); grade=await redis.get("parkside:grade:"+d); } }catch(e){}
+        const ownerG=!!(grade&&grade.grade!=null);
+        const g = ownerG ? Number(grade.grade) : (score&&score.productivity_score!=null?Number(score.productivity_score):null);
+        const expl = (grade&&grade.note)?String(grade.note):(score&&score.summary?String(score.summary):"");
+        if(g!=null) days.push({date:d, grade:Math.round(g), owner:ownerG, explanation:expl});
+        d=etDateAddDays(d,1);
+      }
+      const count=days.length;
+      const average=count?Math.round(days.reduce(function(s,x){return s+x.grade;},0)/count):null;
+      let report="";
+      const key=process.env.ANTHROPIC_API_KEY;
+      if(key && count){
+        const lines=days.map(function(x){ return x.date+": "+x.grade+"/100"+(x.owner?" [owner]":"")+(x.explanation?(" - "+x.explanation):""); }).join("\n");
+        const sys="You are writing a VERY SHORT monthly performance report for a maintenance/operations worker at a glamping resort, from the owner's daily grades (0-100) and notes for the month. Write about TWO sentences. Call out the RECURRING strengths (patterns that repeat across multiple days) and the RECURRING weaknesses (issues that repeat across multiple days). Focus on what repeats, not one-off days. Plain prose, no lists, no JSON, no preamble.";
+        try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:220,temperature:0.3,system:sys,messages:[{role:"user",content:"Month "+month+". Average grade: "+(average!=null?(average+"/100"):"n/a")+" across "+count+" graded day(s).\nDaily grades + notes:\n"+lines}]})});
+          const j=await r.json(); if(r.ok) report=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
+        }catch(e){}
+      }
+      return res.status(200).json({month, average, count, report});
+    }
+    // item MW6 (My Work): per-day grade + short explanation for a month, powering the AI-score calendar.
+    // Victor may read his own; Gavin too. Hidden days are suppressed for Victor.
+    if(action==="score_calendar"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const month=String((req.query&&req.query.month)||"")||etDate(new Date().toISOString()).slice(0,7);
+      const first=month+"-01", last=monthLastDay(month);
+      const isGavin=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x"));
+      let hid=[]; if(!isGavin){ try{ if(redis){ const raw=await redis.get("parkside:day_hidden"); hid=Array.isArray(raw)?raw:(raw?JSON.parse(raw):[]); } }catch(e){ hid=[]; } }
+      const days=[]; let d=first, sum=0, cnt=0;
+      while(d<=last){
+        if(isGavin || hid.indexOf(d)===-1){
+          let score=null, grade=null; try{ if(redis){ score=await redis.get("parkside:score:"+d); grade=await redis.get("parkside:grade:"+d); } }catch(e){}
+          const ownerG=!!(grade&&grade.grade!=null);
+          const g = ownerG ? Number(grade.grade) : (score&&score.productivity_score!=null?Number(score.productivity_score):null);
+          const expl = (grade&&grade.note)?String(grade.note):(score&&score.summary?String(score.summary):"");
+          if(g!=null){ days.push({date:d, grade:Math.round(g), source:ownerG?"owner":"ai", explanation:expl}); sum+=g; cnt++; }
+        }
+        d=etDateAddDays(d,1);
+      }
+      return res.status(200).json({month, days, average:(cnt?Math.round(sum/cnt):null), count:cnt});
     }
     // Gavin's manual grade for a day (ground truth the auto-grader learns from). Gavin-gated.
     if(action==="grade_get"){
