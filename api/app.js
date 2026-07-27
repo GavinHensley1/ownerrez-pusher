@@ -3331,6 +3331,9 @@ if(action==="email_recipients"){
       const webhook={ url:_origin+"/api/app?action=or_message_inbound", user:_wcreds.user, password:_wcreds.pass, entityTypesToEnable:["thread_message","inquiry"], lastEvent:await getWhStatus() };
       let _diag={redisPresent:!!redis};
       try{ if(redis){ const ping="pong-"+Date.now(); await redis.set("parkside:diag_ping",ping); _diag.redisRoundTrip=((await redis.get("parkside:diag_ping"))===ping); } }catch(e){ _diag.redisErr=String(e.message||e); }
+      // Safe tepee-persistence probe (no coordinates/secrets — just presence + count) so the saved-config
+      // round-trip can be verified without the Gavin password. Confirms whether a Save actually persisted.
+      try{ if(redis){ let _tk=await redis.get("parkside:tepees"); if(typeof _tk==="string"){ try{ _tk=JSON.parse(_tk); }catch(e){} } _diag.tepeesKey=Array.isArray(_tk)?("present:"+_tk.length):(_tk?"present:nonarray":"absent"); _diag.tepeesConfirmed=Array.isArray(_tk)?_tk.filter(function(x){return x&&x.confirmed;}).length:0; } }catch(e){ _diag.tepeesErr=String(e.message||e); }
       try{ const raw=await getNotifyRaw(); _diag.notifyConfigKeys=Object.keys(raw); _diag.ownerrezLen=String(raw.ownerrez_oauth_token||"").length; _diag.resendKeyLen=String(raw.resendApiKey||"").length; }catch(e){ _diag.rawErr=String(e.message||e); }
       const cfg=await getNotifyConfig(); const raw=await getNotifyRaw(); const reqAll=await requireApprovalAll();
       const lastSend=(redis?await redis.get("parkside:last_send"):_memLastSend)||null;
