@@ -97,9 +97,8 @@
   #bonusMain{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;grid-auto-flow:dense}
   #bonusMain>.card{margin-bottom:0}
   #bonusMain>#todoCard{grid-column:1 / -1}
-  #bonusMain>.card:not(#todoCard):not(#refundsCard){grid-column:1 / -1}
-  /* item MW-10: Refunds is a smaller (narrower) card, not full width */
-  #bonusMain>#refundsCard{grid-column:span 1;max-width:560px;align-self:start}
+  #bonusMain>.card:not(#todoCard){grid-column:1 / -1}
+  /* item MW-10 (reverted): Refunds is FULL WIDTH again (spans the bottom); scroll box kept below */
   /* item MW-6: compact AI-score calendar (small widget, info sits to its right) */
   #aiCalWrap .cal{gap:4px} #aiCalWrap .scday{font-size:10px} #aiCalWrap .dow{font-size:9px;padding:2px 0}
   #aiCalWrap .scday .dot{width:5px;height:5px}
@@ -795,7 +794,7 @@
     <div class="legend" id="cleansMonth" style="margin-top:10px">—</div>
   </div>
 
-  <!-- item MW-10: Refunds is a SMALLER card (see #refundsCard CSS) with a fixed-height internal scroll box -->
+  <!-- item MW-10 (reverted): Refunds is a FULL-WIDTH card (spans the bottom) with a fixed-height internal scroll box -->
   <div class="card" id="refundsCard">
     <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">
       <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Refunds given</div>
@@ -874,8 +873,11 @@ function makeCollapsible(scope){
   document.querySelectorAll(scope+' .card > h2').forEach(function(h){
     if(h.dataset.col) return; h.dataset.col='1';
     h.style.cursor='pointer'; h.style.userSelect='none';
-    var c=document.createElement('span'); c.className='secCaret'; c.textContent=' ▾'; c.style.color='var(--mut)'; c.style.fontWeight='400'; h.appendChild(c);
-    h.addEventListener('click',function(){ var card=h.parentElement; var open=card.dataset.collapsed!=='1'; var n=h.nextElementSibling; while(n){ n.style.display=open?'none':''; n=n.nextElementSibling; } card.dataset.collapsed=open?'1':'0'; c.textContent=open?' ▸':' ▾'; });
+    var c=document.createElement('span'); c.className='secCaret'; c.style.color='var(--mut)'; c.style.fontWeight='400'; h.appendChild(c);
+    var card=h.parentElement;
+    var setOpen=function(open){ var n=h.nextElementSibling; while(n){ n.style.display=open?'':'none'; n=n.nextElementSibling; } card.dataset.collapsed=open?'0':'1'; c.textContent=open?' ▾':' ▸'; };
+    h.addEventListener('click',function(){ setOpen(card.dataset.collapsed==='1'); });
+    setOpen(false); // item MSG-4: sections COLLAPSED by default on load
   });
 }
 async function loadDecisions(){
@@ -965,13 +967,13 @@ async function loadPendingFacts(){
     PF=j.facts||[]; if(cnt) cnt.textContent=PF.length?(PF.length+" awaiting review"):"";
     if(!PF.length){ if(el) el.innerHTML="<span class='muted'>Nothing pending — no new learned facts to review.</span>"; return; }
     el.innerHTML=PF.map(function(f){ var src=({auto_answer:'auto-sent to guest',victor_escalation:'from Victor',approved_reply:'approved reply'})[f.source]||f.source||'learned';
+      // item MSG-3: question is READ-ONLY (shown, not editable); ONE editable response box (white text); Approve & save / Reject only.
       return "<div style='border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px'>"
-        +"<div class='muted' style='font-size:12px;margin-bottom:6px'>Q: "+esc(f.q||f.topic||"")+" &nbsp;&middot;&nbsp; <i>"+esc(src)+"</i></div>"
-        +"<input id='pft_"+f.id+"' style='width:100%;margin-bottom:6px' value=\""+esc(f.topic||f.q||"").replace(/\"/g,'&quot;')+"\" placeholder='Topic / question'>"
-        +"<textarea id='pfa_"+f.id+"' style='width:100%;min-height:60px' placeholder='Answer'>"+esc(f.a||"")+"</textarea>"
+        +"<div style='font-size:13px;margin-bottom:8px'><span class='muted'>Q:</span> "+esc(f.q||f.topic||"")+" &nbsp;&middot;&nbsp; <i class='muted'>"+esc(src)+"</i></div>"
+        +"<div class='muted' style='font-size:11px;margin-bottom:4px'>Your response (edit before saving):</div>"
+        +"<textarea id='pfa_"+f.id+"' style='width:100%;min-height:60px;box-sizing:border-box;background:#0e151d;border:1px solid #26354a;border-radius:6px;padding:7px 9px;color:#e6edf6' placeholder='Answer'>"+esc(f.a||"")+"</textarea>"
         +"<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>"
         +"<button onclick=\"approvePendingFact('"+f.id+"')\">Approve &amp; save</button>"
-        +"<button class='ghost' onclick=\"editPendingFact('"+f.id+"')\">Save edit</button>"
         +"<button class='seg-x' style='width:auto;padding:2px 12px' onclick=\"rejectPendingFact('"+f.id+"')\">Reject</button>"
         +"<span class='muted' id='pfs_"+f.id+"'></span>"
         +"</div></div>";
@@ -979,8 +981,10 @@ async function loadPendingFacts(){
   }catch(e){ if(el) el.innerHTML="<span class='muted'>Could not load.</span>"; }
 }
 async function pfDecide(id, action){
-  const t=document.getElementById('pft_'+id), aEl=document.getElementById('pfa_'+id);
-  const topic=t?t.value:"", a=aEl?aEl.value:"";
+  const aEl=document.getElementById('pfa_'+id);
+  // item MSG-3: question no longer editable — reuse the fact's original topic/question.
+  var fact=(PF||[]).filter(function(x){return String(x.id)===String(id);})[0]||{};
+  const topic=(fact.topic||fact.q||""), a=aEl?aEl.value:"";
   const s=document.getElementById('pfs_'+id); if(s) s.textContent="…";
   try{ const r=await fetch(api('pending_fact'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({id:id,action:action,topic:topic,a:a})}); const j=await r.json();
     if(j.ok){ if(action==='edit'){ if(s) s.textContent="saved"; } else { loadPendingFacts(); } }

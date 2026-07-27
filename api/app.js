@@ -1725,7 +1725,13 @@ module.exports=async(req,res)=>{
       } }catch(e){}
       const zones=await getZones();
       const zoneNow=(last&&last.zone)?last.zone:null;
-      const byZone={}; for(const x of trail){ if(!x) continue; const z=x.zone||'off'; byZone[z]=(byZone[z]||0)+1; }
+      // item MON-1: per-zone MINUTES (time), not a raw ping count. Sum the gap between consecutive
+      // fixes (capped at 10 min, mirroring gpsZoneSummary) into the zone of the earlier fix, so the
+      // Gavin Location card shows real minutes per zone instead of a point count mislabeled 'm'.
+      const byZone={}; for(let i=0;i<trail.length-1;i++){ const a=trail[i], b=trail[i+1]; if(!a||!b) continue;
+        let gap=(new Date(b.t)-new Date(a.t))/60000; if(!isFinite(gap)||gap<0) gap=0; if(gap>10) gap=10;
+        const z=(a&&a.zone)?a.zone:'off'; byZone[z]=(byZone[z]||0)+gap; }
+      for(const k in byZone) byZone[k]=Math.round(byZone[k]);
       return res.status(200).json({ device, date:date||null, today:liveToday, configured:!!sec, ingestUrl: sec?(origin+"/gps/"+sec):null, count, last, lastSeen, stale, zone:zoneNow, on_site:(zoneNow&&zoneNow!=='off'), zones, trailByZone:byZone, trail });
     }
     // Get/set the named zones (password-gated). POST {zones:[{name,lat,lon,radius_m},...]} to replace them.
