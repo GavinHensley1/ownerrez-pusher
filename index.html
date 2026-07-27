@@ -33,6 +33,11 @@
   .scdot{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin-right:4px}
   .leaflet-tooltip.tepeeLbl{background:rgba(12,20,32,.7);border:none;box-shadow:none;color:#ffd1e8;font-family:'IBM Plex Mono',monospace;font-size:9px;font-weight:600;padding:0 3px;letter-spacing:.01em;white-space:nowrap}
   .leaflet-tooltip.tepeeLbl:before{display:none}
+  .leaflet-div-icon.tepDrag{background:transparent;border:none;box-shadow:none}
+  .tepDragInner{display:flex;flex-direction:column;align-items:center;cursor:grab}
+  .tepDragInner:active{cursor:grabbing}
+  .tepDot{width:16px;height:16px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.55);display:block}
+  .tepLbl{margin-top:1px;font:600 9px 'IBM Plex Mono',monospace;color:#fff;background:rgba(12,20,32,.78);padding:0 4px;border-radius:3px;white-space:nowrap;pointer-events:none}
   .scday{aspect-ratio:1/1;background:#0c141d;border:1px solid var(--line);border-radius:7px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;font-size:12px;color:var(--mut)}
   .scday:hover{border-color:var(--accent)} .scday.has{color:var(--ink)} .scday.sel{background:var(--accent);color:#fff;border-color:var(--accent)} .scday.empty{background:transparent;border:0;cursor:default}
   .scday .dot{width:6px;height:6px;border-radius:50%}
@@ -512,7 +517,7 @@
                 <button class="ghost" onclick="tepEditResetDefaults()" style="padding:8px 12px">Reset to defaults</button>
                 <span id="tepEditStatus" class="muted" style="font-size:11px"></span>
               </div>
-              <div style="font-size:11px;color:#7f8fa6;margin-top:4px">Pick a tepee below (or it auto-advances), then click its real spot on the satellite map. Click a tepee again to redo it. Zoom/pan the map for accuracy.</div>
+              <div style="font-size:11px;color:#7f8fa6;margin-top:4px">Grab any tepee’s labeled circle on the map and drag it onto its real spot, then click <b>Save positions</b>. Tapping a name below centers the map on that tepee (handy if a circle is off-screen). Zoom in for accuracy.</div>
             </div>
             <div style="padding:16px">
               <div style="font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d;margin-bottom:8px">Zone minutes</div>
@@ -1254,8 +1259,8 @@ function switchView(v){
 }
 // ===== Monitoring (Gavin) tab: GPS map overlay =====
 let GPW='', MON_MAP=null, MON_LAYERS=null, MON_TIMER=null, MON_EDIT_LAYERS=null;
-// Tepee position editor (click-to-place) state.
-var TEPEE_EDIT=false, TEPEE_EDIT_LIST=[], TEPEE_ACTIVE=0;
+// Tepee position editor (drag-and-drop) state.
+var TEPEE_EDIT=false, TEPEE_EDIT_LIST=[], TEPEE_ACTIVE=0, TEPEE_EDIT_OBJ=[];
 // item 9: coherent, legible zone palette. Each location gets one distinct hue and off-site is a
 // neutral slate (not alarming red) so location pings are never misread as good/bad grade signals
 // (green=good / red=bad is reserved for grades & calendar status, not locations).
@@ -1487,8 +1492,6 @@ function initMonMap(){ if(MON_MAP) return;
   L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Esri'}).addTo(MON_MAP);
   MON_LAYERS=L.layerGroup().addTo(MON_MAP);
   MON_EDIT_LAYERS=L.layerGroup().addTo(MON_MAP);
-  // Click-to-place: while the tepee editor is on, a map click sets the active tepee's real lat/lon.
-  MON_MAP.on('click',function(e){ if(TEPEE_EDIT&&e&&e.latlng) tepEditPlace(e.latlng.lat, e.latlng.lng); });
   setTimeout(function(){MON_MAP.invalidateSize();},80);
 }
 function monAutoToggle(){ const el=document.getElementById('monAuto'); const on=el?el.checked:true; if(MON_TIMER){clearInterval(MON_TIMER);MON_TIMER=null;} if(on&&GPW) MON_TIMER=setInterval(loadMonitor,45000); }
@@ -1559,7 +1562,7 @@ function renderTepeeDwell(td){ var el=document.getElementById('gvTepeeList'); if
   var totLine = (td.assigned_min!=null)? ('<div class="muted" style="font-size:11px;margin-top:8px;color:#7f8fa6">'+(td.assigned_min||0)+'m matched to a tepee of '+(td.total_min||0)+'m tracked'+(td.points!=null?(' · '+td.points+' GPS points'):'')+'.</div>') : '';
   el.innerHTML='<div style="display:grid;grid-template-columns:1fr;gap:6px">'+rows+'</div>'+totLine;
   if(flag){ var unconf=td.tepees.some(function(t){return !t.confirmed;});
-    flag.innerHTML = unconf ? ('<div style="font-size:11px;color:#8a9bb2;margin-top:9px;line-height:1.5">⚑ Tepee positions are <b>approximate</b>. Click <b>📍 Fix tepee positions</b> on the Location map above, then click each tepee’s real spot and Save — no coordinates needed.</div>') : '';
+    flag.innerHTML = unconf ? ('<div style="font-size:11px;color:#8a9bb2;margin-top:9px;line-height:1.5">⚑ Tepee positions are <b>approximate</b>. Click <b>📍 Fix tepee positions</b> on the Location map above, then <b>drag</b> each tepee’s circle onto its real spot and Save — no coordinates needed.</div>') : '';
   }
 }
 // item 7: build the 7 AM–7 PM hourly zone bar from the trail points. Each hour slot is coloured by the
@@ -1581,34 +1584,36 @@ async function tepEditToggle(){ if(TEPEE_EDIT){ return tepEditDone(); }
 }
 function tepEditFit(){ try{ var lat=[],lon=[]; TEPEE_EDIT_LIST.forEach(function(t){ if(isFinite(t.lat)&&isFinite(t.lon)){ lat.push(t.lat); lon.push(t.lon); } });
   if(lat.length){ var bb=L.latLngBounds([[Math.min.apply(null,lat),Math.min.apply(null,lon)],[Math.max.apply(null,lat),Math.max.apply(null,lon)]]); MON_MAP.fitBounds(bb.pad(0.4),{maxZoom:18}); } }catch(e){} }
-function tepEditRedraw(){ if(!MON_EDIT_LAYERS) return; MON_EDIT_LAYERS.clearLayers();
+// Draw each tepee as a DRAGGABLE labeled marker + its radius circle. Dragging a marker moves the circle and
+// updates that tepee's lat/lon from the drop point (Leaflet gives exact geo-coords for the pixel on the tile).
+function tepEditRedraw(){ if(!MON_EDIT_LAYERS) return; MON_EDIT_LAYERS.clearLayers(); TEPEE_EDIT_OBJ=[];
   TEPEE_EDIT_LIST.forEach(function(t,i){ if(!isFinite(t.lat)||!isFinite(t.lon)) return;
-    var active=(i===TEPEE_ACTIVE); var col=active?'#facc15':(t._placed?'#4ade80':'#f472b6');
-    L.circle([t.lat,t.lon],{radius:t.radius_m||20,color:col,weight:active?2.4:1.6,dashArray:(t._placed||active)?null:'4 4',fillColor:col,fillOpacity:active?0.18:0.10}).addTo(MON_EDIT_LAYERS)
-      .bindTooltip(t.name,{permanent:true,direction:'center',className:'tepeeLbl'});
-    if(active) L.circleMarker([t.lat,t.lon],{radius:4,color:'#fff',fillColor:'#facc15',fillOpacity:1,weight:2}).addTo(MON_EDIT_LAYERS);
+    var moved=!!t._placed; var col=moved?'#4ade80':'#f472b6';
+    var circle=L.circle([t.lat,t.lon],{radius:t.radius_m||20,color:col,weight:1.8,dashArray:moved?null:'4 4',fillColor:col,fillOpacity:0.14,interactive:false}).addTo(MON_EDIT_LAYERS);
+    var icon=L.divIcon({className:'leaflet-div-icon tepDrag', html:'<div class="tepDragInner"><span class="tepDot" style="background:'+col+'"></span><span class="tepLbl">'+esc(t.name)+'</span></div>', iconSize:[92,34], iconAnchor:[46,9]});
+    var marker=L.marker([t.lat,t.lon],{draggable:true, icon:icon, keyboard:false, zIndexOffset:1000, riseOnHover:true}).addTo(MON_EDIT_LAYERS);
+    marker.on('dragstart',function(){ TEPEE_ACTIVE=i; });
+    marker.on('drag',function(ev){ circle.setLatLng(ev.target.getLatLng()); });
+    marker.on('dragend',function(ev){ var ll=ev.target.getLatLng(); t.lat=Number(ll.lat.toFixed(6)); t.lon=Number(ll.lng.toFixed(6)); t._placed=true;
+      circle.setStyle({color:'#4ade80',fillColor:'#4ade80',dashArray:null});
+      var el=ev.target.getElement(); if(el){ var dot=el.querySelector('.tepDot'); if(dot) dot.style.background='#4ade80'; }
+      tepEditRenderList(); });
+    TEPEE_EDIT_OBJ.push({marker:marker, circle:circle});
   });
 }
 function tepEditRenderList(){ var el=document.getElementById('tepEditList'); if(el){
-  el.innerHTML=TEPEE_EDIT_LIST.map(function(t,i){ var active=(i===TEPEE_ACTIVE);
-    var bg=active?'#3a2f12':'#0d1523'; var bd=active?'#e8c37a':'#223047'; var tick=t._placed?'✓ ':(active?'▶ ':'');
-    return '<div onclick="tepEditPick('+i+')" style="cursor:pointer;display:flex;align-items:center;gap:7px;padding:6px 9px;border:1px solid '+bd+';border-radius:8px;background:'+bg+'">'
-      +'<span style="width:9px;height:9px;border-radius:50%;flex:none;background:'+(t._placed?'#4ade80':(active?'#facc15':'#f472b6'))+'"></span>'
-      +'<span style="font-size:12px;color:#e6ecf5;font-weight:'+(active?'700':'500')+'">'+tick+esc(t.name)+'</span>'
+  el.innerHTML=TEPEE_EDIT_LIST.map(function(t,i){ var moved=!!t._placed;
+    return '<div onclick="tepEditPick('+i+')" title="Center the map on this tepee" style="cursor:pointer;display:flex;align-items:center;gap:7px;padding:6px 9px;border:1px solid '+(moved?'#1f4634':'#223047')+';border-radius:8px;background:'+(moved?'#12271e':'#0d1523')+'">'
+      +'<span style="width:9px;height:9px;border-radius:50%;flex:none;background:'+(moved?'#4ade80':'#f472b6')+'"></span>'
+      +'<span style="font-size:12px;color:#e6ecf5;font-weight:500">'+(moved?'✓ ':'')+esc(t.name)+'</span>'
       +'<span style="flex:1"></span>'
       +'<span style="font-family:\'IBM Plex Mono\',monospace;font-size:9.5px;color:#5b6b82">'+esc((t.addr||'').replace(' Big Sky Way',''))+'</span></div>';
   }).join(''); }
-  var p=document.getElementById('tepEditPrompt'); if(p){ var t=TEPEE_EDIT_LIST[TEPEE_ACTIVE]; var placed=TEPEE_EDIT_LIST.filter(function(x){return x._placed;}).length;
-    p.innerHTML = t ? ('👆 Click <b>'+esc(t.name)+'</b>’s real spot on the map &nbsp;·&nbsp; '+placed+'/'+TEPEE_EDIT_LIST.length+' placed') : 'All set — click <b>Save positions</b>'; }
+  var p=document.getElementById('tepEditPrompt'); if(p){ var moved=TEPEE_EDIT_LIST.filter(function(x){return x._placed;}).length;
+    p.innerHTML = '✋ Drag each tepee’s circle onto its real spot, then <b>Save positions</b>. &nbsp;·&nbsp; '+moved+'/'+TEPEE_EDIT_LIST.length+' moved'; }
 }
-function tepEditPick(i){ if(!TEPEE_EDIT) return; TEPEE_ACTIVE=i; tepEditRedraw(); tepEditRenderList(); }
-function tepEditPlace(lat,lon){ if(!TEPEE_EDIT) return; var t=TEPEE_EDIT_LIST[TEPEE_ACTIVE]; if(!t) return;
-  t.lat=Number(lat.toFixed(6)); t.lon=Number(lon.toFixed(6)); t._placed=true;
-  var n=TEPEE_EDIT_LIST.length, next=-1;
-  for(var k=1;k<=n;k++){ var idx=(TEPEE_ACTIVE+k)%n; if(!TEPEE_EDIT_LIST[idx]._placed){ next=idx; break; } }
-  if(next>=0) TEPEE_ACTIVE=next;
-  tepEditRedraw(); tepEditRenderList();
-}
+// List click centers the map on that tepee (so an off-screen circle is easy to find and grab).
+function tepEditPick(i){ if(!TEPEE_EDIT) return; TEPEE_ACTIVE=i; var t=TEPEE_EDIT_LIST[i]; if(t&&isFinite(t.lat)&&isFinite(t.lon)&&MON_MAP){ try{ MON_MAP.panTo([t.lat,t.lon]); }catch(e){} } tepEditRenderList(); }
 async function tepEditSave(){ if(!GPW||!TEPEE_EDIT) return; var st=document.getElementById('tepEditStatus'); var btn=document.getElementById('tepSaveBtn');
   var payload=TEPEE_EDIT_LIST.map(function(t){ return {name:t.name, addr:t.addr, lat:t.lat, lon:t.lon, radius_m:t.radius_m||20, confirmed:(t._placed||t.confirmed)}; });
   if(st) st.textContent='Saving…'; if(btn) btn.disabled=true;
