@@ -97,13 +97,18 @@
   #bonusMain{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;grid-auto-flow:dense}
   #bonusMain>.card{margin-bottom:0}
   #bonusMain>#todoCard{grid-column:1 / -1}
-  #bonusMain>.card:not(#todoCard){grid-column:1 / -1}
+  #bonusMain>.card:not(#todoCard):not(#refundsCard){grid-column:1 / -1}
+  /* item MW-10: Refunds is a smaller (narrower) card, not full width */
+  #bonusMain>#refundsCard{grid-column:span 1;max-width:560px;align-self:start}
   /* item MW-6: compact AI-score calendar (small widget, info sits to its right) */
   #aiCalWrap .cal{gap:4px} #aiCalWrap .scday{font-size:10px} #aiCalWrap .dow{font-size:9px;padding:2px 0}
   #aiCalWrap .scday .dot{width:5px;height:5px}
   /* item MW-4: off-days (Sun/Mon/Tues) render as N/A, never as a failing grade */
   .scday.off{background:#0a1019;border-color:#141d29;color:#465468;cursor:default;opacity:.85}
   .scday.off:hover{border-color:#141d29}
+  /* item MW-11: a day Victor logged as time off — surfaced (not penalized) */
+  .scday.toff{background:#0e1a2b;border-color:#24405f;color:#cfe0f5;cursor:pointer}
+  .scday.toff:hover{border-color:var(--accent)}
   #bonusMain>#bwStatusPair{grid-column:1 / -1;order:-1}
   @media(max-width:860px){ #bonusMain{grid-template-columns:1fr} #bonusMain>.card{grid-column:1 / -1 !important} }
 
@@ -316,13 +321,7 @@
 
     </div>
   </div>
-  <div class="group" id="grpSetup" style="margin-top:20px">
-    <h2 class="groupHead" style="cursor:pointer;user-select:none;border-bottom:1px solid var(--line);padding-bottom:8px" onclick="toggleGroup('grpSetup')">⚙ Setup &mdash; facts, style, testing &amp; connection <span class="gcaret" style="color:var(--mut);font-weight:400;float:right">&#9656;</span></h2>
-    <div class="groupBody" style="display:none;margin-top:12px">
-  <div class="card">
-    <h2>Message formatting / style</h2>
-    <textarea id="kbFormat" class="full" placeholder="Paste your formatting samples here — how you want guest messages to look (greeting, tone, sign-off, structure). The assistant will match this."></textarea>
-  </div>
+  <!-- item MSG-1: Facts is its OWN standalone card, separated out of the Setup group -->
   <div class="card">
     <h2>📋 Facts — the only info the assistant may use</h2>
     <div class="legend" style="margin-bottom:8px">The assistant answers guests <b>only</b> from these facts and never makes anything up; if a question isn&rsquo;t covered here it escalates to you. Edit any answer and Save.</div>
@@ -332,6 +331,13 @@
       <button onclick="saveKB()">Save knowledge base</button>
       <span id="kbStatus" class="muted" style="align-self:center"></span>
     </div>
+  </div>
+  <div class="group" id="grpSetup" style="margin-top:20px">
+    <h2 class="groupHead" style="cursor:pointer;user-select:none;border-bottom:1px solid var(--line);padding-bottom:8px" onclick="toggleGroup('grpSetup')">⚙ Setup &mdash; style, testing &amp; connection <span class="gcaret" style="color:var(--mut);font-weight:400;float:right">&#9656;</span></h2>
+    <div class="groupBody" style="display:none;margin-top:12px">
+  <div class="card">
+    <h2>Message formatting / style</h2>
+    <textarea id="kbFormat" class="full" placeholder="Paste your formatting samples here — how you want guest messages to look (greeting, tone, sign-off, structure). The assistant will match this."></textarea>
   </div>
   <div class="card">
     <h2>AI answer preview <span class="muted" style="font-weight:400;text-transform:none">(test only — nothing is sent to any guest)</span></h2>
@@ -754,7 +760,8 @@
       <button onclick="addTimeoff()">Add</button>
       <span id="toStatus" class="muted"></span>
     </div>
-    <div id="timeoffList" class="legend"></div>
+    <!-- item MW-9: fixed-height internal scroll box (like the other scroll cards) -->
+    <div id="timeoffList" class="legend" style="max-height:180px;overflow-y:auto"></div>
   </div>
 
 
@@ -788,7 +795,8 @@
     <div class="legend" id="cleansMonth" style="margin-top:10px">—</div>
   </div>
 
-  <div class="card">
+  <!-- item MW-10: Refunds is a SMALLER card (see #refundsCard CSS) with a fixed-height internal scroll box -->
+  <div class="card" id="refundsCard">
     <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">
       <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Refunds given</div>
       <div style="font-size:11.5px;color:#64758d">amount + what happened, this month</div>
@@ -799,7 +807,7 @@
       <button onclick="addRefund()">Report refund</button>
     </div>
     <div class="legend" id="refundsTotal" style="margin-bottom:8px">—</div>
-    <div id="refundsList"></div>
+    <div id="refundsList" style="max-height:150px;overflow-y:auto"></div>
   </div>
 </div>
 
@@ -2030,6 +2038,9 @@ async function loadLocationVictor(){ var el=document.getElementById('mwZones'); 
 }
 // item MW6: AI-score month calendar — click a day for its short explanation (owner note or auto-grade summary).
 var AICAL={y:new Date().getFullYear(), m:new Date().getMonth(), map:{}, avg:null, count:0, sel:null};
+// item MW-11: logged time-off keyed by date (populated by loadTimeoff), surfaced on the AI-score calendar.
+var TOFF={};
+function aiCalTimeoffFull(ds){ var t=TOFF[ds]; return !!(t && t.kind!=='hours'); }
 function aiCalMonthStr(){ return AICAL.y+'-'+String(AICAL.m+1).padStart(2,'0'); }
 // item MW-4: Victor's off-days (Sun=0, Mon=1, Tues=2). This view VERIFIES HOURS, so off-days are
 // never treated as collected/graded data — they show N/A and are excluded from the average.
@@ -2038,13 +2049,19 @@ function mwIsOffDate(ds){ try{ return MW_OFF_DAYS.indexOf(new Date(ds+'T12:00:00
 async function loadAiScoreVictor(){ var av=document.getElementById('aiScoreAvg'); var hh={}; if(PW) hh['x-app-password']=PW;
   try{ var j=await (await fetch(api('score_calendar')+'&month='+aiCalMonthStr()+'&cb='+Date.now(),{headers:hh})).json();
     AICAL.map={}; ((j&&j.days)||[]).forEach(function(d){ AICAL.map[d.date]=d; }); AICAL.sel=null;
-    // recompute avg + count over WORK-days only (exclude off-days), so off-days can't drag the score.
-    var sum=0, cnt=0; for(var k in AICAL.map){ if(mwIsOffDate(k)) continue; var g=AICAL.map[k].grade; if(g!=null){ sum+=Number(g); cnt++; } }
-    AICAL.avg=cnt?Math.round(sum/cnt):null; AICAL.count=cnt;
-    var c=(AICAL.avg==null)?'#7f8fa6':(AICAL.avg>=75?'#34d399':AICAL.avg>=45?'#fbbf24':'#f87171'); if(av){ av.textContent=(AICAL.avg==null?'—':AICAL.avg); av.style.color=c; }
-    var ct=document.getElementById('aiScoreCount'); if(ct) ct.textContent=(cnt?(cnt+' graded work-day'+(cnt===1?'':'s')+' this month'):'no graded work-days yet');
-    renderAiCal();
+    aiCalApply();
   }catch(e){}
+}
+// item MW-11: recompute avg + count over WORK-days only (exclude Sun/Mon/Tues off-days AND days Victor
+// logged a full day of time off), so neither can drag the score, then repaint. Called again when the
+// time-off list loads so a newly-added day off is reflected immediately.
+function aiCalApply(){
+  var av=document.getElementById('aiScoreAvg');
+  var sum=0, cnt=0; for(var k in AICAL.map){ if(mwIsOffDate(k)) continue; if(aiCalTimeoffFull(k)) continue; var g=AICAL.map[k].grade; if(g!=null){ sum+=Number(g); cnt++; } }
+  AICAL.avg=cnt?Math.round(sum/cnt):null; AICAL.count=cnt;
+  var c=(AICAL.avg==null)?'#7f8fa6':(AICAL.avg>=75?'#34d399':AICAL.avg>=45?'#fbbf24':'#f87171'); if(av){ av.textContent=(AICAL.avg==null?'—':AICAL.avg); av.style.color=c; }
+  var ct=document.getElementById('aiScoreCount'); if(ct) ct.textContent=(cnt?(cnt+' graded work-day'+(cnt===1?'':'s')+' this month'):'no graded work-days yet');
+  renderAiCal();
 }
 function aiCalStep(d){ AICAL.m+=d; if(AICAL.m<0){AICAL.m=11;AICAL.y--;} if(AICAL.m>11){AICAL.m=0;AICAL.y++;} loadAiScoreVictor(); }
 function renderAiCal(){ var lbl=document.getElementById('aiCalLabel'); var dow=document.getElementById('aiCalDow'); var grid=document.getElementById('aiCalGrid'); var body=document.getElementById('aiScoreBody');
@@ -2056,9 +2073,12 @@ function renderAiCal(){ var lbl=document.getElementById('aiCalLabel'); var dow=d
       // item MW-4: off-days (Sun/Mon/Tues) are shown as N/A — never a red failing grade — and are
       // not clickable/graded, because Victor isn't expected to work those days.
       if(mwIsOffDate(ds)){ cells+='<div class="scday off" title="Off day — not tracked or graded"><div>'+day+'</div><div style="font-size:7.5px;letter-spacing:.04em">N/A</div></div>'; continue; }
+      // item MW-11: a day Victor logged a FULL day off — surfaced here (not a red failing grade, excluded from the average).
+      if(aiCalTimeoffFull(ds)){ cells+='<div class="scday toff'+(AICAL.sel===ds?' sel':'')+'" onclick="aiCalPick(\''+ds+'\')" title="Time off logged"><div>'+day+'</div><div style="font-size:7px;letter-spacing:.04em;color:#7fb0e6">OFF</div></div>'; continue; }
       var rec=AICAL.map[ds]; var has=!!rec;
+      var toffH=(TOFF[ds]&&TOFF[ds].kind==='hours'); // partial (hours) off — still graded, just flagged
       var col=has?(rec.grade>=75?'#34d399':rec.grade>=45?'#fbbf24':'#f87171'):'#2c3a51';
-      cells+='<div class="scday'+(has?' has':'')+(AICAL.sel===ds?' sel':'')+'" '+(has?('onclick="aiCalPick(\''+ds+'\')"'):'')+'><div>'+day+'</div>'+(has?('<div class="dot" style="background:'+col+'"></div>'):'')+'</div>';
+      cells+='<div class="scday'+(has?' has':'')+(AICAL.sel===ds?' sel':'')+'" '+((has||toffH)?('onclick="aiCalPick(\''+ds+'\')"'):'')+'><div>'+day+'</div>'+(has?('<div class="dot" style="background:'+col+'"></div>'):'')+(toffH?('<div style="font-size:6.5px;letter-spacing:.03em;color:#7fb0e6">-'+(TOFF[ds].hours||0)+'h</div>'):'')+'</div>';
     }
     grid.innerHTML=cells;
   }
@@ -2066,12 +2086,15 @@ function renderAiCal(){ var lbl=document.getElementById('aiCalLabel'); var dow=d
   if(body && !AICAL.sel){ body.innerHTML=(AICAL.count===0)?'<span class="muted">No graded work-days this month yet.</span>':('<span class="muted">Tap a day for its score. Sun/Mon/Tues are off-days (N/A).</span>'); }
 }
 function aiCalPick(ds){ if(mwIsOffDate(ds)) return; AICAL.sel=ds; renderAiCal(); var rec=AICAL.map[ds]; var body=document.getElementById('aiScoreBody'); if(!body) return;
-  if(!rec){ body.innerHTML='<span class="muted">No grade for this day.</span>'; return; }
+  // item MW-11: if Victor logged time off on this day, surface it on the day it applies to.
+  var toff=TOFF[ds];
+  var toffLine=toff?('<div style="font-size:12px;color:#7fb0e6;margin-bottom:6px">🌴 Time off logged'+(toff.kind==='hours'?(' — '+(toff.hours||0)+'h'):' — full day (not counted against your score)')+(toff.note?(' · '+esc(toff.note)):'')+'</div>'):'';
+  if(!rec){ body.innerHTML=toffLine+(toff&&toff.kind!=='hours'?'<span class="muted">Day off — no grade, and it doesn’t affect your average.</span>':'<span class="muted">No grade for this day.</span>'); return; }
   var col=rec.grade>=75?'#34d399':rec.grade>=45?'#fbbf24':'#f87171';
   var wd=''; try{ wd=new Date(ds+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}); }catch(e){ wd=ds; }
   // item MW-5: show Victor the SCORE only. The model isn't trained/published yet, so its per-day
   // reasoning is intentionally NOT shown here (Gavin's view keeps the explanation).
-  body.innerHTML='<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><b style="color:'+col+';font-size:22px">'+rec.grade+'</b><span class="muted" style="font-size:12px">/100 · '+esc(wd)+'</span></div><span class="muted" style="font-size:12px">Detailed feedback isn’t published yet — only your score is shown for now.</span>';
+  body.innerHTML=toffLine+'<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><b style="color:'+col+';font-size:22px">'+rec.grade+'</b><span class="muted" style="font-size:12px">/100 · '+esc(wd)+'</span></div><span class="muted" style="font-size:12px">Detailed feedback isn’t published yet — only your score is shown for now.</span>';
 }
 
 // ===== Bonus / incentive comp (owner entry + Victor summary) =====
@@ -2109,17 +2132,18 @@ function renderBonusVictor(){ var el=document.getElementById('bonusBody'); if(!e
   // item 4: month toggle — view a single month's AI% / self% and that month's notes.
   var mE=Object.assign(bBlank(),BONUS.data[bKey(BVYEAR,BVMONTH)]||{});
   var mHas=!!BONUS.data[bKey(BVYEAR,BVMONTH)]; var mPub=mHas && mE.published!==false;
+  var mc=bCalc(mE);   // item MW-8: month figures reused by the yearly perf cards below
   h+='<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:12px 14px;margin-bottom:14px">';
   h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span onclick="bvMonthStep(-1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:16px">‹</span><b style="font-size:13px">'+BFULL[BVMONTH]+' '+BVYEAR+'</b><span onclick="bvMonthStep(1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:16px">›</span><span style="flex:1"></span><span class="muted" style="font-size:11px">by month</span></div>';
   if(!mPub){ h+='<div class="muted" style="font-size:12px">No published bonus entry for this month yet.</div>'; }
-  else { var mc=bCalc(mE);
+  else {
     h+='<div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:8px">';
-    h+='<div><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">AI score</div><div style="font-size:20px;font-weight:700">'+bNum(mE.aiPct)+'%</div><div class="muted" style="font-size:11px">'+bMoney(mc.ai)+'</div></div>';
-    h+='<div><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">Self-management</div><div style="font-size:20px;font-weight:700">'+bNum(mE.selfPct)+'%</div><div class="muted" style="font-size:11px">'+bMoney(mc.self)+'</div></div>';
+    // item MW-8: each note sits UNDER its own section (AI-score note under AI score, self-mgmt note under Self-management) — no longer pooled at the bottom.
+    h+='<div style="flex:1;min-width:190px"><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">AI score</div><div style="font-size:20px;font-weight:700">'+bNum(mE.aiPct)+'%</div><div class="muted" style="font-size:11px">'+bMoney(mc.ai)+'</div>'+((mE.aiNote||'').trim()?('<div style="font-size:12.5px;color:#b9c6d8;margin-top:6px;border-top:1px solid #1c2839;padding-top:6px">'+bEsc(mE.aiNote)+'</div>'):'')+'</div>';
+    h+='<div style="flex:1;min-width:190px"><div class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.06em">Self-management</div><div style="font-size:20px;font-weight:700">'+bNum(mE.selfPct)+'%</div><div class="muted" style="font-size:11px">'+bMoney(mc.self)+'</div>'+((mE.selfNote||'').trim()?('<div style="font-size:12.5px;color:#b9c6d8;margin-top:6px;border-top:1px solid #1c2839;padding-top:6px">'+bEsc(mE.selfNote)+'</div>'):'')+'</div>';
     h+='</div>';
-    var mn=[]; if((mE.note||'').trim())mn.push({l:'Note',t:mE.note}); if((mE.selfNote||'').trim())mn.push({l:'Self-management',t:mE.selfNote}); if((mE.aiNote||'').trim())mn.push({l:'AI score',t:mE.aiNote}); if((mE.reviewNote||'').trim())mn.push({l:'Reviews',t:mE.reviewNote});
-    if(mn.length){ h+='<div style="border-top:1px solid #1c2839;padding-top:8px">'+mn.map(function(n){return '<div style="font-size:12.5px;margin-bottom:3px"><span style="color:#f4633c;font-weight:700">'+bEsc(n.l)+'</span> <span>'+bEsc(n.t)+'</span></div>';}).join('')+'</div>'; }
-    else { h+='<div class="muted" style="font-size:12px">No notes for this month.</div>'; }
+    var mn2=[]; if((mE.note||'').trim())mn2.push({l:'Note',t:mE.note}); if((mE.reviewNote||'').trim())mn2.push({l:'Reviews',t:mE.reviewNote});
+    if(mn2.length){ h+='<div style="border-top:1px solid #1c2839;padding-top:8px;margin-top:2px">'+mn2.map(function(n){return '<div style="font-size:12.5px;margin-bottom:3px"><span style="color:#f4633c;font-weight:700">'+bEsc(n.l)+'</span> <span>'+bEsc(n.t)+'</span></div>';}).join('')+'</div>'; }
   }
   h+='</div>';
   h+='<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px"><div><div class="muted" style="font-size:12px">Year-to-date incentive pay ('+BYEAR+')</div><div style="font-size:38px;font-weight:700;line-height:1">'+bMoney(ytd)+'</div></div><div><div class="muted" style="font-size:12px">Payout</div><div style="font-weight:600">Mid-December '+BYEAR+'</div></div><div><div class="muted" style="font-size:12px">Months logged</div><div style="font-weight:600">'+pub.length+' of 12</div></div></div>';
@@ -2131,15 +2155,17 @@ function renderBonusVictor(){ var el=document.getElementById('bonusBody'); if(!e
   h+=grp('Cleaning',sum('cleaning'),'Never below $0 in a month.',[{l:'Turnovers you cleaned ('+cnt('cleans')+' x $'+cr+')',a:cnt('cleans')*cr},{l:'Cleans we covered ('+cnt('covered')+' x -$25)',a:-cnt('covered')*25},{l:'Hired inspections ('+cnt('inspections')+' x -$5)',a:-cnt('inspections')*5}]);
   h+=grp('Guest reviews',sum('reviews'),'Never below $0 in a month.',[{l:'Max-star reviews ('+cnt('goodReviews')+' x $5)',a:cnt('goodReviews')*5},{l:'Below-max reviews ('+cnt('badReviews')+' x -$25)',a:-cnt('badReviews')*25}]);
   h+=grp('Sales commission',sum('sales'),'10% of minibar net income and guidebook upsells.',[{l:'Minibar net income ('+bMoney(cnt('minibar'))+' x 10%)',a:cnt('minibar')*0.1},{l:'Guidebook upsells ('+bMoney(cnt('guidebook'))+' x 10%)',a:cnt('guidebook')*0.1}]);
-  var perfCard=function(name,amt,cap,barPct,blurb){ return '<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:14px;flex:1;min-width:200px"><div style="font-weight:700">'+name+'</div><div style="font-size:26px;font-weight:700;line-height:1.1">'+bMoney(amt)+'</div><div class="muted" style="font-size:12px">'+cap+'</div><div style="height:6px;background:#1b2739;border-radius:99px;overflow:hidden;margin:6px 0"><div style="height:100%;width:'+Math.max(0,Math.min(100,barPct))+'%;background:#f4633c"></div></div><div class="muted" style="font-size:12px">'+blurb+'</div></div>'; };
+  var perfCard=function(name,amt,cap,barPct,blurb,extra){ return '<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:14px;flex:1;min-width:200px"><div style="font-weight:700">'+name+'</div><div style="font-size:26px;font-weight:700;line-height:1.1">'+bMoney(amt)+'</div><div class="muted" style="font-size:12px">'+cap+'</div><div style="height:6px;background:#1b2739;border-radius:99px;overflow:hidden;margin:6px 0"><div style="height:100%;width:'+Math.max(0,Math.min(100,barPct))+'%;background:#f4633c"></div></div><div class="muted" style="font-size:12px">'+blurb+'</div>'+(extra||'')+'</div>'; };
+  // item MW-8: AI-score & Self-management cards show BOTH the yearly total (above) AND the selected month, with each note under its own section.
+  var moLbl=BFULL[BVMONTH]+' '+BVYEAR;
+  var moExtra=function(pct,dollars,note){ return mPub?('<div style="border-top:1px solid #1c2839;margin-top:8px;padding-top:8px"><div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.06em">'+moLbl+'</div><div style="font-size:13px;font-weight:600;color:#cdd8e6">'+bNum(pct)+'% &middot; '+bMoney(dollars)+'</div>'+((note||'').trim()?('<div style="font-size:12px;color:#b9c6d8;margin-top:4px">'+bEsc(note)+'</div>'):'')+'</div>'):''; };
   h+='<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">';
-  h+=perfCard('AI score',sum('ai'),'of $1,000 annual cap',(sum('ai')/1000)*100,'Determined by AI from your daily grades.');
-  h+=perfCard('Self-management',sum('self'),'of $500 annual cap',(sum('self')/500)*100,'Running operations with minimal oversight.');
+  h+=perfCard('AI score',sum('ai'),'of $1,000 annual cap',(sum('ai')/1000)*100,'Determined by AI from your daily grades.',moExtra(mE.aiPct,mc.ai,mE.aiNote));
+  h+=perfCard('Self-management',sum('self'),'of $500 annual cap',(sum('self')/500)*100,'Running operations with minimal oversight.',moExtra(mE.selfPct,mc.self,mE.selfNote));
   var awarded=showA&&health>0;
   h+=perfCard('Property health',awarded?health:0,awarded?'awarded of $1,000':'Assessed at year end',(health/1000)*100,(showA&&ann.healthNote)?bEsc(ann.healthNote):'Gavin writes this up before the December payout.');
   h+='</div>';
-  var notes=[]; pub.forEach(function(p){ var lbl=BMONTHS[p.i]+' '+BYEAR; if((p.e.note||'').trim())notes.push({l:lbl,t:p.e.note}); if((p.e.selfNote||'').trim())notes.push({l:lbl+' self-management',t:p.e.selfNote}); if((p.e.aiNote||'').trim())notes.push({l:lbl+' AI score',t:p.e.aiNote}); if((p.e.reviewNote||'').trim())notes.push({l:lbl+' reviews',t:p.e.reviewNote}); });
-  if(notes.length){ h+='<div style="margin-top:14px"><div class="muted" style="text-transform:uppercase;letter-spacing:.08em;font-size:11px;font-weight:700;margin-bottom:6px">Notes from Gavin</div>'+notes.map(function(n){return '<div style="font-size:13px;margin-bottom:4px"><span style="color:#f4633c;font-weight:700">'+bEsc(n.l)+'</span> <span>'+bEsc(n.t)+'</span></div>';}).join('')+'</div>'; }
+  // item MW-8: the pooled "Notes from Gavin" list at the bottom was removed — notes now appear under their respective AI-score / Self-management sections above.
   h+='</div>';   // close #bonusDetail (collapsed breakdown)
   el.innerHTML=h;
 }
@@ -2183,7 +2209,7 @@ function renderBonusOwner(){ var el=document.getElementById('bonusOwnerBody'); i
 async function loadWeekly(){ try{ const r=await fetch(api('weekly_report')+'&week='+WEEK_OFF+'&cb='+Date.now()); const j=await r.json(); renderWeekly(j); }catch(e){} }
 function weekNav(delta){ WEEK_OFF=Math.max(0,WEEK_OFF+delta); loadWeekly(); }
 function toKindVis(){ var k=(document.getElementById('toKind')||{}).value; var w=document.getElementById('toHoursWrap'); if(w) w.style.display=(k==='hours')?'flex':'none'; }
-async function loadTimeoff(){ var el=document.getElementById('timeoffList'); if(!el) return; var h={}; if(PW) h['x-app-password']=PW; try{ var r=await fetch(api('timeoff_list')+'&cb='+Date.now(),{headers:h}); var j=await r.json(); var list=(j&&j.items)||[]; if(!list.length){ el.innerHTML='<span class="muted">No time off logged yet.</span>'; return; } el.innerHTML=list.map(function(it){ var lbl=it.kind==='hours'?((it.hours||0)+'h off'):'Full day off'; return '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;padding:7px 0;border-top:1px solid #26354a"><div><b>'+esc(it.date||'')+'</b> &middot; '+esc(lbl)+(it.note?(' <span class="muted">'+esc(it.note)+'</span>'):'')+'</div><button class="ghost" style="padding:3px 8px" onclick="delTimeoff(\''+it.id+'\')">Remove</button></div>'; }).join(''); }catch(e){ el.textContent='Error: '+e.message; } }
+async function loadTimeoff(){ var el=document.getElementById('timeoffList'); if(!el) return; var h={}; if(PW) h['x-app-password']=PW; try{ var r=await fetch(api('timeoff_list')+'&cb='+Date.now(),{headers:h}); var j=await r.json(); var list=(j&&j.items)||[]; TOFF={}; list.forEach(function(it){ if(it&&it.date) TOFF[it.date]=it; }); if(AICAL&&AICAL.map&&Object.keys(AICAL.map).length) aiCalApply(); if(!list.length){ el.innerHTML='<span class="muted">No time off logged yet.</span>'; return; } el.innerHTML=list.map(function(it){ var lbl=it.kind==='hours'?((it.hours||0)+'h off'):'Full day off'; return '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;padding:7px 0;border-top:1px solid #26354a"><div><b>'+esc(it.date||'')+'</b> &middot; '+esc(lbl)+(it.note?(' <span class="muted">'+esc(it.note)+'</span>'):'')+'</div></div>'; }).join(''); }catch(e){ el.textContent='Error: '+e.message; } }
 async function addTimeoff(){ var st=document.getElementById('toStatus'); var date=(document.getElementById('toDate')||{}).value; if(!date){ if(st) st.textContent='pick a date'; return; } var kind=(document.getElementById('toKind')||{}).value; var hours=(document.getElementById('toHours')||{}).value; var note=(document.getElementById('toNote')||{}).value; if(st) st.textContent='Saving...'; var h={'Content-Type':'application/json'}; if(PW) h['x-app-password']=PW; try{ var r=await fetch(api('timeoff_add'),{method:'POST',headers:h,body:JSON.stringify({date:date,kind:kind,hours:hours,note:note})}); var j=await r.json(); if(j&&j.ok){ if(st) st.textContent='Added'; var n=document.getElementById('toNote'); if(n) n.value=''; loadTimeoff(); } else if(st) st.textContent=(j&&j.error)||'failed'; }catch(e){ if(st) st.textContent='Error: '+e.message; } }
 async function delTimeoff(id){ var h={'Content-Type':'application/json'}; if(PW) h['x-app-password']=PW; try{ await fetch(api('timeoff_del'),{method:'POST',headers:h,body:JSON.stringify({id:id})}); loadTimeoff(); }catch(e){} }
 var EMAILROWS=[];
