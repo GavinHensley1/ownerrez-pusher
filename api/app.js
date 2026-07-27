@@ -1488,7 +1488,7 @@ const TEPEES_DEFAULT=[
   { name:'Scarlet Antlers', addr:'208 Big Sky Way', lat:35.770448, lon:-83.573418, radius_m:20, confirmed:false },
   { name:'Cub House',       addr:'204 Big Sky Way', lat:35.769821, lon:-83.573354, radius_m:20, confirmed:false }
 ];
-async function getTepees(){ try{ if(redis){ const t=await redis.get('parkside:tepees'); if(Array.isArray(t)&&t.length) return t.map(function(x){ return {name:String(x.name||'tepee'),addr:String(x.addr||''),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)||20,confirmed:!!x.confirmed}; }).filter(function(x){ return isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0; }); } }catch(e){} return TEPEES_DEFAULT; }
+async function getTepees(){ try{ if(redis){ let t=await redis.get('parkside:tepees'); if(typeof t==='string'){ try{ t=JSON.parse(t); }catch(e){} } if(Array.isArray(t)&&t.length){ const m=t.map(function(x){ return {name:String(x.name||'tepee'),addr:String(x.addr||''),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)||20,confirmed:!!x.confirmed}; }).filter(function(x){ return isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0; }); if(m.length) return m; } } }catch(e){} return TEPEES_DEFAULT; }
 function nearestTepee(lat,lon,tepees){ let best=null; for(const t of tepees){ const d=haversineM(lat,lon,t.lat,t.lon); if(d<=t.radius_m && (best===null||d<best.dist_m)) best={name:t.name, addr:t.addr, dist_m:Math.round(d)}; } return best; }
 // Minutes spent inside each tepee for a day. SEPARATE from gpsZoneSummary; RESULT IS NEVER USED FOR SCORING.
 async function tepeeDwellSummary(device, date){
@@ -1998,8 +1998,14 @@ module.exports=async(req,res)=>{
         const arr=Array.isArray(b.tepees)?b.tepees:[];
         const clean=arr.map(function(x){ return {name:String(x.name||'tepee').slice(0,40), addr:String(x.addr||'').slice(0,60), lat:Number(x.lat), lon:Number(x.lon), radius_m:Number(x.radius_m)||20, confirmed:!!x.confirmed}; }).filter(function(x){ return isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0; });
         if(!clean.length) return res.status(400).json({error:"no valid tepees in payload"});
-        try{ if(redis) await redis.set("parkside:tepees", clean); }catch(e){ return res.status(500).json({error:"db error"}); }
-        return res.status(200).json({ok:true, count:clean.length, tepees:clean}); }
+        if(!redis) return res.status(503).json({error:"storage not configured (redis unavailable) — cannot persist"});
+        let verified=null;
+        try{ await redis.set("parkside:tepees", JSON.stringify(clean));
+          // Read back immediately and confirm it persisted (surfaces silent write failures to the client).
+          let rb=await redis.get("parkside:tepees"); if(typeof rb==="string"){ try{ rb=JSON.parse(rb); }catch(e){} }
+          verified=Array.isArray(rb)?rb.length:null;
+        }catch(e){ return res.status(500).json({error:"db error: "+String(e&&e.message||e)}); }
+        return res.status(200).json({ok:true, count:clean.length, persisted:(verified===clean.length), verified_count:verified, tepees:clean}); }
       const tepees=await getTepees(); const isDefault=(tepees===TEPEES_DEFAULT);
       return res.status(200).json({tepees, source:isDefault?"default":"custom", approximate:isDefault, note:isDefault?"Approximate — georeferenced from the satellite map; confirm/replace each tepee's exact coord.":"Custom coordinates saved by Gavin."});
     }

@@ -1616,11 +1616,21 @@ function tepEditRenderList(){ var el=document.getElementById('tepEditList'); if(
 function tepEditPick(i){ if(!TEPEE_EDIT) return; TEPEE_ACTIVE=i; var t=TEPEE_EDIT_LIST[i]; if(t&&isFinite(t.lat)&&isFinite(t.lon)&&MON_MAP){ try{ MON_MAP.panTo([t.lat,t.lon]); }catch(e){} } tepEditRenderList(); }
 async function tepEditSave(){ if(!GPW||!TEPEE_EDIT) return; var st=document.getElementById('tepEditStatus'); var btn=document.getElementById('tepSaveBtn');
   var payload=TEPEE_EDIT_LIST.map(function(t){ return {name:t.name, addr:t.addr, lat:t.lat, lon:t.lon, radius_m:t.radius_m||20, confirmed:(t._placed||t.confirmed)}; });
-  if(st) st.textContent='Saving…'; if(btn) btn.disabled=true;
+  if(st){ st.style.color=''; st.textContent='Saving…'; } if(btn) btn.disabled=true;
   try{ var r=await fetch(api('tepees_config'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({tepees:payload})}); var j=await r.json();
-    if(j&&j.ok){ if(st) st.textContent='Saved ✓ '+j.count+' tepees'; TEPEE_EDIT_LIST.forEach(function(t){ if(t._placed) t.confirmed=true; }); tepEditRedraw(); tepEditRenderList(); }
-    else { if(st) st.textContent=(j&&j.error)?j.error:'Save failed'; }
-  }catch(e){ if(st) st.textContent='Error: '+e.message; } finally{ if(btn) btn.disabled=false; }
+    if(!(j&&j.ok)){ if(st){ st.style.color='#f87171'; st.textContent=(j&&j.error)?j.error:'Save failed'; } return; }
+    // Verify: read the config back from the server (source of truth) and redraw from THAT, so what Gavin
+    // sees is exactly what persisted. Catches any silent write failure instead of falsely showing success.
+    var vok=false;
+    try{ var vr=await fetch(api('tepees_config')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var vj=await vr.json();
+      if(vj&&Array.isArray(vj.tepees)&&vj.source==='custom'){
+        TEPEE_EDIT_LIST=vj.tepees.map(function(t){ return {name:t.name,addr:t.addr,lat:Number(t.lat),lon:Number(t.lon),radius_m:Number(t.radius_m)||20,confirmed:!!t.confirmed,_placed:!!t.confirmed}; });
+        tepEditRedraw(); tepEditRenderList(); vok=true; }
+    }catch(e){}
+    if(st){ if(vok){ st.style.color='#4ade80'; st.textContent='Saved & verified ✓ — stays put on reload'; }
+      else if(j.persisted){ st.style.color='#4ade80'; st.textContent='Saved ✓ '+j.count+' tepees'; }
+      else { st.style.color='#f87171'; st.textContent='⚠ Saved but could NOT verify — reload to check'; } }
+  }catch(e){ if(st){ st.style.color='#f87171'; st.textContent='Error: '+e.message; } } finally{ if(btn) btn.disabled=false; }
 }
 async function tepEditResetDefaults(){ if(!GPW||!TEPEE_EDIT) return; if(!confirm('Reset all tepees to the app default positions?')) return;
   var st=document.getElementById('tepEditStatus'); if(st) st.textContent='Resetting…';
