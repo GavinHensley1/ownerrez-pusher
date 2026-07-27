@@ -165,6 +165,7 @@
     <button id="tabPricing" class="seg" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
     <button id="tabBug" class="seg" onclick="switchView('bug')">Report a Bug</button>
+    <button id="tabAudit" class="seg" onclick="switchView('audit')">Message Audit</button>
   </div>
   <span class="muted" id="horizon"></span>
   <span class="sp"></span>
@@ -412,6 +413,20 @@
     </div>
     <div id="bugList" class="legend" style="margin-top:16px"></div>
   </div>
+</div>
+<!-- item AUDIT-1: READ-ONLY Message Audit view (guest <-> engine <-> Victor history). No writes. -->
+<div class="wrap" id="auditMain" style="display:none">
+  <div class="card">
+    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Message audit</div>
+      <div style="font-size:11.5px;color:#64758d">read-only &mdash; full guest &harr; engine &harr; Victor history</div>
+      <span style="flex:1"></span>
+      <label class="muted" style="font-size:11.5px">Days<input id="auditDays" type="number" min="1" max="60" value="10" style="width:70px;margin-left:6px" onchange="loadAudit()"></label>
+      <button class="ghost" onclick="loadAudit()">Refresh</button>
+    </div>
+    <div id="auditMeta" class="muted" style="font-size:11.5px"></div>
+  </div>
+  <div id="auditList"></div>
 </div>
 <div class="wrap" id="monMain" style="display:none">
   <!-- Full-screen centered admin lock, matching Victor's staff-access screen (presentation only; wiring unchanged) -->
@@ -1269,19 +1284,22 @@ async function loadLearning(){
 }
 let MSG_BUILT=false; let KB={format:"",items:[]}; let AUTO_ON=false, PF=[];
 function switchView(v){
-  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus', isBug=v==='bug';
+  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus', isBug=v==='bug', isAudit=v==='audit';
   document.getElementById('main').style.display=isP?'block':'none';
   document.getElementById('msgMain').style.display=isM?'block':'none';
   document.getElementById('monMain').style.display=isMon?'block':'none';
   var bg=document.getElementById('bugMain'); if(bg) bg.style.display=isBug?'block':'none';
+  var ag=document.getElementById('auditMain'); if(ag) ag.style.display=isAudit?'block':'none';
   const bm=document.getElementById('bonusMain'); if(bm) bm.style.display=isB?'grid':'none';
   document.getElementById('tabPricing').className='seg'+(isP?' on':'');
   document.getElementById('tabMsg').className='seg'+(isM?' on':'');
   const tm=document.getElementById('tabMon'); if(tm) tm.className='seg'+(isMon?' on':'');
   var tbg=document.getElementById('tabBug'); if(tbg) tbg.className='seg'+(isBug?' on':'');
+  var tag=document.getElementById('tabAudit'); if(tag) tag.className='seg'+(isAudit?' on':'');
   const tb=document.getElementById('tabBonus'); if(tb) tb.className='seg'+(isB?' on':'');
   if(isB) loadBonus();
   if(isBug) loadBugs();
+  if(isAudit) loadAudit();
   document.getElementById('horizon').style.display=isP?'':'none';
   document.getElementById('syncWrap').style.display=isP?'':'none';
   if(isP) setSyncUI();
@@ -1311,6 +1329,57 @@ async function submitBug(){ var t=document.getElementById('bugText'); var st=doc
 }
 async function deleteBug(id){ if(!confirm('Delete this bug report?')) return;
   try{ await fetch(api('bugs'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({delId:id})}); loadBugs(); }catch(e){}
+}
+// ===== Message Audit (READ-ONLY) — reconstructs guest interactions from parkside:approvals + parkside:thr:* =====
+function auditWhen(ts){ if(!ts) return ''; try{ return new Date(ts).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ return String(ts); } }
+async function loadAudit(){ var el=document.getElementById('auditList'); if(!el) return; el.textContent='Loading…';
+  var days=((document.getElementById('auditDays')||{}).value)||10;
+  var meta=document.getElementById('auditMeta');
+  try{ var r=await fetch(api('msg_audit')+'&days='+encodeURIComponent(days)+'&cb='+Date.now(),{headers:{'x-app-password':PW}}); var j=await r.json();
+    var cards=(j&&j.cards)||[];
+    if(meta) meta.textContent=cards.length+' interaction'+(cards.length===1?'':'s')+' in the last '+(j.days||days)+' days (newest first)';
+    if(!cards.length){ el.innerHTML='<div class="card"><span class="muted">No guest interactions with a drafted/answered question in this window.</span></div>'; return; }
+    el.innerHTML=cards.map(renderAuditCard).join('');
+  }catch(e){ el.innerHTML='<div class="card"><span class="muted">Could not load ('+esc(e.message)+').</span></div>'; }
+}
+function auditBadge(txt,c){ return '<span style="font-family:\'IBM Plex Mono\',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.05em;padding:2px 7px;border-radius:5px;background:'+c.bg+';color:'+c.fg+';border:1px solid '+c.bd+'">'+esc(txt)+'</span>'; }
+function auditRow(label,val,mono){ if(val==null||val==='') return ''; return '<div style="margin:5px 0"><div style="font-family:\'IBM Plex Mono\',monospace;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:#64758d;margin-bottom:1px">'+label+'</div><div style="font-size:12.5px;color:#dbe4f0;white-space:pre-wrap;word-break:break-word'+(mono?';font-family:\'IBM Plex Mono\',monospace':'')+'">'+esc(val)+'</div></div>'; }
+function renderAuditCard(c){
+  var idlbl=c.thread_id?('thread '+c.thread_id):(c.booking_id?('booking '+c.booking_id):(c.thread_key||''));
+  var head='<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px">'
+    +'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#e6ecf5">'+esc(c.guest_name||'Guest')+'</div>'
+    +(c.unit?'<span class="muted" style="font-size:11.5px">'+esc(c.unit)+'</span>':'')
+    +'<span style="flex:1"></span>'
+    +'<span class="muted" style="font-size:10.5px">'+esc(idlbl)+' &middot; '+esc(auditWhen(c.last_activity))+'</span></div>';
+  var tr='';
+  if(c.transcript && c.transcript.length){
+    tr='<div style="font-family:\'IBM Plex Mono\',monospace;font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:#64758d;margin:2px 0 6px">Guest &harr; engine transcript</div>';
+    tr+=c.transcript.map(function(m){ var inb=(m.d==='in'||m.dir==='in'); var body=(m.body!=null?m.body:m.b)||''; var nm=(m.name!=null?m.name:m.n)||''; var at=(m.at!=null?m.at:m.t);
+      return '<div style="display:flex;justify-content:'+(inb?'flex-start':'flex-end')+';margin:4px 0"><div style="max-width:82%;background:'+(inb?'#0e151d':'#12271e')+';border:1px solid '+(inb?'#26354a':'#1f4634')+';border-radius:10px;padding:6px 10px"><div class="muted" style="font-size:10px;margin-bottom:2px">'+(inb?esc(nm||'Guest'):'Engine → guest')+(at?(' · '+esc(auditWhen(at))):'')+'</div><div style="font-size:12.5px;color:#dbe4f0;white-space:pre-wrap;word-break:break-word">'+esc(body)+'</div></div></div>';
+    }).join('');
+  } else { tr='<div class="muted" style="font-size:11.5px;margin-bottom:6px">No stored two-way transcript for this thread (question spine below).</div>'; }
+  var stColMap={approved:{bg:'#12271e',fg:'#6ee7b7',bd:'#1f4634'},answered:{bg:'#12271e',fg:'#6ee7b7',bd:'#1f4634'},rejected:{bg:'#2a1518',fg:'#fca5a5',bd:'#4a2530'},escalated:{bg:'#1e2436',fg:'#93a2b8',bd:'#2c3a51'},pending:{bg:'#241f14',fg:'#e8c37a',bd:'#45391f'}};
+  var qs=(c.questions||[]).map(function(q){
+    var stCol=stColMap[q.status]||{bg:'#1b2739',fg:'#93a2b8',bd:'#2c3a51'};
+    var h='<div style="border-top:1px solid #1c2839;margin-top:10px;padding-top:10px">';
+    h+='<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">'+auditBadge(q.status||'—',stCol)
+      +(q.escalated?auditBadge('escalated to Victor',{bg:'#1e2436',fg:'#93a2b8',bd:'#2c3a51'}):'')
+      +(q.complaint?auditBadge('complaint',{bg:'#2a1518',fg:'#fca5a5',bd:'#4a2530'}):'')
+      +(q.sms_label?'<span class="muted" style="font-size:10px">'+esc(q.sms_label)+'</span>':'')
+      +'<span style="flex:1"></span><span class="muted" style="font-size:10px">'+esc(auditWhen(q.created_at))+'</span></div>';
+    h+=auditRow('Guest question',q.question);
+    h+=auditRow('Engine draft',q.draft);
+    if(q.revised_draft) h+=auditRow('Revised draft (after Victor)',q.revised_draft);
+    h+=auditRow("Victor's supplied answer (factFromVictor)",q.fact_from_victor);
+    if(q.reject_reason) h+=auditRow('Reject reason',q.reject_reason);
+    h+=auditRow('Final message sent to guest',q.final_answer);
+    var deco=[]; if(q.decided_at) deco.push('decided '+auditWhen(q.decided_at)); if(q.auto_rejected) deco.push('auto-rejected (no decision in 24h)');
+    if(deco.length) h+='<div class="muted" style="font-size:10.5px;margin-top:5px">'+esc(deco.join(' · '))+'</div>';
+    h+='</div>'; return h;
+  }).join('');
+  return '<div class="card" style="margin-bottom:14px">'+head+tr+qs
+    +'<div class="muted" style="font-size:10.5px;margin-top:10px;border-top:1px dashed #26354a;padding-top:8px">Note: the exact SMS text Victor received is regenerated from a template at send time and is <b>not</b> stored — his supplied answer above is captured, but the verbatim outbound SMS to Victor is not recoverable.</div>'
+  +'</div>';
 }
 // ===== Monitoring (Gavin) tab: GPS map overlay =====
 let GPW='', MON_MAP=null, MON_LAYERS=null, MON_TIMER=null, MON_EDIT_LAYERS=null;

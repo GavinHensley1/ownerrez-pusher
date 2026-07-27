@@ -2993,6 +2993,63 @@ if(action==="email_recipients"){
       return res.status(out.error?400:200).json(out);
     }
     // VICTOR'S: view the approval queue (password). ?status=pending|approved|rejected|all
+    // ===== Message Audit (READ-ONLY diagnostic) — expose the guest history that already lives in Redis.
+    // Gated app-or-gavin (same staff scheme as timeoff). NO writes/deletes anywhere in these handlers.
+    // `threads`: list parkside:thr:* keys; ?key=<k> returns that thread's stored two-way messages.
+    if(action==="threads"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      if(!redis) return res.status(200).json({keys:[], count:0});
+      const key=String((req.query&&req.query.key)||"").trim();
+      if(key){
+        const safe=key.replace(/^parkside:thr:/,"");
+        let msgs=[]; try{ msgs=(await redis.get("parkside:thr:"+safe))||[]; }catch(e){ msgs=[]; }
+        if(!Array.isArray(msgs)) msgs=[];
+        return res.status(200).json({key:safe, messages:msgs.map(function(m){ return {dir:m.d, body:m.b, at:m.t, name:m.n}; })});
+      }
+      let keys=[]; try{ keys=(await redis.keys("parkside:thr:*"))||[]; }catch(e){ keys=[]; }
+      keys=keys.map(function(k){ return String(k).replace(/^parkside:thr:/,""); });
+      return res.status(200).json({keys, count:keys.length});
+    }
+    // `msg_audit`: reconstruct the past ?days (default 10) of guest interactions by joining each
+    // parkside:approvals item to its parkside:thr:<key> transcript (by thread/booking). Newest first.
+    if(action==="msg_audit"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const days=Math.max(1, Math.min(60, Number((req.query&&req.query.days))||10));
+      const since=Date.now()-days*86400000;
+      const list=await getApprovals();
+      const atMs=function(it){ const cs=[it&&it.decidedAt, it&&it.revisedAt, it&&it.ts, it&&it.primaryNotifiedAt]; for(const x of cs){ const t=x?new Date(x).getTime():NaN; if(isFinite(t)) return t; } return 0; };
+      const byThread={};
+      for(const it of (list||[])){ if(!it) continue; if(atMs(it)<since) continue;
+        const tkey=threadKey(it.thread_id, it.booking_id)||("id:"+it.id);
+        (byThread[tkey]=byThread[tkey]||[]).push(it); }
+      const cards=[];
+      for(const tkey in byThread){
+        const items=byThread[tkey].slice().sort(function(a,b){ return new Date(a.ts||0)-new Date(b.ts||0); });
+        const first=items[0]||{};
+        let transcript=[]; try{ if(first && (first.thread_id||first.booking_id)) transcript=await getThreadLog(first.thread_id, first.booking_id); }catch(e){}
+        const questions=items.map(function(it){ return {
+          id:it.id, question:it.question||"",
+          draft:it.firstProposed||it.proposed||"",
+          revised_draft:(it.proposed && it.proposed!==it.firstProposed)?it.proposed:null,
+          escalated:(!!it.escalate)||it.status==="escalated",
+          complaint:!!it.complaint,
+          fact_from_victor:(it.factFromVictor!=null && String(it.factFromVictor).trim())?String(it.factFromVictor):null,
+          status:it.status||"", source:it.source||null, sms_label:it.smsLabel||null,
+          created_at:it.ts||null, decided_at:it.decidedAt||null, revised_at:it.revisedAt||null,
+          reject_reason:it.rejectReason||null, auto_rejected:!!it.autoRejected,
+          final_answer:(it.answer!=null && String(it.answer).trim())?String(it.answer):null
+        }; });
+        cards.push({
+          thread_key:tkey, guest_name:(first.guest_name)||"", unit:(first.unit)||"",
+          booking_id:(first.booking_id)||null, thread_id:(first.thread_id)||null,
+          last_activity:Math.max.apply(null, items.map(atMs)),
+          transcript:(transcript||[]).map(function(m){ return {dir:m.d, body:m.b, at:m.t, name:m.n}; }),
+          questions:questions
+        });
+      }
+      cards.sort(function(a,b){ return (b.last_activity||0)-(a.last_activity||0); });
+      return res.status(200).json({days, count:cards.length, cards});
+    }
     if(action==="approvals"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       const list=await getApprovals(); const status=(req.query&&req.query.status)||"pending";
