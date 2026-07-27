@@ -267,7 +267,7 @@ function computeGlide(signalMap,targets,today,startDate,days,occ,overrides,gsSta
     if(occ.hasData){ resortGap=Math.max(-1,Math.min(1,ref-poolOcc));
       // PROXIMITY-driven last-minute: a still-open night near check-in is perishable → real discount, independent of how far behind pace.
       if(lead<=K.lmWindow && K.lmWindow>0){ const prox=Math.pow(Math.max(0,(K.lmWindow-lead))/K.lmWindow, K.lmSteep!=null?K.lmSteep:1.5); lm=K.lmMax*prox; } }
-    for(const u of UNITS){ const key=u.orp+"|"+ds; const gkey=u.orp+"|"+mk+"|"+dt;
+    for(const u of UNITS){ const key=u.orp+"|"+ds; const gkey=u.orp+"|"+ds;                // FIX: per-night glide state (was per month+daytype -> all nights of a month collided into one glide slot)
       const prem=UNIT_PREM[u.orp]||1.0; const base=Math.round(sig*prem); const floorMult=K.floor/base, ceilMult=ceil/base;
       // UNIT demand: this unit's own occupancy vs the same pace-ref, then blend with resort demand.
       let unitOcc=null,unitGap=null,blendedGap=null,desiredBase=1,farDemandMult=1,_relDev=0;
