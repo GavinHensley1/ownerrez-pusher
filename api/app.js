@@ -888,6 +888,12 @@ let _memEF=null;
 const EMAIL_FLAG_DEFAULTS={gapAlert:true, monthlyReport:true, verifyReminder:true};
 async function getEmailFlags(){ try{ const f=redis?(await redis.get("parkside:email_flags")):_memEF; if(f&&typeof f==="object") return Object.assign({}, EMAIL_FLAG_DEFAULTS, f); }catch(e){} return Object.assign({}, EMAIL_FLAG_DEFAULTS); }
 async function setEmailFlags(o){ o=o||{}; const clean={ gapAlert:(o.gapAlert!==false), monthlyReport:(o.monthlyReport!==false), verifyReminder:(o.verifyReminder!==false) }; try{ if(redis) await redis.set("parkside:email_flags", clean); else _memEF=clean; }catch(e){} return clean; }
+// ===== Master on/off for the daily AUTO-GRADER (Gavin's "Auto-grade on/off" toggle). DEFAULT TRUE so
+// behavior is unchanged unless explicitly turned off. Backend-persisted (Redis) so OFF survives page
+// refreshes / other devices AND the auto-grader itself respects it (localStorage alone did neither). =====
+let _memAG=null;
+async function getAutograde(){ try{ const v=redis?(await redis.get("parkside:autograde_enabled")):_memAG; if(v!==null&&v!==undefined) return !(v===false||v==="false"||v==="0"||v===0); }catch(e){} return true; }
+async function setAutograde(on){ const en=(on!==false&&on!=="false"&&on!=="0"&&on!==0); try{ if(redis) await redis.set("parkside:autograde_enabled", en); else _memAG=en; }catch(e){} return en; }
 const EMAIL_CATALOG=[
   {key:"gap_alert", name:"Daily data-gap alert", desc:"When the engine can't fully grade a day (missing WebWork, GPS, or Victor's report)."},
   {key:"monthly", name:"Monthly work report", desc:"Full month summary of Victor's grades, emailed on the 1st."},
@@ -928,6 +934,9 @@ async function runDailyScore(nowIso){
   const dk="parkside:daily_score_done:"+date;
   try{ if(redis){ const done=await redis.get(dk); if(done) return {skipped:"already handled", date, at:done}; } }catch(e){}
   if(!(await isWorkingDay(date))) return {skipped:"off day (Sun/Mon/Tue or in his time-off tab) — not graded, no alert", date};
+  // Gavin's Auto-grade toggle (backend flag). When OFF, the auto-grader drafts no grade for the day.
+  // Early return (before dk is marked done) so flipping it back ON lets the day grade normally.
+  if(!(await getAutograde())) return {skipped:"auto-grade turned off (Gavin toggle) — no grade drafted", date};
   const cfg=await getNotifyConfig();
   const hours=await wwHoursForDate(date); const screen=await wwScreenActivity(date); const zones=await gpsZoneSummary(device,date);
   let report=""; try{ if(redis) report=(await redis.get("parkside:report:"+date))||""; }catch(e){}
@@ -2022,6 +2031,13 @@ if(action==="email_recipients"){
     if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(403).json({error:"gavin only"});
     if(req.method==="POST"){ let _b=req.body; if(typeof _b==="string"){ try{ _b=JSON.parse(_b);}catch(e){ _b={}; } } _b=_b||{}; const _src=(_b&&_b.flags&&typeof _b.flags==="object")?_b.flags:_b; const _saved=await setEmailFlags(_src); return res.status(200).json({ok:true, flags:_saved}); }
     return res.status(200).json({flags:await getEmailFlags()});
+  }
+  // Auto-grade on/off (Gavin toggle). Backend source of truth: the UI reads it on load and the daily
+  // auto-grader (runDailyScore) checks it. GET -> {enabled}; POST {enabled:true|false} -> set.
+  if(action==="autograde_flag"){
+    if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(403).json({error:"gavin only"});
+    if(req.method==="POST"){ let _b=req.body; if(typeof _b==="string"){ try{ _b=JSON.parse(_b);}catch(e){ _b={}; } } _b=_b||{}; const _want=(_b.enabled!==undefined?_b.enabled:_b.on); const _saved=await setAutograde(_want); return res.status(200).json({ok:true, enabled:_saved}); }
+    return res.status(200).json({enabled:await getAutograde()});
   }
   if(action==="weekly_hide"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});

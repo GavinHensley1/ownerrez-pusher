@@ -1267,8 +1267,20 @@ function gvApplyAutoGrade(on){ var c=document.getElementById('gvAutoChip'); if(!
 function gvAutoGrade(){ var c=document.getElementById('gvAutoChip'); if(!c) return;
   var on=c.dataset.off!=='1'; on=!on; gvApplyAutoGrade(on);
   try{ localStorage.setItem('orp_autoGradeOff', on?'0':'1'); }catch(e){}
+  // Persist to the BACKEND — this is the source of truth the daily auto-grader checks. localStorage is
+  // only a same-browser paint hint; the flag is what actually makes OFF stick across refreshes/devices.
+  try{ fetch(api('autograde_flag'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({enabled:on})}); }catch(e){}
 }
-function gvAutoGradeInit(){ var off='0'; try{ off=localStorage.getItem('orp_autoGradeOff')||'0'; }catch(e){} gvApplyAutoGrade(off!=='1'); }
+function gvAutoGradeInit(){
+  // instant paint from the last-known local hint (avoids a flash), then reconcile with the backend truth.
+  var off='0'; try{ off=localStorage.getItem('orp_autoGradeOff')||'0'; }catch(e){} gvApplyAutoGrade(off!=='1');
+  loadAutograde();
+}
+async function loadAutograde(){ if(!GPW) return;
+  try{ var r=await fetch(api('autograde_flag')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json();
+    var on=(j&&j.enabled!==false); gvApplyAutoGrade(on); try{ localStorage.setItem('orp_autoGradeOff', on?'0':'1'); }catch(e){}
+  }catch(e){}
+}
 // item 8: per-day "Hide this day" — persists to the backend (survives reload) and removes the day's grade
 // from Victor's month snippet. Uses the selected date, or today (ET) when viewing the live day.
 function gvEffDate(){ var d=(document.getElementById('monDate')||{}).value||''; if(d) return d; try{ return new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'}); }catch(e){ return new Date().toISOString().slice(0,10); } }
