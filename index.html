@@ -164,6 +164,7 @@
     <button id="tabBonus" class="seg on" onclick="switchView('bonus')">My Work</button>
     <button id="tabPricing" class="seg" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
+    <button id="tabBug" class="seg" onclick="switchView('bug')">Report a Bug</button>
   </div>
   <span class="muted" id="horizon"></span>
   <span class="sp"></span>
@@ -397,6 +398,21 @@
 
 </div>
 
+<!-- item BUG-1: shared staff Report-a-Bug tab (Victor + Gavin). One card: textarea + Submit, then a newest-first list with Delete. -->
+<div class="wrap" id="bugMain" style="display:none">
+  <div class="card">
+    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Report a bug</div>
+      <div style="font-size:11.5px;color:#64758d">tell us what went wrong &mdash; Gavin reviews these</div>
+    </div>
+    <textarea id="bugText" class="full" style="min-height:90px" placeholder="Describe the bug \u2014 what you did, what happened, and what you expected&hellip;"></textarea>
+    <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button onclick="submitBug()">Submit</button>
+      <span id="bugStatus" class="muted"></span>
+    </div>
+    <div id="bugList" class="legend" style="margin-top:16px"></div>
+  </div>
+</div>
 <div class="wrap" id="monMain" style="display:none">
   <!-- Full-screen centered admin lock, matching Victor's staff-access screen (presentation only; wiring unchanged) -->
   <div id="gavinGate">
@@ -1253,21 +1269,48 @@ async function loadLearning(){
 }
 let MSG_BUILT=false; let KB={format:"",items:[]}; let AUTO_ON=false, PF=[];
 function switchView(v){
-  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus';
+  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus', isBug=v==='bug';
   document.getElementById('main').style.display=isP?'block':'none';
   document.getElementById('msgMain').style.display=isM?'block':'none';
   document.getElementById('monMain').style.display=isMon?'block':'none';
+  var bg=document.getElementById('bugMain'); if(bg) bg.style.display=isBug?'block':'none';
   const bm=document.getElementById('bonusMain'); if(bm) bm.style.display=isB?'grid':'none';
   document.getElementById('tabPricing').className='seg'+(isP?' on':'');
   document.getElementById('tabMsg').className='seg'+(isM?' on':'');
   const tm=document.getElementById('tabMon'); if(tm) tm.className='seg'+(isMon?' on':'');
+  var tbg=document.getElementById('tabBug'); if(tbg) tbg.className='seg'+(isBug?' on':'');
   const tb=document.getElementById('tabBonus'); if(tb) tb.className='seg'+(isB?' on':'');
   if(isB) loadBonus();
+  if(isBug) loadBugs();
   document.getElementById('horizon').style.display=isP?'':'none';
   document.getElementById('syncWrap').style.display=isP?'':'none';
   if(isP) setSyncUI();
   if(isM){ if(!MSG_BUILT){ renderMessaging(); MSG_BUILT=true; } loadApprovals(); loadInquiries(); loadNotifyStatus(); loadDecisions(); loadAutoState(); loadPendingFacts(); makeCollapsible('#msgMain'); }
   if(isMon && GPW && MON_MAP){ setTimeout(function(){ MON_MAP.invalidateSize(); loadMonitor(); },60); }
+}
+// ===== Report a Bug (shared staff tab) — persists to parkside:bugs via the `bugs` action (x-app-password) =====
+async function loadBugs(){ var el=document.getElementById('bugList'); if(!el) return; el.textContent='Loading\u2026';
+  try{ var r=await fetch(api('bugs')+'&cb='+Date.now(),{headers:{'x-app-password':PW}}); var j=await r.json();
+    var list=((j&&j.bugs)||[]).slice().reverse(); // newest first
+    if(!list.length){ el.innerHTML='<span class="muted">No bugs reported yet.</span>'; return; }
+    el.innerHTML=list.map(function(bug){ var when=''; try{ when=new Date(bug.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }catch(e){ when=bug.at||''; }
+      return '<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px solid #26354a">'
+        +'<div style="min-width:0"><div style="font-size:13px;color:#cfd9e8;white-space:pre-wrap;word-break:break-word">'+esc(bug.text||'')+'</div>'
+        +'<div class="muted" style="font-size:11px;margin-top:3px">'+esc(when)+'</div></div>'
+        +'<button class="seg-x" style="width:auto;padding:2px 12px;flex:none" onclick="deleteBug(\''+bug.id+'\')">Delete</button></div>';
+    }).join('');
+  }catch(e){ el.innerHTML='<span class="muted">Could not load.</span>'; }
+}
+async function submitBug(){ var t=document.getElementById('bugText'); var st=document.getElementById('bugStatus'); var text=((t&&t.value)||'').trim();
+  if(!text){ if(st) st.textContent='Type a description first.'; return; }
+  if(st) st.textContent='Submitting\u2026';
+  try{ var r=await fetch(api('bugs'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({text:text})}); var j=await r.json();
+    if(j&&j.ok){ if(t) t.value=''; if(st) st.textContent='Submitted \u2713'; loadBugs(); setTimeout(function(){ if(st&&st.textContent==='Submitted \u2713') st.textContent=''; },2500); }
+    else if(st) st.textContent=(j&&j.error)||'failed';
+  }catch(e){ if(st) st.textContent='Error: '+e.message; }
+}
+async function deleteBug(id){ if(!confirm('Delete this bug report?')) return;
+  try{ await fetch(api('bugs'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({delId:id})}); loadBugs(); }catch(e){}
 }
 // ===== Monitoring (Gavin) tab: GPS map overlay =====
 let GPW='', MON_MAP=null, MON_LAYERS=null, MON_TIMER=null, MON_EDIT_LAYERS=null;

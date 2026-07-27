@@ -2196,6 +2196,31 @@ if(action==="email_recipients"){
       try{ if(redis){ const raw=await redis.lrange("parkside:timeoff",0,-1); const kept=(raw||[]).map(function(x){return typeof x==="string"?x:JSON.stringify(x);}).filter(function(x){try{return JSON.parse(x).id!==id;}catch(e){return true;}}); await redis.del("parkside:timeoff"); if(kept.length) await redis.rpush.apply(redis,["parkside:timeoff"].concat(kept)); } }catch(e){ return res.status(500).json({error:"db error"}); }
       return res.status(200).json({ok:true, removed:id});
     }
+    // Report-a-Bug — SHARED staff tab (Victor via app password, or Gavin). GET=list; POST {text} append;
+    // POST {delId} (or {id,del:true}) remove. Persisted at parkside:bugs as a JSON array using the same
+    // stringify-on-write / string-or-array-tolerant-read pattern as parkside:day_hidden (reliable across cold keys).
+    if(action==="bugs"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let list=[]; try{ if(redis){ const raw=await redis.get("parkside:bugs"); list=Array.isArray(raw)?raw:(raw?JSON.parse(raw):[]); } }catch(e){ list=[]; }
+      if(!Array.isArray(list)) list=[];
+      if(req.method==="POST"){
+        let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
+        const delId=String(b.delId||(b.del?b.id:"")||"");
+        if(delId){
+          list=list.filter(function(x){ return x && x.id!==delId; });
+          try{ if(redis) await redis.set("parkside:bugs", JSON.stringify(list)); }catch(e){ return res.status(500).json({error:"db error"}); }
+          return res.status(200).json({ok:true, removed:delId, bugs:list});
+        }
+        const text=String(b.text||"").trim().slice(0,2000);
+        if(!text) return res.status(400).json({error:"text required"});
+        const rec={id:"bug_"+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36), text:text, at:new Date().toISOString()};
+        list.push(rec);
+        if(list.length>500) list=list.slice(-500);
+        try{ if(redis) await redis.set("parkside:bugs", JSON.stringify(list)); }catch(e){ return res.status(500).json({error:"db error"}); }
+        return res.status(200).json({ok:true, item:rec, bugs:list});
+      }
+      return res.status(200).json({bugs:list});
+    }
     // Monthly report (Gavin/cron): GET returns JSON; ?send=1 emails Gavin+Victor. ?month=YYYY-MM (default current).
     if(action==="monthly_report"){
       const okAuth=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x")) || ((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__y")) || ((req.query&&req.query.token)===(process.env.CRON_SECRET||"__z"));
