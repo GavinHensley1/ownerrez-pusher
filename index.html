@@ -1516,7 +1516,7 @@ function renderMonitor(j){ if(!MON_MAP) initMonMap(); MON_LAYERS.clearLayers();
   // Skipped while the click-to-place editor is open (the editor's own layer owns tepee rendering then).
   if(!TEPEE_EDIT){ try{ const _td=j._tepees; const _tps=(_td&&Array.isArray(_td.tepees))?_td.tepees:[];
     for(const t of _tps){ if(!isFinite(t.lat)||!isFinite(t.lon)) continue; const _cf=!!t.confirmed;
-      L.circle([t.lat,t.lon],{radius:t.radius_m||20,color:'#f472b6',weight:_cf?1.6:1.2,dashArray:_cf?null:'4 4',fillColor:'#f472b6',fillOpacity:0.10}).addTo(MON_LAYERS)
+      L.circle([t.lat,t.lon],{radius:(t.display_radius_m||t.radius_m||12),color:'#f472b6',weight:_cf?1.6:1.2,dashArray:_cf?null:'4 4',fillColor:'#f472b6',fillOpacity:0.10}).addTo(MON_LAYERS)
         .bindTooltip(t.name+(t.min?(' · '+t.min+'m'):''),{permanent:true,direction:'center',className:'tepeeLbl'}); } }catch(e){} }
   const trail=(j.trail||[]).filter(function(p){return p&&isFinite(p.lat)&&isFinite(p.lon);});
   if(trail.length>1) L.polyline(trail.map(function(p){return [p.lat,p.lon];}),{color:'#ffffff',weight:2,opacity:0.55}).addTo(MON_LAYERS);
@@ -1589,7 +1589,7 @@ function tepEditFit(){ try{ var lat=[],lon=[]; TEPEE_EDIT_LIST.forEach(function(
 function tepEditRedraw(){ if(!MON_EDIT_LAYERS) return; MON_EDIT_LAYERS.clearLayers(); TEPEE_EDIT_OBJ=[];
   TEPEE_EDIT_LIST.forEach(function(t,i){ if(!isFinite(t.lat)||!isFinite(t.lon)) return;
     var moved=!!t._placed; var col=moved?'#4ade80':'#f472b6';
-    var circle=L.circle([t.lat,t.lon],{radius:t.radius_m||20,color:col,weight:1.8,dashArray:moved?null:'4 4',fillColor:col,fillOpacity:0.14,interactive:false}).addTo(MON_EDIT_LAYERS);
+    var circle=L.circle([t.lat,t.lon],{radius:(t.display_radius_m||t.radius_m||12),color:col,weight:1.8,dashArray:moved?null:'4 4',fillColor:col,fillOpacity:0.14,interactive:false}).addTo(MON_EDIT_LAYERS);
     var icon=L.divIcon({className:'leaflet-div-icon tepDrag', html:'<div class="tepDragInner"><span class="tepDot" style="background:'+col+'"></span><span class="tepLbl">'+esc(t.name)+'</span></div>', iconSize:[92,34], iconAnchor:[46,9]});
     var marker=L.marker([t.lat,t.lon],{draggable:true, icon:icon, keyboard:false, zIndexOffset:1000, riseOnHover:true}).addTo(MON_EDIT_LAYERS);
     marker.on('dragstart',function(){ TEPEE_ACTIVE=i; });

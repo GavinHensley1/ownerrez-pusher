@@ -1489,7 +1489,13 @@ const TEPEES_DEFAULT=[
   { name:'Cub House',       addr:'204 Big Sky Way', lat:35.769821, lon:-83.573354, radius_m:20, confirmed:false }
 ];
 async function getTepees(){ try{ if(redis){ let t=await redis.get('parkside:tepees'); if(typeof t==='string'){ try{ t=JSON.parse(t); }catch(e){} } if(Array.isArray(t)&&t.length){ const m=t.map(function(x){ return {name:String(x.name||'tepee'),addr:String(x.addr||''),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)||20,confirmed:!!x.confirmed}; }).filter(function(x){ return isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0; }); if(m.length) return m; } } }catch(e){} return TEPEES_DEFAULT; }
-function nearestTepee(lat,lon,tepees){ let best=null; for(const t of tepees){ const d=haversineM(lat,lon,t.lat,t.lon); if(d<=t.radius_m && (best===null||d<best.dist_m)) best={name:t.name, addr:t.addr, dist_m:Math.round(d)}; } return best; }
+// Assign a fix to the NEAREST tepee CENTER (Voronoi) so every fix maps to exactly one unit even near a
+// boundary — then accept it only if within a sane cap (max of that tepee's geofence radius or 25 m) so a
+// fix well off-property is not force-assigned. DISPLAY/manual-review only; never used for scoring.
+function nearestTepee(lat,lon,tepees){ let best=null; for(const t of tepees){ const d=haversineM(lat,lon,t.lat,t.lon); if(best===null||d<best.d){ best={name:t.name, addr:t.addr, d:d, cap:Math.max(Number(t.radius_m)||20,25)}; } } if(best && best.d<=best.cap) return {name:best.name, addr:best.addr, dist_m:Math.round(best.d)}; return null; }
+// Per-tepee DISPLAY radius (m) = clamp(0.5 x nearest-neighbour distance, 6, 18). Half the neighbour distance
+// guarantees adjacent circles at most TOUCH (never overlap) while staying as large as readable. DISPLAY ONLY.
+function tepeeDisplayRadius(tepees){ const MIN=6, MAX=18; const out=[]; for(let i=0;i<tepees.length;i++){ let nn=Infinity; for(let j=0;j<tepees.length;j++){ if(j===i) continue; const d=haversineM(tepees[i].lat,tepees[i].lon,tepees[j].lat,tepees[j].lon); if(d<nn) nn=d; } const r=isFinite(nn)?0.5*nn:MAX; out.push({ nn_m:(isFinite(nn)?Math.round(nn):null), display_radius_m:Math.round(Math.max(MIN,Math.min(MAX,r))) }); } return out; }
 // Minutes spent inside each tepee for a day. SEPARATE from gpsZoneSummary; RESULT IS NEVER USED FOR SCORING.
 async function tepeeDwellSummary(device, date){
   let pts=[]; try{ if(redis){ const raw=await redis.lrange("parkside:gpsday:"+device+":"+date,0,-1); pts=(raw||[]).map(function(x){ try{ return typeof x==="string"?JSON.parse(x):x; }catch(e){ return null; } }).filter(Boolean); } }catch(e){}
@@ -1499,7 +1505,8 @@ async function tepeeDwellSummary(device, date){
     let gap=(new Date(b.t)-new Date(a.t))/60000; if(!isFinite(gap)||gap<0) gap=0; if(gap>10) gap=10; total+=gap;
     if(!(isFinite(a.lat)&&isFinite(a.lon))) continue;
     const nt=nearestTepee(a.lat,a.lon,tepees); if(nt){ byName[nt.name]=(byName[nt.name]||0)+gap; assigned+=gap; hits++; } }
-  const list=tepees.map(function(t){ return { name:t.name, addr:t.addr, lat:t.lat, lon:t.lon, radius_m:t.radius_m, confirmed:!!t.confirmed, min:Math.round(byName[t.name]||0) }; }).sort(function(x,y){ return y.min-x.min; });
+  const dr=tepeeDisplayRadius(tepees);
+  const list=tepees.map(function(t,i){ return { name:t.name, addr:t.addr, lat:t.lat, lon:t.lon, radius_m:t.radius_m, display_radius_m:dr[i].display_radius_m, nn_m:dr[i].nn_m, confirmed:!!t.confirmed, min:Math.round(byName[t.name]||0) }; }).sort(function(x,y){ return y.min-x.min; });
   return { points:pts.length, total_min:Math.round(total), assigned_min:Math.round(assigned), hits:hits, tepees:list, all_confirmed:(tepees.length>0 && tepees.every(function(t){ return t.confirmed; })) };
 }
 // ===== WebWork (Victor screen/activity) + daily scorecard =====
@@ -2007,7 +2014,9 @@ module.exports=async(req,res)=>{
         }catch(e){ return res.status(500).json({error:"db error: "+String(e&&e.message||e)}); }
         return res.status(200).json({ok:true, count:clean.length, persisted:(verified===clean.length), verified_count:verified, tepees:clean}); }
       const tepees=await getTepees(); const isDefault=(tepees===TEPEES_DEFAULT);
-      return res.status(200).json({tepees, source:isDefault?"default":"custom", approximate:isDefault, note:isDefault?"Approximate — georeferenced from the satellite map; confirm/replace each tepee's exact coord.":"Custom coordinates saved by Gavin."});
+      const _dr=tepeeDisplayRadius(tepees);
+      const tepeesOut=tepees.map(function(t,i){ return Object.assign({}, t, {display_radius_m:_dr[i].display_radius_m, nn_m:_dr[i].nn_m}); });
+      return res.status(200).json({tepees:tepeesOut, source:isDefault?"default":"custom", approximate:isDefault, note:isDefault?"Approximate — georeferenced from the satellite map; confirm/replace each tepee's exact coord.":"Custom coordinates saved by Gavin."});
     }
     // Shared to-do list. Victor-facing like cleans/refunds (panel is the access boundary); tags who edited.
     if(action==="todo_get"){ return res.status(200).json(await getTodo()); }
@@ -3333,7 +3342,8 @@ if(action==="email_recipients"){
       try{ if(redis){ const ping="pong-"+Date.now(); await redis.set("parkside:diag_ping",ping); _diag.redisRoundTrip=((await redis.get("parkside:diag_ping"))===ping); } }catch(e){ _diag.redisErr=String(e.message||e); }
       // Safe tepee-persistence probe (no coordinates/secrets — just presence + count) so the saved-config
       // round-trip can be verified without the Gavin password. Confirms whether a Save actually persisted.
-      try{ if(redis){ let _tk=await redis.get("parkside:tepees"); if(typeof _tk==="string"){ try{ _tk=JSON.parse(_tk); }catch(e){} } _diag.tepeesKey=Array.isArray(_tk)?("present:"+_tk.length):(_tk?"present:nonarray":"absent"); _diag.tepeesConfirmed=Array.isArray(_tk)?_tk.filter(function(x){return x&&x.confirmed;}).length:0; } }catch(e){ _diag.tepeesErr=String(e.message||e); }
+      try{ if(redis){ let _tk=await redis.get("parkside:tepees"); if(typeof _tk==="string"){ try{ _tk=JSON.parse(_tk); }catch(e){} } _diag.tepeesKey=Array.isArray(_tk)?("present:"+_tk.length):(_tk?"present:nonarray":"absent"); _diag.tepeesConfirmed=Array.isArray(_tk)?_tk.filter(function(x){return x&&x.confirmed;}).length:0;
+        if(Array.isArray(_tk)&&_tk.length){ const _dr=tepeeDisplayRadius(_tk); _diag.tepeeLayout=_tk.map(function(t,i){ return {name:t.name, lat:Number(Number(t.lat).toFixed(6)), lon:Number(Number(t.lon).toFixed(6)), nn_m:_dr[i].nn_m, display_r:_dr[i].display_radius_m}; }); } } }catch(e){ _diag.tepeesErr=String(e.message||e); }
       try{ const raw=await getNotifyRaw(); _diag.notifyConfigKeys=Object.keys(raw); _diag.ownerrezLen=String(raw.ownerrez_oauth_token||"").length; _diag.resendKeyLen=String(raw.resendApiKey||"").length; }catch(e){ _diag.rawErr=String(e.message||e); }
       const cfg=await getNotifyConfig(); const raw=await getNotifyRaw(); const reqAll=await requireApprovalAll();
       const lastSend=(redis?await redis.get("parkside:last_send"):_memLastSend)||null;
