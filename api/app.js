@@ -1468,6 +1468,40 @@ function etMonth(iso){ return etDate(iso||new Date().toISOString()).slice(0,7); 
 async function getZones(){ try{ if(redis){ const z=await redis.get('parkside:zones'); if(Array.isArray(z)&&z.length) return z.map(x=>({name:String(x.name||'zone'),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)})).filter(x=>isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0); } }catch(e){} return ZONES_DEFAULT; }
 function haversineM(lat1,lon1,lat2,lon2){ const R=6371000, r=x=>x*Math.PI/180; const dLat=r(lat2-lat1), dLon=r(lon2-lon1); const a=Math.sin(dLat/2)**2 + Math.cos(r(lat1))*Math.cos(r(lat2))*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.min(1,Math.sqrt(a))); }
 function classifyPoint(lat,lon,zones){ let best=null; for(const z of zones){ const d=haversineM(lat,lon,z.lat,z.lon); if(d<=z.radius_m){ return {zone:z.name, dist_m:Math.round(d)}; } if(best===null||d<best.dist_m){ best={zone:'off', dist_m:Math.round(d), nearest:z.name}; } } return best||{zone:'off', dist_m:null}; }
+// ===== Per-tepee dwell (MANUAL REVIEW ONLY — NEVER fed into grading/scoring) =====
+// Each tepee is a street address on Big Sky Way (Parkside Resort, Pigeon Forge/Sevierville TN). The lat/lon
+// below are FIRST-PASS: georeferenced from the property satellite map (100 ft scale bar + a single anchor at
+// 204's engine coord, north-up). They are APPROXIMATE and marked confirmed:false — Gavin should confirm or
+// replace the exact coords (editable via ?action=tepees_config POST, or by tapping each tepee). Radii are
+// NON-OVERLAPPING: the closest two tepees are ~67 m apart, so a 20 m radius maps a fix to at most one tepee.
+// IMPORTANT: this per-tepee assignment is shown for Gavin's manual eyeballing ONLY. It is NEVER passed to
+// scoreDay()/gpsZoneSummary(); noisy GPS (occasional stray points) must never move a grade or score.
+const TEPEES_DEFAULT=[
+  { name:'Arrowhead',       addr:'223 Big Sky Way', lat:35.773969, lon:-83.574511, radius_m:20, confirmed:false },
+  { name:'Soaring Dreams',  addr:'217 Big Sky Way', lat:35.773306, lon:-83.574639, radius_m:20, confirmed:false },
+  { name:'Mustang Manor',   addr:'213 Big Sky Way', lat:35.772709, lon:-83.574823, radius_m:20, confirmed:false },
+  { name:'Flyin\' Horse',   addr:'209 Big Sky Way', lat:35.772076, lon:-83.574935, radius_m:20, confirmed:false },
+  { name:'Bear Claw',       addr:'205 Big Sky Way', lat:35.771419, lon:-83.575059, radius_m:20, confirmed:false },
+  { name:'Flyin\' Free',    addr:'220 Big Sky Way', lat:35.772880, lon:-83.572869, radius_m:20, confirmed:false },
+  { name:'Sunset Stampede', addr:'216 Big Sky Way', lat:35.772995, lon:-83.573597, radius_m:20, confirmed:false },
+  { name:'Buffalo Run',     addr:'212 Big Sky Way', lat:35.772426, lon:-83.573874, radius_m:20, confirmed:false },
+  { name:'Scarlet Antlers', addr:'208 Big Sky Way', lat:35.771772, lon:-83.573837, radius_m:20, confirmed:false },
+  { name:'Cub House',       addr:'204 Big Sky Way', lat:35.771146, lon:-83.573773, radius_m:20, confirmed:false }
+];
+async function getTepees(){ try{ if(redis){ const t=await redis.get('parkside:tepees'); if(Array.isArray(t)&&t.length) return t.map(function(x){ return {name:String(x.name||'tepee'),addr:String(x.addr||''),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)||20,confirmed:!!x.confirmed}; }).filter(function(x){ return isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0; }); } }catch(e){} return TEPEES_DEFAULT; }
+function nearestTepee(lat,lon,tepees){ let best=null; for(const t of tepees){ const d=haversineM(lat,lon,t.lat,t.lon); if(d<=t.radius_m && (best===null||d<best.dist_m)) best={name:t.name, addr:t.addr, dist_m:Math.round(d)}; } return best; }
+// Minutes spent inside each tepee for a day. SEPARATE from gpsZoneSummary; RESULT IS NEVER USED FOR SCORING.
+async function tepeeDwellSummary(device, date){
+  let pts=[]; try{ if(redis){ const raw=await redis.lrange("parkside:gpsday:"+device+":"+date,0,-1); pts=(raw||[]).map(function(x){ try{ return typeof x==="string"?JSON.parse(x):x; }catch(e){ return null; } }).filter(Boolean); } }catch(e){}
+  const tepees=await getTepees(); const byName={}; tepees.forEach(function(t){ byName[t.name]=0; });
+  let assigned=0, total=0, hits=0;
+  for(let i=0;i<pts.length-1;i++){ const a=pts[i], b=pts[i+1];
+    let gap=(new Date(b.t)-new Date(a.t))/60000; if(!isFinite(gap)||gap<0) gap=0; if(gap>10) gap=10; total+=gap;
+    if(!(isFinite(a.lat)&&isFinite(a.lon))) continue;
+    const nt=nearestTepee(a.lat,a.lon,tepees); if(nt){ byName[nt.name]=(byName[nt.name]||0)+gap; assigned+=gap; hits++; } }
+  const list=tepees.map(function(t){ return { name:t.name, addr:t.addr, lat:t.lat, lon:t.lon, radius_m:t.radius_m, confirmed:!!t.confirmed, min:Math.round(byName[t.name]||0) }; }).sort(function(x,y){ return y.min-x.min; });
+  return { points:pts.length, total_min:Math.round(total), assigned_min:Math.round(assigned), hits:hits, tepees:list, all_confirmed:(tepees.length>0 && tepees.every(function(t){ return t.confirmed; })) };
+}
 // ===== WebWork (Victor screen/activity) + daily scorecard =====
 const WW_BASE="https://api.webwork-tracker.com/api/v2";
 function wwWorkspace(){ return String(process.env.WEBWORK_WORKSPACE_ID||"506630"); }
@@ -1945,6 +1979,28 @@ module.exports=async(req,res)=>{
       const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const z=await gpsZoneSummary(device, date);
       return res.status(200).json({date, device, byZoneMin:(z&&z.byZoneMin)||{}, on_site_min:(z&&z.on_site_min)||0, total_min:(z&&z.total_min)||0, last:(z&&z.last)||null, last_zone:(z&&z.last_zone)||null});
+    }
+    // ===== Per-tepee dwell (Gavin-only) — WHICH tepee & HOW LONG, for MANUAL review only. =====
+    // NOT scoring data: tepeeDwellSummary() is never called by scoreDay(); it only powers the map circles
+    // and the manual-review card so Gavin can eyeball which unit Victor was in. GPS noise stays out of grades.
+    if(action==="tepee_dwell"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
+      const date=String((req.query&&req.query.date)||"").trim()||etDate(new Date().toISOString());
+      const out=await tepeeDwellSummary(device, date);
+      return res.status(200).json(Object.assign({device, date, manual_review_only:true, note:"Manual review only — GPS is noisy; this per-tepee data is NEVER used for grading/scoring."}, out));
+    }
+    // Editable per-tepee coordinate table (Gavin-only). GET returns the table; POST {tepees:[{name,addr,lat,lon,radius_m,confirmed}]} replaces it.
+    if(action==="tepees_config"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){ try{ b=JSON.parse(b); }catch(e){ b={}; } } b=b||{};
+        const arr=Array.isArray(b.tepees)?b.tepees:[];
+        const clean=arr.map(function(x){ return {name:String(x.name||'tepee').slice(0,40), addr:String(x.addr||'').slice(0,60), lat:Number(x.lat), lon:Number(x.lon), radius_m:Number(x.radius_m)||20, confirmed:!!x.confirmed}; }).filter(function(x){ return isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0; });
+        if(!clean.length) return res.status(400).json({error:"no valid tepees in payload"});
+        try{ if(redis) await redis.set("parkside:tepees", clean); }catch(e){ return res.status(500).json({error:"db error"}); }
+        return res.status(200).json({ok:true, count:clean.length, tepees:clean}); }
+      const tepees=await getTepees(); const isDefault=(tepees===TEPEES_DEFAULT);
+      return res.status(200).json({tepees, source:isDefault?"default":"custom", approximate:isDefault, note:isDefault?"Approximate — georeferenced from the satellite map; confirm/replace each tepee's exact coord.":"Custom coordinates saved by Gavin."});
     }
     // Shared to-do list. Victor-facing like cleans/refunds (panel is the access boundary); tags who edited.
     if(action==="todo_get"){ return res.status(200).json(await getTodo()); }
