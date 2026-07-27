@@ -1477,16 +1477,16 @@ function classifyPoint(lat,lon,zones){ let best=null; for(const z of zones){ con
 // IMPORTANT: this per-tepee assignment is shown for Gavin's manual eyeballing ONLY. It is NEVER passed to
 // scoreDay()/gpsZoneSummary(); noisy GPS (occasional stray points) must never move a grade or score.
 const TEPEES_DEFAULT=[
-  { name:'Arrowhead',       addr:'223 Big Sky Way', lat:35.773969, lon:-83.574511, radius_m:20, confirmed:false },
-  { name:'Soaring Dreams',  addr:'217 Big Sky Way', lat:35.773306, lon:-83.574639, radius_m:20, confirmed:false },
-  { name:'Mustang Manor',   addr:'213 Big Sky Way', lat:35.772709, lon:-83.574823, radius_m:20, confirmed:false },
-  { name:'Flyin\' Horse',   addr:'209 Big Sky Way', lat:35.772076, lon:-83.574935, radius_m:20, confirmed:false },
-  { name:'Bear Claw',       addr:'205 Big Sky Way', lat:35.771419, lon:-83.575059, radius_m:20, confirmed:false },
-  { name:'Flyin\' Free',    addr:'220 Big Sky Way', lat:35.772880, lon:-83.572869, radius_m:20, confirmed:false },
-  { name:'Sunset Stampede', addr:'216 Big Sky Way', lat:35.772995, lon:-83.573597, radius_m:20, confirmed:false },
-  { name:'Buffalo Run',     addr:'212 Big Sky Way', lat:35.772426, lon:-83.573874, radius_m:20, confirmed:false },
-  { name:'Scarlet Antlers', addr:'208 Big Sky Way', lat:35.771772, lon:-83.573837, radius_m:20, confirmed:false },
-  { name:'Cub House',       addr:'204 Big Sky Way', lat:35.771146, lon:-83.573773, radius_m:20, confirmed:false }
+  { name:'Arrowhead',       addr:'223 Big Sky Way', lat:35.772644, lon:-83.574093, radius_m:20, confirmed:false },
+  { name:'Soaring Dreams',  addr:'217 Big Sky Way', lat:35.771981, lon:-83.574220, radius_m:20, confirmed:false },
+  { name:'Mustang Manor',   addr:'213 Big Sky Way', lat:35.771385, lon:-83.574404, radius_m:20, confirmed:false },
+  { name:'Flyin\' Horse',   addr:'209 Big Sky Way', lat:35.770752, lon:-83.574516, radius_m:20, confirmed:false },
+  { name:'Bear Claw',       addr:'205 Big Sky Way', lat:35.770095, lon:-83.574640, radius_m:20, confirmed:false },
+  { name:'Flyin\' Free',    addr:'220 Big Sky Way', lat:35.771555, lon:-83.572450, radius_m:20, confirmed:false },
+  { name:'Sunset Stampede', addr:'216 Big Sky Way', lat:35.771671, lon:-83.573178, radius_m:20, confirmed:false },
+  { name:'Buffalo Run',     addr:'212 Big Sky Way', lat:35.771102, lon:-83.573455, radius_m:20, confirmed:false },
+  { name:'Scarlet Antlers', addr:'208 Big Sky Way', lat:35.770448, lon:-83.573418, radius_m:20, confirmed:false },
+  { name:'Cub House',       addr:'204 Big Sky Way', lat:35.769821, lon:-83.573354, radius_m:20, confirmed:false }
 ];
 async function getTepees(){ try{ if(redis){ const t=await redis.get('parkside:tepees'); if(Array.isArray(t)&&t.length) return t.map(function(x){ return {name:String(x.name||'tepee'),addr:String(x.addr||''),lat:Number(x.lat),lon:Number(x.lon),radius_m:Number(x.radius_m)||20,confirmed:!!x.confirmed}; }).filter(function(x){ return isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0; }); } }catch(e){} return TEPEES_DEFAULT; }
 function nearestTepee(lat,lon,tepees){ let best=null; for(const t of tepees){ const d=haversineM(lat,lon,t.lat,t.lon); if(d<=t.radius_m && (best===null||d<best.dist_m)) best={name:t.name, addr:t.addr, dist_m:Math.round(d)}; } return best; }
@@ -1994,6 +1994,7 @@ module.exports=async(req,res)=>{
     if(action==="tepees_config"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){ try{ b=JSON.parse(b); }catch(e){ b={}; } } b=b||{};
+        if(b.reset===true){ try{ if(redis) await redis.del("parkside:tepees"); }catch(e){} return res.status(200).json({ok:true, reset:true, tepees:TEPEES_DEFAULT, source:"default"}); }
         const arr=Array.isArray(b.tepees)?b.tepees:[];
         const clean=arr.map(function(x){ return {name:String(x.name||'tepee').slice(0,40), addr:String(x.addr||'').slice(0,60), lat:Number(x.lat), lon:Number(x.lon), radius_m:Number(x.radius_m)||20, confirmed:!!x.confirmed}; }).filter(function(x){ return isFinite(x.lat)&&isFinite(x.lon)&&x.radius_m>0; });
         if(!clean.length) return res.status(400).json({error:"no valid tepees in payload"});
