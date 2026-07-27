@@ -1496,9 +1496,15 @@ async function wwScreenActivity(date){
   const lvl=function(e){ const v=Number(e.activity_level!=null?e.activity_level:(e.activity!=null?e.activity:NaN)); return isFinite(v)?v:null; };
   const mins=function(e){ const m=Number(e.duration_minutes!=null?e.duration_minutes:(e.total_minutes!=null?e.total_minutes:(e.minutes!=null?e.minutes:NaN))); if(isFinite(m)) return m; const a=e.start||e.start_time, b=e.end||e.end_time; if(a&&b){ const g=(new Date(b)-new Date(a))/60000; return (isFinite(g)&&g>0)?g:0; } return 0; };
   let totMin=0, lvlSum=0, lvlN=0; const desc={}, methods={};
-  for(const e of entries){ const mm=mins(e); totMin+=mm; const L=lvl(e); if(L!=null){ lvlSum+=L; lvlN++; } const label=memo(e); if(label) desc[label]=(desc[label]||0)+mm; /* description only, not project/task which go stale e.g. minibar */ const meth=String(e.tracking_method||e.method||"").trim(); if(meth) methods[meth]=(methods[meth]||0)+1; }
+  // item MW-2: track the most recent activity segment so the My Work "WebWork working" light can
+  // go green only on RECENT activity (mirrors the location-working live logic). last_ts = latest
+  // segment end (any tracked segment); last_active_ts = latest segment that had nonzero activity.
+  let lastTs=null, lastActiveTs=null;
+  const segEnd=function(e){ const b=e.end||e.end_time||null; if(b) return b; const a=e.start||e.start_time||null; if(a){ const m=mins(e); return m?new Date(new Date(a).getTime()+m*60000).toISOString():a; } return null; };
+  for(const e of entries){ const mm=mins(e); totMin+=mm; const L=lvl(e); if(L!=null){ lvlSum+=L; lvlN++; } const label=memo(e); if(label) desc[label]=(desc[label]||0)+mm; /* description only, not project/task which go stale e.g. minibar */ const meth=String(e.tracking_method||e.method||"").trim(); if(meth) methods[meth]=(methods[meth]||0)+1;
+    const eend=segEnd(e); if(eend){ if(!lastTs || new Date(eend)>new Date(lastTs)) lastTs=eend; if(L!=null && L>0){ if(!lastActiveTs || new Date(eend)>new Date(lastActiveTs)) lastActiveTs=eend; } } }
   const top=Object.keys(desc).sort(function(a,b){return desc[b]-desc[a];}).slice(0,8).map(function(k){ return {label:k.slice(0,80), min:Math.round(desc[k])}; });
-  return { available:true, entries:entries.length, active_min:Math.round(totMin), avg_activity_pct:(lvlN?Math.round(lvlSum/lvlN):null), top_activities:top, methods:Object.keys(methods) };
+  return { available:true, entries:entries.length, active_min:Math.round(totMin), avg_activity_pct:(lvlN?Math.round(lvlSum/lvlN):null), top_activities:top, methods:Object.keys(methods), last_ts:lastTs, last_active_ts:lastActiveTs };
 }
 async function wwAppsWebsites(date){
   // The apps & websites (URLs) Victor actually used + minutes + activity level. PRIMARY "is he active / what was he on"
@@ -1530,7 +1536,7 @@ async function gpsZoneSummary(device, date){
     let gap=(new Date(b.t)-new Date(a.t))/60000; if(!isFinite(gap)||gap<0) gap=0; if(gap>10) gap=10;
     const z=(a.zone && (a.zone in byZone))?a.zone:"off"; byZone[z]+=gap; total+=gap; }
   const round=function(o){ const r={}; for(const k in o) r[k]=Math.round(o[k]); return r; };
-  return { points:pts.length, total_min:Math.round(total), on_site_min:Math.round(total-byZone.off), byZoneMin:round(byZone), first:pts.length?pts[0].t:null, last:pts.length?pts[pts.length-1].t:null };
+  return { points:pts.length, total_min:Math.round(total), on_site_min:Math.round(total-byZone.off), byZoneMin:round(byZone), first:pts.length?pts[0].t:null, last:pts.length?pts[pts.length-1].t:null, last_zone:pts.length?(pts[pts.length-1].zone||"off"):null };
 }
 // Claude ranks Victor's self-report against the objective data. Returns + stores {truth_score, ...}.
 async function scoreDay(date, device){
@@ -1929,7 +1935,7 @@ module.exports=async(req,res)=>{
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
       const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const z=await gpsZoneSummary(device, date);
-      return res.status(200).json({date, device, byZoneMin:(z&&z.byZoneMin)||{}, on_site_min:(z&&z.on_site_min)||0, total_min:(z&&z.total_min)||0, last:(z&&z.last)||null});
+      return res.status(200).json({date, device, byZoneMin:(z&&z.byZoneMin)||{}, on_site_min:(z&&z.on_site_min)||0, total_min:(z&&z.total_min)||0, last:(z&&z.last)||null, last_zone:(z&&z.last_zone)||null});
     }
     // Shared to-do list. Victor-facing like cleans/refunds (panel is the access boundary); tags who edited.
     if(action==="todo_get"){ return res.status(200).json(await getTodo()); }
@@ -2147,7 +2153,9 @@ if(action==="email_recipients"){
           const ownerG=!!(grade&&grade.grade!=null);
           const g = ownerG ? Number(grade.grade) : (score&&score.productivity_score!=null?Number(score.productivity_score):null);
           const expl = (grade&&grade.note)?String(grade.note):(score&&score.summary?String(score.summary):"");
-          if(g!=null){ days.push({date:d, grade:Math.round(g), source:ownerG?"owner":"ai", explanation:expl}); sum+=g; cnt++; }
+          // item MW-5: the model isn't trained/published yet — do NOT expose per-day AI reasoning to
+          // Victor. Only Gavin's view receives the explanation text; Victor gets the bare score.
+          if(g!=null){ const drec={date:d, grade:Math.round(g), source:ownerG?"owner":"ai"}; if(isGavin) drec.explanation=expl; days.push(drec); sum+=g; cnt++; }
         }
         d=etDateAddDays(d,1);
       }

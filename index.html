@@ -87,9 +87,13 @@
   #bonusMain{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;grid-auto-flow:dense}
   #bonusMain>.card{margin-bottom:0}
   #bonusMain>#todoCard{grid-column:1 / -1}
-  #bonusMain>#weeklyCard{grid-column:1}
-  #bonusMain>#timeoffCard{grid-column:2}
-  #bonusMain>.card:not(#todoCard):not(#weeklyCard):not(#timeoffCard){grid-column:1 / -1}
+  #bonusMain>.card:not(#todoCard){grid-column:1 / -1}
+  /* item MW-6: compact AI-score calendar (small widget, info sits to its right) */
+  #aiCalWrap .cal{gap:4px} #aiCalWrap .scday{font-size:10px} #aiCalWrap .dow{font-size:9px;padding:2px 0}
+  #aiCalWrap .scday .dot{width:5px;height:5px}
+  /* item MW-4: off-days (Sun/Mon/Tues) render as N/A, never as a failing grade */
+  .scday.off{background:#0a1019;border-color:#141d29;color:#465468;cursor:default;opacity:.85}
+  .scday.off:hover{border-color:#141d29}
   #bonusMain>#bwStatusPair{grid-column:1 / -1;order:-1}
   @media(max-width:860px){ #bonusMain{grid-template-columns:1fr} #bonusMain>.card{grid-column:1 / -1 !important} }
 
@@ -143,8 +147,8 @@
 <header style="display:none" id="app">
   <h1>🏕️ Victor&rsquo;s</h1>
   <div id="viewTabs" style="display:inline-flex;gap:6px;margin-left:4px">
-    <button id="tabBonus" class="seg" onclick="switchView('bonus')">My Work</button>
-    <button id="tabPricing" class="seg on" onclick="switchView('pricing')">Pricing</button>
+    <button id="tabBonus" class="seg on" onclick="switchView('bonus')">My Work</button>
+    <button id="tabPricing" class="seg" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
   </div>
   <span class="muted" id="horizon"></span>
@@ -650,8 +654,8 @@
   <div id="bwStatusPair" style="grid-column:1 / -1;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px">
     <div style="background:#101a29;border:1px solid #1f4634;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px">
       <div style="display:flex;align-items:center;gap:10px">
-        <span style="width:9px;height:9px;border-radius:50%;background:#34d399;display:block"></span>
-        <div style="font-size:13px;font-weight:600">Location working</div>
+        <span id="mwDot" style="width:9px;height:9px;border-radius:50%;background:#3a4658;display:block"></span>
+        <div id="mwLabel" style="font-size:13px;font-weight:600">Location</div>
         <span style="flex:1"></span>
         <span id="mwOnsite" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#7f8fa6">GPS tracking</span>
       </div>
@@ -660,8 +664,8 @@
     </div>
     <div style="background:#101a29;border:1px solid #1f4634;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px">
       <div style="display:flex;align-items:center;gap:10px">
-        <span style="width:9px;height:9px;border-radius:50%;background:#34d399;display:block"></span>
-        <div style="font-size:13px;font-weight:600">WebWork working</div>
+        <span id="wwDot" style="width:9px;height:9px;border-radius:50%;background:#3a4658;display:block"></span>
+        <div id="wwLabel" style="font-size:13px;font-weight:600">WebWork</div>
         <span style="flex:1"></span>
         <span id="wwActPct" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#7f8fa6">— active</span>
       </div>
@@ -683,36 +687,35 @@
     <div id="bonusBody" class="legend"></div>
   </div>
 
-  <!-- item MW6: AI-score is now a clickable month calendar — tap a day to see its short explanation. -->
+  <!-- item MW-6: AI-score is a SMALL calendar widget; its info/detail sits to the RIGHT of it.
+       item MW-5: Victor sees only the score number — the model's reasoning is not published yet. -->
   <div class="card" id="aiScoreCard">
-    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px">
-      <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">AI score</div>
-      <span style="flex:1"></span>
-      <span id="aiScoreAvg" style="font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:600;color:#7f8fa6">&mdash;</span>
+    <div style="display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start">
+      <!-- LEFT: the compact calendar widget -->
+      <div id="aiCalWrap" style="flex:0 0 auto;width:246px;max-width:100%">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:8px">AI score</div>
+        <div style="display:flex;align-items:center;gap:8px;margin:0 0 8px">
+          <span onclick="aiCalStep(-1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:15px">&lsaquo;</span>
+          <span id="aiCalLabel" style="font-size:12.5px;font-weight:600">&hellip;</span>
+          <span onclick="aiCalStep(1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:15px">&rsaquo;</span>
+        </div>
+        <div class="cal" id="aiCalDow" style="margin-bottom:5px"></div>
+        <div class="cal" id="aiCalGrid"></div>
+      </div>
+      <!-- RIGHT: the info / detail beside the widget -->
+      <div style="flex:1;min-width:210px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:6px">This month</div>
+        <div style="display:flex;align-items:baseline;gap:8px">
+          <span id="aiScoreAvg" style="font-family:'IBM Plex Mono',monospace;font-size:36px;font-weight:600;color:#7f8fa6;line-height:1">&mdash;</span>
+          <span style="font-size:12px;color:#64758d">/100 avg</span>
+        </div>
+        <div id="aiScoreCount" style="font-size:11.5px;color:#64758d;margin-top:4px">&mdash;</div>
+        <div id="aiScoreBody" class="legend" style="font-size:12.5px;color:#b9c6d8;margin-top:14px"><span class="muted">tap a day for its score</span></div>
+      </div>
     </div>
-    <div style="display:flex;align-items:center;gap:8px;margin:4px 0 10px">
-      <span onclick="aiCalStep(-1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:15px">&lsaquo;</span>
-      <span id="aiCalLabel" style="font-size:12.5px;font-weight:600">&hellip;</span>
-      <span onclick="aiCalStep(1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:15px">&rsaquo;</span>
-      <span style="flex:1"></span>
-      <span style="font-size:11px;color:#64758d">tap a day for its explanation</span>
-    </div>
-    <div class="cal" id="aiCalDow" style="margin-bottom:6px"></div>
-    <div class="cal" id="aiCalGrid"></div>
-    <div id="aiScoreBody" class="legend" style="font-size:12.5px;color:#b9c6d8;margin-top:12px"><span class="muted">Loading…</span></div>
   </div>
 
-  <div class="card" id="weeklyCard">
-    <h2>📊 Weekly report <span class="muted" style="font-weight:400;text-transform:none">— your daily grades, what went well and what to work on</span></h2>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
-      <button class="ghost" onclick="weekNav(1)">← Prev week</button>
-      <span id="weeklyRange" class="muted" style="font-weight:600">—</span>
-      <button class="ghost" onclick="weekNav(-1)">Next week →</button>
-    </div>
-    <div id="weeklyNarrative" class="legend" style="margin-bottom:10px"></div>
-    <div id="weeklyDays"></div>
-    <div class="muted" style="font-size:12px;margin-top:8px">A full month summary is emailed to you and Gavin at the start of each month.</div>
-  </div>
+  <!-- item MW-7: the weekly report has been removed from Victor's My Work view. -->
 
   <div class="card" id="timeoffCard">
     <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">
@@ -745,7 +748,7 @@
           <button onclick="addClean('monday')">+ Log</button>
           <button class="ghost" onclick="undoClean('monday')">Undo</button>
         </div>
-        <div id="cleansMondayLog" class="legend"></div>
+        <div id="cleansMondayLog" class="legend" style="max-height:150px;overflow-y:auto"></div>
       </div>
       <div style="flex:1;min-width:230px">
         <div style="font-weight:700">All other cleans Parkside did</div>
@@ -755,7 +758,7 @@
           <button onclick="addClean('other')">+ Log</button>
           <button class="ghost" onclick="undoClean('other')">Undo</button>
         </div>
-        <div id="cleansOtherLog" class="legend"></div>
+        <div id="cleansOtherLog" class="legend" style="max-height:150px;overflow-y:auto"></div>
       </div>
     </div>
     <div class="legend" id="cleansMonth" style="margin-top:10px">—</div>
@@ -791,8 +794,10 @@ function unlock(){
     document.getElementById('gate').style.display='none';
     document.getElementById('inquiry').style.display='none';
     document.getElementById('app').style.display='flex';
-    document.getElementById('main').style.display='block';
     boot();
+    // item MW-3: Victor lands on the MY WORK view by default (not Pricing). switchView handles
+    // showing #bonusMain / hiding #main and kicks off loadBonus().
+    switchView('bonus');
   }).catch(e=>document.getElementById('gateErr').textContent="Error: "+e.message);
 }
 document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')unlock();});
@@ -1824,11 +1829,22 @@ async function moveCall(key){
 // ===== Bonus tab (visible to Victor later; no Gavin login) =====
 function bEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 let WEEK_OFF=0;
-async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadWeekly(); loadTimeoff(); loadBonusVictor(); loadWebworkVictor(); loadAiScoreVictor(); loadLocationVictor(); }
+async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadTimeoff(); loadBonusVictor(); loadWebworkVictor(); loadAiScoreVictor(); loadLocationVictor(); } // item MW-7: weekly report removed
 // item MW3: Victor's WebWork card — real activity level + last 3 sites (uses ww_activity, now Victor-authorized)
+// item MW-2: WebWork "working" light is driven the same way as the location light — green + "active"
+// only when there was activity RECENTLY. WebWork uploads in ~10-min tracking intervals, so a strict
+// 5-min window would read false-negative; we use a 15-min recency window (adjust WW_ACTIVE_WINDOW_MIN
+// if WebWork's sync cadence differs). last_active_ts = most recent segment with nonzero activity.
+var WW_ACTIVE_WINDOW_MIN=15;
 async function loadWebworkVictor(){ var el=document.getElementById('wwAppsList'); if(!el) return; var h={}; if(PW) h['x-app-password']=PW;
   try{ var r=await fetch(api('ww_activity')+'&cb='+Date.now(),{headers:h}); var j=await r.json(); var a=j.apps||{};
     var pct=document.getElementById('wwActPct'); if(pct) pct.textContent=(a.avg_activity_pct!=null?(a.avg_activity_pct+'% active'):'— active');
+    (function(){ var dot=document.getElementById('wwDot'), lab=document.getElementById('wwLabel');
+      var lat=j.last_active_ts||j.last_ts||null;
+      var mins=lat?((Date.now()-new Date(lat).getTime())/60000):Infinity;
+      var active=(lat!=null && isFinite(mins) && mins>=0 && mins<=WW_ACTIVE_WINDOW_MIN);
+      if(dot) dot.style.background=active?'#34d399':'#3a4658';
+      if(lab) lab.textContent=active?'WebWork · active':(lat?('WebWork · last active '+Math.round(mins)+'m ago'):'WebWork'); })();
     var top=(a.top||[]).slice(0,3);
     el.innerHTML = top.length ? top.map(function(x){return '<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid #16202f;font-size:12.5px"><span style="color:#cfd9e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(x.label)+'</span><span style="flex:1"></span><span style="font-family:\'IBM Plex Mono\',monospace;color:#7f8fa6">'+esc(x.min)+'m</span></div>';}).join('') : '<span class="muted" style="font-size:12px">No activity yet today.</span>';
   }catch(e){}
@@ -1840,6 +1856,14 @@ async function loadLocationVictor(){ var el=document.getElementById('mwZones'); 
   try{ var j=await (await fetch(api('my_location')+'&cb='+Date.now(),{headers:hh})).json();
     var by=(j&&j.byZoneMin)||{}; var order=['office','tepees','maintenance','resort','off'];
     var os=document.getElementById('mwOnsite'); if(os) os.textContent=(j&&j.on_site_min!=null)?(j.on_site_min+'m on-site today'):'GPS tracking';
+    // item MW-1: live presence — green + "working" only when the most recent GPS fix is ON-LOCATION
+    // (any zone but off-site) AND within the last 5 minutes. Otherwise neutral (last-seen time).
+    (function(){ var dot=document.getElementById('mwDot'), lab=document.getElementById('mwLabel');
+      var last=(j&&j.last)||null, lz=(j&&j.last_zone)||null;
+      var mins=last?((Date.now()-new Date(last).getTime())/60000):Infinity;
+      var working=(last!=null && lz && lz!=='off' && isFinite(mins) && mins>=0 && mins<=5);
+      if(dot) dot.style.background=working?'#34d399':'#3a4658';
+      if(lab) lab.textContent=working?'Location · working':(last?('Location · last seen '+Math.round(mins)+'m ago'):'Location'); })();
     var any=order.some(function(z){ return by[z]!=null && by[z]>0; });
     if(!any){ el.innerHTML='<span class="muted" style="font-size:12px">No GPS time logged yet today.</span>'; return; }
     var cells='';
@@ -1852,10 +1876,18 @@ async function loadLocationVictor(){ var el=document.getElementById('mwZones'); 
 // item MW6: AI-score month calendar — click a day for its short explanation (owner note or auto-grade summary).
 var AICAL={y:new Date().getFullYear(), m:new Date().getMonth(), map:{}, avg:null, count:0, sel:null};
 function aiCalMonthStr(){ return AICAL.y+'-'+String(AICAL.m+1).padStart(2,'0'); }
+// item MW-4: Victor's off-days (Sun=0, Mon=1, Tues=2). This view VERIFIES HOURS, so off-days are
+// never treated as collected/graded data — they show N/A and are excluded from the average.
+var MW_OFF_DAYS=[0,1,2];
+function mwIsOffDate(ds){ try{ return MW_OFF_DAYS.indexOf(new Date(ds+'T12:00:00').getDay())!==-1; }catch(e){ return false; } }
 async function loadAiScoreVictor(){ var av=document.getElementById('aiScoreAvg'); var hh={}; if(PW) hh['x-app-password']=PW;
   try{ var j=await (await fetch(api('score_calendar')+'&month='+aiCalMonthStr()+'&cb='+Date.now(),{headers:hh})).json();
-    AICAL.map={}; ((j&&j.days)||[]).forEach(function(d){ AICAL.map[d.date]=d; }); AICAL.avg=(j&&j.average); AICAL.count=(j&&j.count)||0; AICAL.sel=null;
+    AICAL.map={}; ((j&&j.days)||[]).forEach(function(d){ AICAL.map[d.date]=d; }); AICAL.sel=null;
+    // recompute avg + count over WORK-days only (exclude off-days), so off-days can't drag the score.
+    var sum=0, cnt=0; for(var k in AICAL.map){ if(mwIsOffDate(k)) continue; var g=AICAL.map[k].grade; if(g!=null){ sum+=Number(g); cnt++; } }
+    AICAL.avg=cnt?Math.round(sum/cnt):null; AICAL.count=cnt;
     var c=(AICAL.avg==null)?'#7f8fa6':(AICAL.avg>=75?'#34d399':AICAL.avg>=45?'#fbbf24':'#f87171'); if(av){ av.textContent=(AICAL.avg==null?'—':AICAL.avg); av.style.color=c; }
+    var ct=document.getElementById('aiScoreCount'); if(ct) ct.textContent=(cnt?(cnt+' graded work-day'+(cnt===1?'':'s')+' this month'):'no graded work-days yet');
     renderAiCal();
   }catch(e){}
 }
@@ -1865,19 +1897,26 @@ function renderAiCal(){ var lbl=document.getElementById('aiCalLabel'); var dow=d
   if(dow) dow.innerHTML=['S','M','T','W','T','F','S'].map(function(x){return '<div class="dow">'+x+'</div>';}).join('');
   if(grid){ var first=new Date(AICAL.y,AICAL.m,1).getDay(); var dim=new Date(AICAL.y,AICAL.m+1,0).getDate(); var cells='';
     for(var i=0;i<first;i++) cells+='<div class="scday empty"></div>';
-    for(var day=1;day<=dim;day++){ var ds=aiCalMonthStr()+'-'+String(day).padStart(2,'0'); var rec=AICAL.map[ds]; var has=!!rec;
+    for(var day=1;day<=dim;day++){ var ds=aiCalMonthStr()+'-'+String(day).padStart(2,'0');
+      // item MW-4: off-days (Sun/Mon/Tues) are shown as N/A — never a red failing grade — and are
+      // not clickable/graded, because Victor isn't expected to work those days.
+      if(mwIsOffDate(ds)){ cells+='<div class="scday off" title="Off day — not tracked or graded"><div>'+day+'</div><div style="font-size:7.5px;letter-spacing:.04em">N/A</div></div>'; continue; }
+      var rec=AICAL.map[ds]; var has=!!rec;
       var col=has?(rec.grade>=75?'#34d399':rec.grade>=45?'#fbbf24':'#f87171'):'#2c3a51';
       cells+='<div class="scday'+(has?' has':'')+(AICAL.sel===ds?' sel':'')+'" '+(has?('onclick="aiCalPick(\''+ds+'\')"'):'')+'><div>'+day+'</div>'+(has?('<div class="dot" style="background:'+col+'"></div>'):'')+'</div>';
     }
     grid.innerHTML=cells;
   }
-  if(body && !AICAL.sel){ body.innerHTML=(AICAL.count===0)?'<span class="muted">No graded days this month yet.</span>':('<span class="muted">'+AICAL.count+' graded day'+(AICAL.count===1?'':'s')+' · tap a day above for its explanation.</span>'); }
+  // item MW-5: no reasoning surfaced to Victor — only prompt to tap for the score number.
+  if(body && !AICAL.sel){ body.innerHTML=(AICAL.count===0)?'<span class="muted">No graded work-days this month yet.</span>':('<span class="muted">Tap a day for its score. Sun/Mon/Tues are off-days (N/A).</span>'); }
 }
-function aiCalPick(ds){ AICAL.sel=ds; renderAiCal(); var rec=AICAL.map[ds]; var body=document.getElementById('aiScoreBody'); if(!body) return;
+function aiCalPick(ds){ if(mwIsOffDate(ds)) return; AICAL.sel=ds; renderAiCal(); var rec=AICAL.map[ds]; var body=document.getElementById('aiScoreBody'); if(!body) return;
   if(!rec){ body.innerHTML='<span class="muted">No grade for this day.</span>'; return; }
   var col=rec.grade>=75?'#34d399':rec.grade>=45?'#fbbf24':'#f87171';
   var wd=''; try{ wd=new Date(ds+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}); }catch(e){ wd=ds; }
-  body.innerHTML='<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><b style="color:'+col+';font-size:18px">'+rec.grade+'</b><span class="muted" style="font-size:12px">/100 · '+esc(wd)+(rec.source==='owner'?' · graded by Gavin':' · auto-grade')+'</span></div>'+(rec.explanation?('<div style="line-height:1.6">'+esc(rec.explanation)+'</div>'):'<span class="muted">No explanation recorded for this day.</span>');
+  // item MW-5: show Victor the SCORE only. The model isn't trained/published yet, so its per-day
+  // reasoning is intentionally NOT shown here (Gavin's view keeps the explanation).
+  body.innerHTML='<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><b style="color:'+col+';font-size:22px">'+rec.grade+'</b><span class="muted" style="font-size:12px">/100 · '+esc(wd)+'</span></div><span class="muted" style="font-size:12px">Detailed feedback isn’t published yet — only your score is shown for now.</span>';
 }
 
 // ===== Bonus / incentive comp (owner entry + Victor summary) =====
