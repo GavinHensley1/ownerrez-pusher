@@ -786,6 +786,25 @@ async function isTimeOffDay(dateStr){
   } }catch(e){}
   return false;
 }
+// item MW-12: sum a date's RECORDED time off (full-day and/or partial hours) from parkside:timeoff.
+async function timeOffForDate(dateStr){
+  const out={fullDay:false, hours:0};
+  try{ if(redis){ const raw=await redis.lrange("parkside:timeoff",0,-1);
+    const items=(raw||[]).map(function(x){ try{ return typeof x==="string"?JSON.parse(x):x; }catch(e){ return null; } }).filter(Boolean);
+    items.forEach(function(t){ if(!t||t.date!==dateStr) return; if(t.kind==="hours"){ const h=Number(t.hours); if(isFinite(h)&&h>0) out.hours+=h; } else { out.fullDay=true; } });
+  } }catch(e){}
+  if(out.hours>24) out.hours=24;
+  return out;
+}
+// item MW-12: active %% measured ONLY over on-duty time. Recorded off-minutes are removed from the
+// (idle) side of the denominator, so inactivity during recorded time off can never drag the ratio
+// down. Pure + deterministic so it can be unit-tested. active stays; only the idle window shrinks.
+function onDutyActivePct(activeMin, inactiveMin, offMin){
+  const a=Math.max(0, Number(activeMin)||0), inact=Math.max(0, Number(inactiveMin)||0), off=Math.max(0, Number(offMin)||0);
+  const adjInactive=Math.max(0, inact - off);
+  const adjTracked=a + adjInactive;
+  return { adjInactive:adjInactive, adjTracked:adjTracked, pct: adjTracked>0 ? Math.round(100*a/adjTracked) : (a>0?100:0) };
+}
 async function isWorkingDay(dateStr){
   const wd=etWeekday(dateStr+"T12:00:00Z");
   if(!(wd>=3 && wd<=6)) return false;             // Sun/Mon/Tue = off
@@ -1597,9 +1616,20 @@ async function scoreDay(date, device){
   let report=""; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; } }catch(e){}
   if(!report || !String(report).trim()) return {error:"no self-report on file for "+date+" (nothing to score against)"};
   let turn=null; try{ const tv=await getTurnovers(date,1,true); turn=tv[date]; }catch(e){}
+  // item MW-12: RECORDED time off must NEVER lower Victor's grade. Full day = do not grade at all;
+  // partial hours = carve the recorded off-minutes out of the on-duty window so inactivity during
+  // his recorded time off is not counted against him. (Normal working-time scoring is unchanged.)
+  let timeOff={fullDay:false,hours:0}; try{ timeOff=await timeOffForDate(date); }catch(e){}
+  if(timeOff && timeOff.fullDay){ try{ if(redis) await redis.del("parkside:score:"+date); }catch(e){} return {date, skipped:"full day off (recorded in his time-off tab) \u2014 not graded", timeoff:timeOff}; }
+  const offMin=(timeOff&&timeOff.hours>0)?Math.round(timeOff.hours*60):0;
+  const _od=onDutyActivePct(hours.active_min, hours.inactive_min, offMin);
+  const hoursDesc = !hours.available ? "no WebWork data"
+    : (offMin>0
+        ? (hours.hours+"h tracked with "+timeOff.hours+"h RECORDED OFF \u2192 judge over ~"+Number((_od.adjTracked/60).toFixed(2))+"h on-duty; "+_od.pct+"% active over on-duty time ("+hours.active_min+" active min of "+_od.adjTracked+" on-duty min, after removing "+offMin+" recorded-off min)")
+        : (hours.hours+"h tracked, "+hours.active_pct+"% active ("+hours.active_min+" active min of "+hours.tracked_min+")"));
   const dataBlock=
     "OBJECTIVE DATA for "+date+" (America/New_York):\n"+
-    "- WebWork hours: "+(hours.available?(hours.hours+"h tracked, "+hours.active_pct+"% active ("+hours.active_min+" active min of "+hours.tracked_min+")"):"no WebWork data")+"\n"+
+    "- WebWork hours: "+hoursDesc+"\n"+
     "- WebWork screen activity: "+(screen.available?(screen.entries+" segment(s), "+screen.active_min+" active min"+(screen.avg_activity_pct!=null?(", "+screen.avg_activity_pct+"% avg activity"):"")+(screen.top_activities&&screen.top_activities.length?("; top: "+screen.top_activities.map(function(a){return a.label+" ("+a.min+"m)";}).join(", ")):"")):"no WebWork screen-activity data")+"\n"+
     "- WebWork apps & websites (what he was ON — URLs/apps + activity): "+(apps.available?(apps.top.map(function(a){return a.label+" ("+a.min+"m)";}).join(", ")+(apps.avg_activity_pct!=null?("; "+apps.avg_activity_pct+"% activity"):"")):"no apps/website data")+"\n"+
     "- GPS on-site time: "+zones.on_site_min+" min on resort grounds of "+zones.total_min+" min tracked\n"+
@@ -1611,7 +1641,7 @@ async function scoreDay(date, device){
     "Judge how well his claims match the data. Be fair: absence of GPS/WebWork data for a task does not always mean he lied (e.g., outdoor work with phone in pocket still shows GPS on-site; computer tasks show WebWork activity). "+
     "Do NOT nitpick that every minute was active \u2014 short breaks, phone calls, and idle gaps are normal and fine. Judge productivity at an hour-to-two-hour granularity: was the time GENERALLY productive and not wasted (the real concern is an employee on his phone all day, not one who took a call). "+
     "Cross-check any CLEANING claims against the bookings/cleaning ground-truth: a unit needs a full turnover clean when a guest checked OUT that day. If he claims he cleaned MORE units than there were checkouts, flag the excess as unverified in discrepancies; markedly fewer cleanings than checkouts may mean turnovers were skipped. "+
-    "If a to-do list is provided, treat work that advances items on it as valued/expected; he should stay roughly (not exactly) aligned to it, and maintenance is expected even if unlisted. Use the WebWork data PRIMARILY to verify he was actually ACTIVE and what he genuinely used (apps & websites / URLs + activity rate) to corroborate desk/admin/computer claims; do NOT treat WebWork project/task names as proof of what he worked on (those labels can be stale). "+
+    "RECORDED TIME OFF IS APPROVED AND AUTHORITATIVE: when the data says Victor logged time off (a number of hours, or a full day), you MUST exclude that time from all productivity expectations \u2014 judge him ONLY over his on-duty hours and NEVER lower any score because of inactivity, absence, or low activity that falls within his recorded time off. "+"If a to-do list is provided, treat work that advances items on it as valued/expected; he should stay roughly (not exactly) aligned to it, and maintenance is expected even if unlisted. Use the WebWork data PRIMARILY to verify he was actually ACTIVE and what he genuinely used (apps & websites / URLs + activity rate) to corroborate desk/admin/computer claims; do NOT treat WebWork project/task names as proof of what he worked on (those labels can be stale). "+
     "Return ONLY a JSON object: {\"truth_score\":0-100, \"productivity_score\":0-100, \"hours_worked\":<number, from the data>, \"matches\":[\"...\"], \"discrepancies\":[\"...\"], \"summary\":\"1-2 sentences\"}. "+
     "truth_score = how well his report is corroborated by the data (100 = fully consistent, low = claims contradicted by the data). "+
     "productivity_score = how productive and on-list the day was given the to-do list, GPS on-site time, and screen activity (100 = clearly productive on valued work, low = little evidence of productive/valued work). "+
@@ -1619,7 +1649,8 @@ async function scoreDay(date, device){
   const todoBlock=(todoDoc&&todoDoc.trim())?("\nVICTOR'S CURRENT TO-DO LIST (living doc \u2014 admin + general tasks; maintenance expected, may be unlisted):\n"+String(todoDoc).slice(0,3000)+"\n"):"";
   let exBlock="";
   if(gradeExamples&&gradeExamples.length){ exBlock="\nHOW GAVIN (owner) GRADED PAST DAYS FOR PRODUCTIVITY (0-100) \u2014 match his standard:\n"+gradeExamples.map(function(e){ const sn=e.snap||{}; return "- "+e.date+" \u2192 "+Math.round(e.grade)+"/100"+(e.note?(" ("+String(e.note).slice(0,140)+")"):"")+". Data: "+(sn.hours_summary||"")+"; "+(sn.gps_summary||"")+"; "+(sn.screen_summary||"")+"."; }).join("\n")+"\n"; }
-  const userMsg=dataBlock+todoBlock+exBlock+"\nVICTOR'S SELF-REPORT:\n"+String(report).slice(0,4000);
+  const offBlock=(offMin>0)?("\nRECORDED TIME OFF (authoritative): Victor logged "+timeOff.hours+" hour(s) off on "+date+". Carve this out of all productivity expectations \u2014 evaluate ONLY his on-duty hours and do not count any inactivity during the recorded time off against him.\n"):"";
+  const userMsg=dataBlock+offBlock+todoBlock+exBlock+"\nVICTOR'S SELF-REPORT:\n"+String(report).slice(0,4000);
   try{
     const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},
       body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:700,temperature:0,system:sys,messages:[{role:"user",content:userMsg}]})});
@@ -1629,7 +1660,7 @@ async function scoreDay(date, device){
     if(!o) return {error:"could not parse AI response", raw:text.slice(0,300)};
     const out={ date, scored_at:new Date().toISOString(), truth_score:Number(o.truth_score), productivity_score:Number(o.productivity_score!=null?o.productivity_score:o.truth_score), hours_worked:Number(o.hours_worked!=null?o.hours_worked:(hours.hours||0)),
       matches:Array.isArray(o.matches)?o.matches:[], discrepancies:Array.isArray(o.discrepancies)?o.discrepancies:[], summary:String(o.summary||""),
-      data:{hours, zones, screen, todo_present:!!(todoDoc&&todoDoc.trim())} };
+      data:{hours, zones, screen, todo_present:!!(todoDoc&&todoDoc.trim()), timeoff:{hours:(timeOff&&timeOff.hours)||0, off_min:offMin, full_day:!!(timeOff&&timeOff.fullDay)}} };
     try{ if(redis) await redis.set("parkside:score:"+date, out); }catch(e){}
     return out;
   }catch(e){ return {error:"request failed: "+String(e.message||e)}; }
@@ -3394,3 +3425,6 @@ if(action==="email_recipients"){
 
 module.exports.__model={compute,paceMult,scarMult,gapGm,deriveLearned,interp,SENS,MODEL,UNIT_PREM,GAP_SEED,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
 module.exports.__msg={kbAutoMatch,normQ,smsProvider,smsConfigured,sendSms,decideApproval};
+// item MW-12: expose pure helpers for unit tests (attaches to the handler export).
+module.exports.onDutyActivePct=onDutyActivePct;
+module.exports.timeOffForDate=timeOffForDate;
