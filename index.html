@@ -630,16 +630,11 @@
       </div>
       <div id="genMonthBody" class="legend"><span class="muted">Pick a month and generate — the engine averages that month’s daily grades and writes a short summary of the strengths &amp; weaknesses that recurred across the month.</span></div>
     </div>
+    <!-- item D: Doc section is now JUST a clickable link to the Dropbox document — no field, no Save, no embed. -->
     <div class="card" id="todoDocCard">
-      <h2>📋 Victor\u2019s to-do document <span class="muted" style="font-weight:400;text-transform:none">— a link to your Dropbox doc; the daily grader reads it directly</span></h2>
-      <div class="legend" style="margin-bottom:6px">Paste a Dropbox link to your to-do <b>.docx</b> and the engine re-reads it every day \u2014 edit the file and the changes flow through automatically, no re-uploading. In Dropbox: right-click the file \u2192 Copy link, paste it below, Save. Stays a Word file; never Google Docs.</div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <input id="todoDocUrl" type="text" placeholder="https://www.dropbox.com/scl/fi/\u2026/to-do.docx?\u2026" style="flex:1;min-width:220px">
-        <button onclick="saveTodoDoc()">Save link</button>
-        <span id="todoDocStatus" class="muted"></span>
-      </div>
-      <!-- item C1: link to the doc instead of auto-populating its text; the daily grader reads the doc server-side -->
-      <a id="todoDocOpen" href="#" target="_blank" rel="noopener" style="display:none;margin-top:10px;padding:8px 14px;border-radius:8px;border:1px solid #2c3a51;color:#cfd9e8;font-size:12.5px;font-weight:600;text-decoration:none">Open the Dropbox document ↗</a>
+      <h2>📋 Victor\u2019s to-do document <span class="muted" style="font-weight:400;text-transform:none">— link to your Dropbox doc; the daily grader reads it directly</span></h2>
+      <a id="todoDocOpen" href="#" target="_blank" rel="noopener" style="display:none;margin-top:4px;padding:8px 14px;border-radius:8px;border:1px solid #2c3a51;color:#cfd9e8;font-size:12.5px;font-weight:600;text-decoration:none">Open the document ↗</a>
+      <div id="todoDocNone" class="muted" style="font-size:12px">No document linked yet.</div>
     </div>
   </div>
   <div id="gvBonus" class="gv-subview" style="display:none">
@@ -1421,7 +1416,7 @@ async function genMonthReport(){ if(!GPW) return; var st=document.getElementById
     if(body) body.innerHTML=h;
   }catch(e){ if(st) st.textContent='error'; }
 }
-async function loadTodoDoc(){ if(!GPW) return; try{ const r=await fetch(api('todo_doc')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); const u=document.getElementById('todoDocUrl'); if(u && document.activeElement!==u) u.value=(j&&j.url)||''; const o=document.getElementById('todoDocOpen'); const uu=(j&&j.url)||((document.getElementById('todoDocUrl')||{}).value)||''; if(o){ if(uu){ o.href=uu; o.style.display='inline-block'; } else { o.style.display='none'; } } }catch(e){} }
+async function loadTodoDoc(){ if(!GPW) return; try{ const r=await fetch(api('todo_doc')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); const o=document.getElementById('todoDocOpen'); const none=document.getElementById('todoDocNone'); const uu=(j&&j.url)||''; if(o){ if(uu){ o.href=uu; o.style.display='inline-block'; } else { o.style.display='none'; } } if(none) none.style.display=uu?'none':'block'; }catch(e){} }
 async function saveTodoDoc(){ if(!GPW) return; const st=document.getElementById('todoDocStatus'); if(st) st.textContent='Saving\u2026'; const url=(document.getElementById('todoDocUrl')||{}).value||''; try{ const r=await fetch(api('todo_doc'),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({url})}); const j=await r.json(); if(st) st.textContent=(j&&j.ok)?('Saved \u2713 \u00b7 '+(j.chars||0)+' chars read from your doc \u00b7 re-checked daily'):'Save failed'; const o=document.getElementById('todoDocOpen'); const uu=(j&&j.url)||((document.getElementById('todoDocUrl')||{}).value)||''; if(o){ if(uu){ o.href=uu; o.style.display='inline-block'; } else { o.style.display='none'; } } }catch(e){ if(st) st.textContent='error'; } }
 async function uploadTodoDocx(inp){ if(!GPW||!inp||!inp.files||!inp.files[0]) return; var f=inp.files[0]; var st=document.getElementById('todoDocStatus'); if(st) st.textContent='Reading '+f.name+'\u2026'; var rd=new FileReader(); rd.onload=async function(){ try{ var b64=String(rd.result||'').replace(/^data:[^,]*,/,''); if(st) st.textContent='Uploading\u2026'; var r=await fetch(api('todo_docx_upload'),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({filename:f.name,data:b64})}); var j=await r.json(); if(j&&j.ok){ if(st) st.textContent='Loaded \u2713 \u00b7 '+j.chars+' chars from '+f.name; var p=document.getElementById('todoDocPreview'); if(p) p.textContent=j.text||''; } else if(st) st.textContent='Failed: '+((j&&j.error)||'error'); }catch(e){ if(st) st.textContent='Error: '+e.message; } inp.value=''; }; rd.onerror=function(){ if(st) st.textContent='Could not read file'; }; rd.readAsDataURL(f); }
 function renderScore(sc){ const el=document.getElementById('scResult'); if(!el) return; if(!sc||sc.truth_score==null){ el.innerHTML=''; return; }
