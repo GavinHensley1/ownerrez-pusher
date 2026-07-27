@@ -39,6 +39,9 @@
   .switch.on .knob{left:23px}
   #gate{position:fixed;inset:0;background:#0b1219;display:flex;align-items:center;justify-content:center;z-index:50;flex-direction:column;gap:14px}
   #gate input{font-size:18px;text-align:center;padding:10px 14px;width:160px;letter-spacing:.3em}
+  /* Gavin admin gate: full-screen centered lock card, matching Victor's staff-access screen */
+  #gavinGate{position:fixed;inset:0;background:#0a1018;display:flex;align-items:center;justify-content:center;z-index:50;flex-direction:column;gap:14px}
+  #gavinGate input{font-size:18px;text-align:center;padding:10px 14px;width:160px;letter-spacing:.3em}
   .legend{font-size:12px;color:var(--mut);margin-top:8px}
   .seg{background:transparent;border:1px solid var(--line);color:var(--mut);padding:6px 14px;border-radius:7px;font-weight:600;cursor:pointer}
   .seg.on{background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -383,14 +386,14 @@
 </div>
 
 <div class="wrap" id="monMain" style="display:none">
-  <div class="card" id="gavinGate">
-    <h2>Gavin login</h2>
-    <div class="legend" style="margin-bottom:10px">Protected by a second password. Enter it to view Victor’s location.</div>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <input id="gpw" type="password" placeholder="Gavin password" style="max-width:220px" onkeydown="if(event.key==='Enter')gavinUnlock()">
-      <button onclick="gavinUnlock()">Unlock</button>
-      <span id="gavinErr" class="muted" style="color:var(--warn)"></span>
-    </div>
+  <!-- Full-screen centered admin lock, matching Victor's staff-access screen (presentation only; wiring unchanged) -->
+  <div id="gavinGate">
+    <div style="font-weight:700;font-size:18px">🔒 Gavin &mdash; admin access</div>
+    <div class="muted">Enter password to continue</div>
+    <input id="gpw" type="password" placeholder="••••" onkeydown="if(event.key==='Enter')gavinUnlock()">
+    <button onclick="gavinUnlock()">Unlock</button>
+    <div id="gavinErr" style="color:var(--accent);height:16px"></div>
+    <div style="margin-top:10px"><a href="#" onclick="gavinGateBack();return false" class="muted" style="font-size:12px;text-decoration:none">← Back</a></div>
   </div>
   <div id="gavinBody" style="display:none">
   <div id="gvSubnav" style="display:flex;gap:26px;padding:0 4px 0 4px;height:44px;align-items:center;border-bottom:1px solid #1b2536;position:sticky;top:0;z-index:20;background:var(--bg);margin-bottom:20px">
@@ -1561,6 +1564,8 @@ function boot(){
 function val(id){ const el=document.getElementById(id); return el?el.value.trim():""; }
 function showVictorGate(){ document.getElementById('inquiry').style.display='none'; const g=document.getElementById('gate'); g.style.display=''; const pw=document.getElementById('pw'); if(pw) pw.focus(); }
 function hideVictorGate(){ document.getElementById('gate').style.display='none'; document.getElementById('inquiry').style.display=''; }
+// ← Back on the Gavin admin lock: leave the Gavin tab and return to the main (My Work) view.
+function gavinGateBack(){ try{ switchView('bonus'); }catch(e){} }
 async function loadBookings(){
   const st=document.getElementById('rosterStatus'), wrap=document.getElementById('rosterWrap');
   if(!st||!wrap) return; st.style.display='block'; st.textContent='Loading bookings…'; wrap.innerHTML='';
