@@ -668,14 +668,14 @@ async function sendVictorApprovalEmail(req, item, ctx){
 }
 // Primary->secondary escalation: any approval still pending after escalateMins gets the
 // SAME approval email (same suggested reply) re-sent ONCE to the backup contact.
-async function sendApprovalEmail(req, item, toAddr, isEsc){
+async function sendApprovalEmail(req, item, toAddr, isEsc, opts){ opts=opts||{};
   const cfg=await getNotifyConfig();
   if(!toAddr || !cfg.apiKey || !cfg.from) return {sent:false, reason:"backup email not configured (need address, Resend key, From)"};
   const origin=(process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app"); const secret=cfg.secret;
   const base=origin+"/api/app?action=approve&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const yes=base+"&decision=yes", no=base+"&decision=no";
   const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
-  const supplyUrl=origin+"/api/app?action=supply_fact&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
+  const supplyUrl=origin+"/api/app?action=supply_fact&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret)+"&to="+encodeURIComponent(toAddr||"");
   const unit=item.unit||""; const guestName=item.guest_name||""; const proposed=item.proposed||"";
   const esc2=(item.status==="escalated"); // waiting on a FACT from Victor (no draft to approve yet)
   let threadHtml=""; try{ threadHtml=await renderThread(item, await getApprovals()); }catch(e){}
@@ -694,7 +694,7 @@ async function sendApprovalEmail(req, item, toAddr, isEsc){
          +'<div style="margin:18px 0">'+btn(supplyUrl,"#2563eb","Answer this — supply the fact")+'</div>'
          +'<p style="color:#94a3b8;font-size:12px">Type just the fact (e.g. “11pm” or “early check-in is $30”), review the reply, then send. Nothing goes to the guest until you confirm. It’s also gone to Victor by text. (Ref '+escHtml(item.id)+')</p></div>'
        : '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:14px;white-space:pre-wrap">'+(proposed?escHtml(proposed):'<i>No suggested reply</i>')+'</div>'
-         +'<div style="margin:18px 0">'+btn(yes,"#16a34a","Approve & Send")+btn(editUrl,"#2563eb","Edit")+btn(no,"#dc2626","Reject")+'</div>'
+         +'<div style="margin:18px 0">'+btn(yes,"#16a34a","Approve & Send")+btn(editUrl,"#2563eb","Edit")+(opts.hideReject?"":btn(no,"#dc2626","Reject"))+'</div>'
          +'<p style="color:#94a3b8;font-size:12px">Approve sends this reply to the guest. Reject sends nothing. (Ref '+escHtml(item.id)+')</p></div>');
   const result=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:toAddr, subject, html});
   return {...result, to:toAddr, from:cfg.from, subject, escalation:isEsc};
@@ -3262,25 +3262,26 @@ if(action==="email_recipients"){
       if(it.status && it.status!=="pending" && it.status!=="escalated"){ res.statusCode=200; return res.end(htmlPage("Already handled ✓","This guest question was already handled ("+escHtml(it.status)+(it.closedExternally?", the front desk answered the guest directly":"")+"). The guest was not messaged twice.")); }
       if(req.method==="POST"){
         let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{b=Object.fromEntries(new URLSearchParams(b));}catch{b={};} } } b=b||{};
-        const step=String(b.step||"draft");
-        if(step==="send"){
-          const answer=String(b.answer||"").trim();
-          if(!answer){ res.statusCode=200; return res.end(supplyFactReviewHtml(it, tok, String(b.fact||""), "", "Please enter a reply before sending.")); }
-          // re-stage an escalated item to pending so decideApproval (the single-resolution choke-point) can send it
-          if(it.status==="escalated"){ it.status="pending"; it.proposed=answer; it.escalate=false; it.factFromVictor=String(b.fact||"").slice(0,500); it.revisedAt=new Date().toISOString(); it.primaryNotifiedAt=it.primaryNotifiedAt||new Date().toISOString(); try{ await setApprovals(list); }catch(e){} }
-          const out=await decideApproval(id, "yes", answer);
-          if(out.ok && out.decision==="approved"){ res.statusCode=200; return res.end(htmlPage(out.sent?"Sent to the guest ✓":"Saved (not sent — messaging is OFF)","We replied to the guest:\n\n“"+String(answer).slice(0,600)+"”")); }
-          if(out.ok===false && /^already /i.test(String(out.error||""))){ res.statusCode=200; return res.end(htmlPage("Already handled ✓","This was already handled by someone else. The guest was not messaged twice.")); }
-          res.statusCode=200; return res.end(htmlPage("Couldn’t send",(out.error||"Unknown error")+".")); 
-        }
-        // step "draft": compose the reply from the supplied fact and show it for review
         const fact=String(b.fact||"").trim();
         if(!fact){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Please enter the answer / fact first.")); }
+        // STEP 1 (mirrors Victor's SMS flow exactly): capture ONLY the fact. The model composes the guest reply and
+        // the item is re-staged to 'pending' (reviseFromSms). NOTHING is sent to the guest here. We then email a
+        // FRESH approval email (composed reply + Approve & Send) — the ACTUAL send happens when they approve THAT
+        // second email, routed through decideApproval (single-resolution lock). Reservations never sees the draft
+        // on this page; it comes back as its own email, exactly like the engine texting Victor the draft to approve.
         let rev=null; try{ rev=await reviseFromSms(req, it, fact); }catch(e){ rev={failed:true}; }
         if(rev && rev.alreadyHandled){ res.statusCode=200; return res.end(htmlPage("Already handled ✓","This was already handled by someone else. The guest was not messaged twice.")); }
         const draft=(rev && rev.proposed && !rev.failed)?String(rev.proposed):"";
         if(!draft){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Couldn’t draft a reply from that — try rephrasing the fact.")); }
-        res.statusCode=200; return res.end(supplyFactReviewHtml(it, tok, fact, draft, ""));
+        // reviseFromSms has re-staged the item to 'pending' with proposed=draft. Email that draft for approval,
+        // back to the same contact this escalation went to (validated to a configured address).
+        const _cfg=await getNotifyConfig(); const _cands=[_cfg.to2, _cfg.to].filter(Boolean);
+        let _to=String(q.to||"").trim(); if(!_to || _cands.indexOf(_to)===-1) _to=_cfg.to2||_cfg.to||"";
+        let emailed=null; try{ emailed=await sendApprovalEmail(req, it, _to, false, {hideReject:true}); }catch(e){ emailed={sent:false, error:String(e.message||e)}; }
+        const _ok=!!(emailed && emailed.sent);
+        res.statusCode=200; return res.end(htmlPage("Got it — reply drafted"+(_ok?" ✓":""),
+          _ok ? "Thanks! We drafted a reply from that and just emailed it to you. Open that new email and tap “Approve & Send” to send it to the guest. Nothing goes to the guest until you approve."
+              : "We drafted the reply but couldn’t email it just now"+((emailed&&(emailed.reason||emailed.error))?(" ("+String(emailed.reason||emailed.error)+")"):"")+". It’s saved and waiting for approval; Victor was also texted. (Ref "+it.id+")"));
       }
       res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, ""));
     }
