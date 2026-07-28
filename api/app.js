@@ -708,19 +708,22 @@ async function escalateStaleApprovals(req){
     const cutoff=Date.now()-cfg.escalateMins*60*1000;
     const list=await getApprovals(); let changed=false; const done=[];
     for(const it of list){
-      if(!it || it.escalatedTo2) continue;
-      if(it.status!=="pending" && it.status!=="escalated") continue; // both approval AND fact-needed items nudge the backup
+      if(!it) continue;
+      // ONE CLEAN FLOW: the backup contact gets EXACTLY ONE "Answer this - supply the fact" email per UNKNOWN-FACT
+      // (escalated) item. PENDING items (a draft awaiting approval) are handled by the supply-fact approval email
+      // and are NEVER nudged here — nudging pending items was the source of the flood AND of the "approval needed
+      // with the holding note as the suggested reply" emails Gavin saw.
+      if(it.status!=="escalated") continue;
+      if(it.backupAskSent) continue;                         // PERMANENT one-shot; reviseFromSms does NOT reset this
       const t=Date.parse(it.primaryNotifiedAt||it.ts||"");
       if(!isFinite(t) || t>cutoff) continue;
-      // item(#3): ATOMIC one-shot guard. The sweep runs on inbound webhooks + cron + dashboard load, so concurrent
-      // invocations could each send before the escalatedTo2 flag persists (Gavin saw 3x). set-if-absent means only
-      // the FIRST caller across all sweeps sends. Expiry ~ the escalate window so a legitimate re-nudge after a
-      // re-draft (which clears escalatedTo2 + resets the timer) can still fire in a later cycle.
+      // ATOMIC one-shot across concurrent sweeps (inbound webhooks + cron + dashboard load), with a LONG expiry so
+      // a short escalateMins can never let the same ask re-fire.
       let _first=true;
-      try{ if(redis){ const _r=await redis.set("parkside:esc2_once:"+it.id, new Date().toISOString(), {nx:true, ex:Math.max(600, (cfg.escalateMins||60)*60)}); _first=(_r!==null && _r!==false); } }catch(e){}
-      if(!_first){ it.escalatedTo2=true; changed=true; continue; }
-      const r=await sendApprovalEmail(req, it, cfg.to2, true);
-      it.escalatedTo2=true; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=!!(r&&r.sent===true);
+      try{ if(redis){ const _r=await redis.set("parkside:backup_ask:"+it.id, new Date().toISOString(), {nx:true, ex:30*24*3600}); _first=(_r!==null && _r!==false); } }catch(e){}
+      if(!_first){ it.backupAskSent=true; changed=true; continue; }
+      const r=await sendApprovalEmail(req, it, cfg.to2, false);   // isEsc=false: clean "Guest question needs info" subject (this is the first & only email)
+      it.backupAskSent=true; it.escalatedTo2=true; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=!!(r&&r.sent===true);
       changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:cfg.to2});
     }
     if(changed) await setApprovals(list);
@@ -1596,7 +1599,7 @@ async function reviseFromSms(req, item, extraInfo){
   // NEVER send Victor's raw text to the guest. If the AI couldn't draft, keep the prior draft and flag it.
   if(!proposed) return {proposed:item.proposed||"", known:"full", failed:true};
   const list=await getApprovals(); const it=list.find(x=>x.id===item.id);
-  if(it){ const _now=new Date().toISOString(); it.proposed=proposed; it.status="pending"; it.escalate=false; it.factFromVictor=extraInfo; it.revisedAt=_now; it.ts=_now; it.primaryNotifiedAt=_now; it.escalatedTo2=false; await setApprovals(list); }
+  if(it){ const _now=new Date().toISOString(); it.proposed=proposed; it.status="pending"; it.escalate=false; it.factFromVictor=extraInfo; it.revisedAt=_now; it.ts=_now; it.primaryNotifiedAt=_now; await setApprovals(list); } // (note: do NOT reset escalatedTo2/backupAskSent — that re-armed the flood)
   return {proposed, known};
 }
 
@@ -3302,9 +3305,14 @@ if(action==="email_recipients"){
         const _cfg=await getNotifyConfig(); const _cands=[_cfg.to2, _cfg.to].filter(Boolean);
         let _to=String(q.to||"").trim(); if(!_to || _cands.indexOf(_to)===-1) _to=_cfg.to2||_cfg.to||"";
         const _list2=await getApprovals(); const _it2=_list2.find(x=>x&&x.id===id)||it;
-        let emailed=null; try{ emailed=await sendApprovalEmail(req, _it2, _to, false, {hideReject:true}); }catch(e){ emailed={sent:false, error:String(e.message||e)}; }
-        try{ _it2.escalatedTo2=true; _it2.escalatedTo2At=new Date().toISOString(); _it2.escalatedTo2Sent=!!(emailed&&emailed.sent); await setApprovals(_list2); }catch(e){}
-        try{ if(redis) await redis.set("parkside:esc2_once:"+id, new Date().toISOString(), {ex:Math.max(600,(_cfg.escalateMins||60)*60)}); }catch(e){}
+        // DEDUPE the approval email: a double-submit / concurrent request must not send two "Approve & Send" emails.
+        let _sendOk=true; try{ if(redis){ const _r=await redis.set("parkside:approval_email:"+id, new Date().toISOString(), {nx:true, ex:300}); _sendOk=(_r!==null && _r!==false); } }catch(e){}
+        let emailed=null;
+        if(_sendOk){ try{ emailed=await sendApprovalEmail(req, _it2, _to, false, {hideReject:true}); }catch(e){ emailed={sent:false, error:String(e.message||e)}; } }
+        else { emailed={sent:true, deduped:true}; } // an approval email for this item already went out moments ago
+        // mark it so the backup sweep never re-asks and never nudges this (now-pending) item.
+        try{ _it2.backupAskSent=true; _it2.escalatedTo2=true; _it2.escalatedTo2At=new Date().toISOString(); _it2.escalatedTo2Sent=!!(emailed&&emailed.sent); await setApprovals(_list2); }catch(e){}
+        try{ if(redis) await redis.set("parkside:backup_ask:"+id, new Date().toISOString(), {ex:30*24*3600}); }catch(e){}
         const _ok=!!(emailed && emailed.sent);
         res.statusCode=200; return res.end(htmlPage("Got it — reply drafted"+(_ok?" ✓":""),
           _ok ? "Thanks! We drafted a reply from that and just emailed it to you. Open that new email and tap “Approve & Send” to send it to the guest. Nothing goes to the guest until you approve."
