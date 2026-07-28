@@ -721,14 +721,15 @@ async function escalateStaleApprovals(req){
       if((now-t) > maxAgeMs){ if(!it.backupAskSent){ it.backupAskSent=true; it.backupSkippedStale=true; changed=true; neutralized++; } continue; }
       if(it.backupAskSent) continue;                         // already asked once (permanent)
       if(t > cutoff) continue;                               // not past the answer timer yet
-      // (2) ALREADY-REPLIED GUARD: if we have sent the guest a REAL reply (any outbound to them that is NOT our
-      // holding note) after their question, it is HANDLED — never escalate. A guest going silent after OUR message
-      // is NOT an action for this system; we only act when the GUEST still needs a reply FROM us.
+      // (2) ALREADY-REPLIED GUARD (timestamp-based — robust): HANDLED only if we sent the guest a real follow-up
+      // AFTER the holding, detected by TIME (an outbound logged >2 min after this item was created). We do NOT
+      // compare text: the holding is tidied/scrubbed before it is logged, so a text compare against firstProposed
+      // MISFIRED and wrongly marked legit, still-open escalations as handled (that blocked Gavin's backup email).
+      // The holding note is sent at creation time and is always within the 2-min window, so it never counts as a reply.
       let handled=false;
       try{ const _log=await getThreadLog(it.thread_id, it.booking_id);
-        const _norm=function(x){ return String(x||"").replace(/\s+/g," ").trim(); };
-        const _hold=_norm(it.firstProposed||it.proposed||"");
-        for(const m of (_log||[])){ if(m && m.d==="out"){ const _b=_norm(m.b); if(_b && _b!==_hold){ handled=true; break; } } }
+        const _ht=Date.parse(it.primaryNotifiedAt||it.ts||"")||0;
+        if(_ht){ for(const m of (_log||[])){ if(m && m.d==="out"){ const _mt=Date.parse(m.t||"")||0; if(_mt && _mt > _ht+120000){ handled=true; break; } } } }
       }catch(e){}
       if(handled){ it.backupAskSent=true; it.backupSkippedHandled=true; changed=true; continue; }
       // ATOMIC one-shot across concurrent sweeps (inbound webhooks + cron + dashboard load), 30-day expiry.
