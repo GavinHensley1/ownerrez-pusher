@@ -1394,13 +1394,13 @@ async function sendVictorEscalationSms(req, item, ctx){
   const _ctx=[unit,guestName].filter(Boolean).join(" - ");
   if(ctx.followup){
     const _nm=String(ctx.newMsg||item.question||"").replace(/\s+/g," ").trim().slice(0,220);
-    const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent ANOTHER message:\n\""+_nm+"\"\n\nFull recent conversation:\n"+_convo+"\n\nTo answer, text: "+lbl+" then the answer. Reply "+lbl+" yes to send it to the guest.";
+    const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent ANOTHER message:\n\""+_nm+"\"\n\nFull recent conversation:\n"+_convo+"\n\nTo answer, text: "+lbl+" then the fact.";
     try{ return await sendSmsGateway(cfg, _ft); }catch(e){ return {sent:false, error:String(e.message||e)}; }
   }
   const _isComp=!!(ctx.complaint||item.complaint);
   const _mid=_isComp?"I told the guest I'm sorry and a manager will follow up.":(ctx.partial?"I answered what I could and told the guest I'd confirm the rest.":"I told the guest I'd check with a manager.");
   const _tag=_isComp?" (COMPLAINT)":(ctx.partial?" (partial \u2014 needs the rest)":" (escalated)");
-  const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+_tag+"\n"+_convo+"\n\n"+_mid+" To answer, text: "+lbl+" then the answer. Reply "+lbl+" yes to send it to the guest.";
+  const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+_tag+"\n"+_convo+"\n\n"+_mid+" To answer, text: "+lbl+" then the fact.";
   try{ return await sendSmsGateway(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 
