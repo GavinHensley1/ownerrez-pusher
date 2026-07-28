@@ -1616,7 +1616,7 @@ async function composeReplyFromFact(question, fact, guestName, history){
     + (hasHist ? "This is an ONGOING conversation, so do NOT open with a greeting like 'Hi there'. " : "")
     + "Keep it to 1-2 sentences plus a brief friendly closing. Reply with ONLY the message text — no JSON, no quotes, no preamble. NEVER say you are checking with a manager or will follow up — the manager already answered, so give the answer now.";
   const userMsg="Guest's original question: "+String(question||"").slice(0,600)+"\nManager's supplied fact/answer (use this to answer): "+String(fact||"").slice(0,900)+(first?("\nGuest first name: "+first):"");
-  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:250,temperature:0.3,system:sys,messages:[{role:"user",content:userMsg}]})});
+  try{ let _sig=undefined; try{ if(typeof AbortSignal!=="undefined"&&AbortSignal.timeout) _sig=AbortSignal.timeout(9000); }catch(e){} const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",signal:_sig,headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:250,temperature:0.3,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return "";
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
     text=tidyQuotes(scrubContact(text)); if(hasHist) text=stripLeadGreeting(text);
@@ -3607,10 +3607,21 @@ if(action==="email_recipients"){
         if(rest===""){ await ackBack(lbl+": I don\u2019t have the answer yet. To answer, text: "+lbl+" then your answer. Example: "+lbl+" checkout is 11am. Nothing is sent to the guest until you reply "+lbl+" yes."); return res.status(200).json({need_facts:true, label:lbl}); }
         if(isNo(rest)){ const it2=list.find(x=>x.id===target.id); if(it2){ it2.status="closed"; it2.decidedAt=new Date().toISOString(); await setApprovals(list); } await ackBack(lbl+" closed — nothing more sent to the guest."); return res.status(200).json({closed:true, label:lbl}); }
         if(isYes(rest)){ await ackBack(lbl+": I don\u2019t have your answer yet. To answer, text: "+lbl+" then your answer. Example: "+lbl+" checkout is 11am. Nothing is sent to the guest until you reply "+lbl+" yes."); return res.status(200).json({need_facts:true, label:lbl}); }
-        const rev2=await reviseFromSms(req, target, rest);
-        if(rev2 && rev2.failed){ await ackBack(lbl+": couldn't draft a guest reply from that — try rephrasing the fact."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
-        await ackBack(lbl+" — draft reply for the guest:\n"+String(rev2.proposed||"").slice(0,600)+"\n\nReply \""+lbl+" yes\" to send it, or text a correction. Nothing is sent until you reply yes.");
-        return res.status(200).json({escalation_drafted:true, label:lbl});
+        // Compose the guest reply from Victor's fact and TEXT THE DRAFT BACK to him for approval. This step MUST
+        // always reply — it can never dead-end (that was the bug: reviseFromSms was called without a try/catch, so
+        // a compose throw/hang killed the handler and no SMS went back). reviseFromSms composes (Anthropic) + stages
+        // the item pending; if it throws or returns nothing, fall back to a deterministic reply built from the fact
+        // and stage the item pending here so a later "Q# yes" can send it.
+        let _draft="";
+        try{ const rev2=await reviseFromSms(req, target, rest); if(rev2 && !rev2.failed && !rev2.alreadyHandled) _draft=String(rev2.proposed||"").trim(); }catch(e){}
+        if(!_draft){
+          let _hasHist=false; try{ const _h=await getThreadLog(target.thread_id, target.booking_id); _hasHist=(_h||[]).some(function(m){ return m && m.d==="out"; }); }catch(e){}
+          _draft=directReplyFromFact(target.guest_name, rest, _hasHist);
+          try{ const _l2=await getApprovals(); const _it3=_l2.find(function(x){ return x && x.id===target.id; }); if(_it3){ if(_draft) _it3.proposed=_draft; _it3.status="pending"; _it3.escalate=false; _it3.factFromVictor=rest; const _n=new Date().toISOString(); _it3.revisedAt=_n; _it3.ts=_n; _it3.primaryNotifiedAt=_n; await setApprovals(_l2); } }catch(e){}
+        }
+        if(!_draft){ await ackBack(lbl+": couldn't draft a guest reply from that — please text the fact again in a few plain words."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
+        await ackBack(lbl+" — draft reply for the guest:\n"+String(_draft).slice(0,600)+"\n\nReply \""+lbl+" yes\" to send it to the guest, or text a correction. Nothing is sent until you reply "+lbl+" yes.");
+        return res.status(200).json({escalation_drafted:true, label:lbl, sentDraftBack:true});
       }
       if((lm && rest==="")||isYes(rest)){
         const out=await decideApproval(target.id, "yes", null);
@@ -3622,10 +3633,16 @@ if(action==="email_recipients"){
         await ackBack(lbl+" skipped — nothing was sent to the guest.");
         return res.status(200).json({decided:"no", label:lbl, out});
       }
-      const rev=await reviseFromSms(req, target, rest);
-      if(rev && rev.failed){ await ackBack(lbl+": couldn't re-draft from that. The suggested reply is unchanged - reply \""+lbl+" yes\" to send it as-is, or text a clearer correction."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
-      await ackBack(lbl+" (updated)\nSuggested reply:\n"+String(rev.proposed||"").slice(0,600)+"\n\nReply \""+lbl+" yes\" to send, or text another correction.");
-      return res.status(200).json({revised:true, label:lbl, proposed:rev.proposed});
+      let _draft2="";
+      try{ const rev=await reviseFromSms(req, target, rest); if(rev && !rev.failed && !rev.alreadyHandled) _draft2=String(rev.proposed||"").trim(); }catch(e){}
+      if(!_draft2){
+        let _hh=false; try{ const _h2=await getThreadLog(target.thread_id, target.booking_id); _hh=(_h2||[]).some(function(m){ return m && m.d==="out"; }); }catch(e){}
+        _draft2=directReplyFromFact(target.guest_name, rest, _hh);
+        try{ const _l3=await getApprovals(); const _it4=_l3.find(function(x){ return x && x.id===target.id; }); if(_it4){ if(_draft2) _it4.proposed=_draft2; _it4.status="pending"; _it4.revisedAt=new Date().toISOString(); await setApprovals(_l3); } }catch(e){}
+      }
+      if(!_draft2){ await ackBack(lbl+": couldn't re-draft. Reply \""+lbl+" yes\" to send the current draft as-is, or text a clearer correction."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
+      await ackBack(lbl+" (updated) — draft reply for the guest:\n"+String(_draft2).slice(0,600)+"\n\nReply \""+lbl+" yes\" to send it to the guest, or text another correction.");
+      return res.status(200).json({revised:true, label:lbl, proposed:_draft2});
     }
 
     // ===== Auto-message toggle (app-gated) =====
