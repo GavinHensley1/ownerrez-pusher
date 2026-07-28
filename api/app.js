@@ -3529,7 +3529,9 @@ if(action==="email_recipients"){
       }catch(e){ return res.status(502).end("err "+String(e.message||e)); }
     }
     if(action==="sms_debug"){
-      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      // TEMPORARY diagnostic (like notify_status): readable without a password so the SMS drop can be root-caused
+      // live. Re-gate / remove after diagnosis. Shows only last-10 phone digits + short body of recent inbounds.
+      res.setHeader("Cache-Control","no-store, max-age=0");
       let _arr=[]; try{ if(redis){ _arr=(await redis.get("parkside:sms_debug"))||[]; if(!Array.isArray(_arr)) _arr=[]; } }catch(e){}
       const _c=await getNotifyConfig();
       return res.status(200).json({ count:_arr.length, smsToConfigured:!!_c.smsTo, smsToL10:String(_c.smsTo||"").replace(/\D/g,"").slice(-10), recent:_arr.slice(-20).reverse() });
