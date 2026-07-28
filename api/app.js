@@ -1595,23 +1595,51 @@ function findByLabel(list, label){
   return any.length?any[any.length-1]:null;
 }
 // Owner texted a correction for a pending item: fold the new info into the KB, re-draft, record the correction, re-stage.
+// item: does a composed reply look like the generic "checking with my manager" HOLDING note? Used to guarantee
+// a fact-supply never comes back as a holding.
+function isHoldingLike(text){ const t=String(text||"").toLowerCase(); return /check(ing)?\s+with\s+(my\s+)?manager|get(ting)?\s+my\s+manager\s+involved|follow up with you shortly|get right back to you shortly|will follow up (with you )?shortly|check with (my )?manager/.test(t); }
+// item: deterministic guest reply built straight from the manager's fact — a guaranteed real answer if the model fails.
+function directReplyFromFact(guestName, fact, hasHistory){
+  const f=String(guestName||"").trim().split(/\s+/)[0];
+  var fx=tidyQuotes(scrubContact(String(fact||"").trim())); if(!fx) return "";
+  var body=fx.charAt(0).toUpperCase()+fx.slice(1); if(!/[.!?]$/.test(body)) body+=".";
+  var hi = hasHistory ? "" : (f?("Hi "+f+"! "):"Hi there! ");
+  return (hi+body+" Let me know if there’s anything else I can help with!").trim();
+}
+// item: FOCUSED composer — always answers the ORIGINAL question USING the manager's supplied fact. Unlike the
+// general aiDraftAnswer classifier (which can decide known=none and punt to the holding), this never punts.
+async function composeReplyFromFact(question, fact, guestName, history){
+  const key=process.env.ANTHROPIC_API_KEY; if(!key) return "";
+  const first=String(guestName||"").trim().split(/\s+/)[0]||"";
+  const hasHist=(Array.isArray(history)?history:[]).some(function(m){ return m && m.d==="out"; });
+  const sys="You write ONE short guest-facing reply for Parkside Tepees (glamping tepees). A manager has ALREADY supplied the answer/fact to the guest's question below. Compose a warm, natural reply that ANSWERS the question using ONLY that fact. Do NOT invent extra details. Do NOT include a phone number, email, or link, and never say 'call/text/email us'. "
+    + (hasHist ? "This is an ONGOING conversation, so do NOT open with a greeting like 'Hi there'. " : "")
+    + "Keep it to 1-2 sentences plus a brief friendly closing. Reply with ONLY the message text — no JSON, no quotes, no preamble. NEVER say you are checking with a manager or will follow up — the manager already answered, so give the answer now.";
+  const userMsg="Guest's original question: "+String(question||"").slice(0,600)+"\nManager's supplied fact/answer (use this to answer): "+String(fact||"").slice(0,900)+(first?("\nGuest first name: "+first):"");
+  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:250,temperature:0.3,system:sys,messages:[{role:"user",content:userMsg}]})});
+    const j=await r.json(); if(!r.ok) return "";
+    let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
+    text=tidyQuotes(scrubContact(text)); if(hasHist) text=stripLeadGreeting(text);
+    return String(text||"").trim();
+  }catch(e){ return ""; }
+}
 async function reviseFromSms(req, item, extraInfo){
   extraInfo=String(extraInfo||"").trim();
   // SINGLE-RESOLUTION LOCK: never re-draft / re-open a Q that anyone already resolved (approved, rejected, or
   // closed because the front desk answered the guest directly). Protects the reservations fact-supply path too.
   try{ const _l=await getApprovals(); const _cur=_l.find(x=>x&&x.id===item.id); if(_cur && _cur.status && _cur.status!=="pending" && _cur.status!=="escalated") return {proposed:_cur.answer||_cur.proposed||"", known:"full", alreadyHandled:true, status:_cur.status}; }catch(e){}
-  const st=await getState();
-  const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
-  // Victor is only ever providing a FACT. Compose a fresh reply using the KB PLUS that fact,
-  // IN-CONTEXT ONLY (no live-KB write). NOTHING is sent to the guest here — the item is
-  // re-staged as a normal pending approval so Victor must reply "Q# yes" before it sends.
-  let proposed=null, known="full";
-  try{ const history=await getThreadLog(item.thread_id, item.booking_id);
-       const kbPlus={ format:(kb&&kb.format)||"", items:[...((kb&&kb.items)||[]), {topic:String(item.question||"").slice(0,60), a:extraInfo}] };
-       const d=await aiDraftAnswer(kbPlus, item.question, item.guest_name, await getApprovedBank(), history);
-       if(d && d.answer && !d.noKey){ proposed=String(d.answer).trim(); known=d.known||"full"; } }catch(e){}
-  // NEVER send Victor's raw text to the guest. If the AI couldn't draft, keep the prior draft and flag it.
-  if(!proposed) return {proposed:item.proposed||"", known:"full", failed:true};
+  // Compose the guest reply FROM the supplied fact with a FOCUSED composer (NOT the general classifier, which
+  // could decide known=none and punt to the "checking with my manager" holding). Answer the ORIGINAL question
+  // (firstQuestion) so later pleasantry follow-ups in the thread cannot derail it. Nothing is sent to the guest
+  // here — the item is re-staged pending; the send happens only on approval.
+  let proposed="", known="full";
+  let _history=[]; try{ _history=await getThreadLog(item.thread_id, item.booking_id); }catch(e){}
+  const _q=item.firstQuestion||item.question||"";
+  try{ proposed=await composeReplyFromFact(_q, extraInfo, item.guest_name, _history); }catch(e){}
+  // ROBUSTNESS: if the model returned nothing OR something holding-like, build a deterministic reply straight from
+  // the fact. reviseFromSms must NEVER return the holding note as the "answer".
+  if(!proposed || isHoldingLike(proposed)){ const _hasHist=(_history||[]).some(function(m){ return m && m.d==="out"; }); proposed=directReplyFromFact(item.guest_name, extraInfo, _hasHist); }
+  if(!proposed) return {proposed:"", known:"full", failed:true};
   const list=await getApprovals(); const it=list.find(x=>x.id===item.id);
   if(it){ const _now=new Date().toISOString(); it.proposed=proposed; it.status="pending"; it.escalate=false; it.factFromVictor=extraInfo; it.revisedAt=_now; it.ts=_now; it.primaryNotifiedAt=_now; await setApprovals(list); } // (note: do NOT reset escalatedTo2/backupAskSent — that re-armed the flood)
   return {proposed, known};
@@ -3319,6 +3347,9 @@ if(action==="email_recipients"){
         const _cfg=await getNotifyConfig(); const _cands=[_cfg.to2, _cfg.to].filter(Boolean);
         let _to=String(q.to||"").trim(); if(!_to || _cands.indexOf(_to)===-1) _to=_cfg.to2||_cfg.to||"";
         const _list2=await getApprovals(); const _it2=_list2.find(x=>x&&x.id===id)||it;
+        // ABSOLUTE GUARD: never send an approval email whose suggested reply is the holding note. If the composed
+        // draft is somehow empty or holding-like, FAIL LOUDLY and ask for the fact again — do NOT email a holding.
+        if(!_it2.proposed || isHoldingLike(_it2.proposed)){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "That didn’t produce a real answer yet. Please re-enter the actual fact to tell the guest (e.g. the availability, price, or specific detail) and we’ll compose the reply.")); }
         // DEDUPE the approval email: a double-submit / concurrent request must not send two "Approve & Send" emails.
         let _sendOk=true; try{ if(redis){ const _r=await redis.set("parkside:approval_email:"+id, new Date().toISOString(), {nx:true, ex:300}); _sendOk=(_r!==null && _r!==false); } }catch(e){}
         let emailed=null;
