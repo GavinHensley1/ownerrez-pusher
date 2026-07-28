@@ -165,7 +165,6 @@
     <button id="tabPricing" class="seg" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
     <button id="tabBug" class="seg" onclick="switchView('bug')">Report a Bug</button>
-    <button id="tabAudit" class="seg" onclick="switchView('audit')">Message Audit</button>
   </div>
   <span class="muted" id="horizon"></span>
   <span class="sp"></span>
@@ -414,20 +413,6 @@
     <div id="bugList" class="legend" style="margin-top:16px"></div>
   </div>
 </div>
-<!-- item AUDIT-1: READ-ONLY Message Audit view (guest <-> engine <-> Victor history). No writes. -->
-<div class="wrap" id="auditMain" style="display:none">
-  <div class="card">
-    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px;flex-wrap:wrap">
-      <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Message audit</div>
-      <div style="font-size:11.5px;color:#64758d">read-only &mdash; full guest &harr; engine &harr; Victor history</div>
-      <span style="flex:1"></span>
-      <label class="muted" style="font-size:11.5px">Days<input id="auditDays" type="number" min="1" max="60" value="10" style="width:70px;margin-left:6px" onchange="loadAudit()"></label>
-      <button class="ghost" onclick="loadAudit()">Refresh</button>
-    </div>
-    <div id="auditMeta" class="muted" style="font-size:11.5px"></div>
-  </div>
-  <div id="auditList"></div>
-</div>
 <div class="wrap" id="monMain" style="display:none">
   <!-- Full-screen centered admin lock, matching Victor's staff-access screen (presentation only; wiring unchanged) -->
   <div id="gavinGate">
@@ -445,6 +430,7 @@
     <div id="gvTabPri" class="gvtab" onclick="gvNav('pricing')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Pricing tuning</div>
     <div id="gvTabRep" class="gvtab" onclick="gvNav('conn')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Connections &amp; reports</div>
     <div id="gvTabBonus" class="gvtab" onclick="gvNav('bonus')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Bonus</div>
+    <div id="gvTabAudit" class="gvtab" onclick="gvNav('audit')" style="font-size:13px;font-weight:600;height:44px;display:flex;align-items:center;border-bottom:2px solid transparent;cursor:pointer">Message Audit</div>
     <div style="flex:1"></div>
   </div>
   <div id="gvDay" class="gv-subview">
@@ -700,6 +686,20 @@
       <a id="todoDocOpen" href="#" target="_blank" rel="noopener" style="display:none;margin-top:4px;padding:8px 14px;border-radius:8px;border:1px solid #2c3a51;color:#cfd9e8;font-size:12.5px;font-weight:600;text-decoration:none">Open the document ↗</a>
       <div id="todoDocNone" class="muted" style="font-size:12px">No document linked yet.</div>
     </div>
+  </div>
+  <!-- item #6: Message Audit lives here in the Gavin admin area (Gavin-password gated), next to Bonus. -->
+  <div id="gvAudit" class="gv-subview" style="display:none">
+    <div class="card">
+      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Message audit</div>
+        <div style="font-size:11.5px;color:#64758d">read-only &mdash; full guest &harr; engine &harr; Victor history</div>
+        <span style="flex:1"></span>
+        <label class="muted" style="font-size:11.5px">Days<input id="auditDays" type="number" min="1" max="60" value="10" style="width:70px;margin-left:6px" onchange="loadAudit()"></label>
+        <button class="ghost" onclick="loadAudit()">Refresh</button>
+      </div>
+      <div id="auditMeta" class="muted" style="font-size:11.5px"></div>
+    </div>
+    <div id="auditList"></div>
   </div>
   <div id="gvBonus" class="gv-subview" style="display:none">
     <div class="card" id="bonusOwnerCard">
@@ -1284,22 +1284,19 @@ async function loadLearning(){
 }
 let MSG_BUILT=false; let KB={format:"",items:[]}; let AUTO_ON=false, PF=[];
 function switchView(v){
-  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus', isBug=v==='bug', isAudit=v==='audit';
+  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus', isBug=v==='bug';
   document.getElementById('main').style.display=isP?'block':'none';
   document.getElementById('msgMain').style.display=isM?'block':'none';
   document.getElementById('monMain').style.display=isMon?'block':'none';
   var bg=document.getElementById('bugMain'); if(bg) bg.style.display=isBug?'block':'none';
-  var ag=document.getElementById('auditMain'); if(ag) ag.style.display=isAudit?'block':'none';
   const bm=document.getElementById('bonusMain'); if(bm) bm.style.display=isB?'grid':'none';
   document.getElementById('tabPricing').className='seg'+(isP?' on':'');
   document.getElementById('tabMsg').className='seg'+(isM?' on':'');
   const tm=document.getElementById('tabMon'); if(tm) tm.className='seg'+(isMon?' on':'');
   var tbg=document.getElementById('tabBug'); if(tbg) tbg.className='seg'+(isBug?' on':'');
-  var tag=document.getElementById('tabAudit'); if(tag) tag.className='seg'+(isAudit?' on':'');
   const tb=document.getElementById('tabBonus'); if(tb) tb.className='seg'+(isB?' on':'');
   if(isB) loadBonus();
   if(isBug) loadBugs();
-  if(isAudit) loadAudit();
   document.getElementById('horizon').style.display=isP?'':'none';
   document.getElementById('syncWrap').style.display=isP?'':'none';
   if(isP) setSyncUI();
@@ -1335,7 +1332,7 @@ function auditWhen(ts){ if(!ts) return ''; try{ return new Date(ts).toLocaleStri
 async function loadAudit(){ var el=document.getElementById('auditList'); if(!el) return; el.textContent='Loading…';
   var days=((document.getElementById('auditDays')||{}).value)||10;
   var meta=document.getElementById('auditMeta');
-  try{ var r=await fetch(api('msg_audit')+'&days='+encodeURIComponent(days)+'&cb='+Date.now(),{headers:{'x-app-password':PW}}); var j=await r.json();
+  try{ var r=await fetch(api('msg_audit')+'&days='+encodeURIComponent(days)+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json();
     var cards=(j&&j.cards)||[];
     if(meta) meta.textContent=cards.length+' interaction'+(cards.length===1?'':'s')+' in the last '+(j.days||days)+' days (newest first)';
     if(!cards.length){ el.innerHTML='<div class="card"><span class="muted">No guest interactions with a drafted/answered question in this window.</span></div>'; return; }
@@ -1398,10 +1395,11 @@ async function gavinUnlock(){
   catch(e){ err.textContent='Error: '+e.message; }
 }
 function gvNav(v){
-  var map={day:'gvDay',integrity:'gvIntegrity',pricing:'gvPricing',conn:'gvConn',bonus:'gvBonus'};
-  var tabs={day:'gvTabDay',integrity:'gvTabInt',pricing:'gvTabPri',conn:'gvTabRep',bonus:'gvTabBonus'};
+  var map={day:'gvDay',integrity:'gvIntegrity',pricing:'gvPricing',conn:'gvConn',bonus:'gvBonus',audit:'gvAudit'};
+  var tabs={day:'gvTabDay',integrity:'gvTabInt',pricing:'gvTabPri',conn:'gvTabRep',bonus:'gvTabBonus',audit:'gvTabAudit'};
   for(var k in map){ var el=document.getElementById(map[k]); if(el) el.style.display=(k===v)?'':'none';
     var t=document.getElementById(tabs[k]); if(t) t.className='gvtab'+(k===v?' on':''); }
+  if(v==='audit') loadAudit();
   if(v==='day'&&MON_MAP){ setTimeout(function(){ try{MON_MAP.invalidateSize();}catch(e){} },60); }
 }
 // item 7: auto-grade toggle now persists. Apply state, toggle+save, and restore on load

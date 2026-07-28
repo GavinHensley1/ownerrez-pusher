@@ -1276,7 +1276,19 @@ async function processGuestQuestion(req, p){
     await addPendingFact({ q:question, a:proposed, source:"auto_answer" }); // queue Q->A for KB review (not auto-added)
     return {auto_answered:true, sent:guestSend.sent===true, id:item.id, proposed, guestSend};
   }
-  // Unknown/partial OR a complaint: send the holding (apology + "checking with a manager"), then text Victor.
+  // item #1 PARTIAL: the engine HAS a KB-grounded answer (draft.answer already includes what it knows
+  // plus a short "I'll confirm the rest" line). SEND that real answer to the guest instead of overwriting
+  // it with the generic holding note, and STILL text Victor for the unknown part so the promised follow-up
+  // happens. Only genuine unknowns ("none") and complaints fall through to the generic holding below.
+  if(draft.known==="partial" && !isComplaint && draft.answer && String(draft.answer).trim()){
+    const guestSend=await sendGuestReply(enabled, {threadId, bookingId}, proposed);
+    item.status="escalated"; item.partialAnswered=true; item.holdingSent=false;
+    item.answer=proposed; item.answeredToGuest=(guestSend.sent===true);
+    list.push(item); await setApprovals(list);
+    const vsms=await sendVictorEscalationSms(req, item, {unit, guestName, partial:true});
+    return {partial_answered:true, escalated:true, sent:(guestSend.sent===true), id:item.id, victorSms:vsms};
+  }
+  // Genuinely unknown ("none") OR a complaint: send the generic holding, then text Victor.
   const hold=holdingMessage(guestName, isComplaint);
   const guestSend=await sendGuestReply(enabled, {threadId, bookingId}, hold);
   item.status="escalated"; item.proposed=hold; item.holdingSent=(guestSend.sent===true);
@@ -1295,11 +1307,13 @@ async function sendVictorEscalationSms(req, item, ctx){
   const _ctx=[unit,guestName].filter(Boolean).join(" - ");
   if(ctx.followup){
     const _nm=String(ctx.newMsg||item.question||"").replace(/\s+/g," ").trim().slice(0,220);
-    const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent another message:\n\""+_nm+"\"\n\nHow would you like me to respond? Reply \""+lbl+" <your answer>\" and I\u2019ll send you a suggested reply to approve \u2014 nothing goes to the guest until you reply \""+lbl+" yes\".";
+    const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent another message:\n\""+_nm+"\"\n\nTo answer, text: "+lbl+" then your reply. Example: "+lbl+" the unit is ready for check-in. I\u2019ll turn it into a guest reply for you to approve \u2014 nothing is sent to the guest until you reply "+lbl+" yes.";
     try{ return await sendSmsGateway(cfg, _ft); }catch(e){ return {sent:false, error:String(e.message||e)}; }
   }
   const _isComp=!!(ctx.complaint||item.complaint);
-  const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+(_isComp?" (COMPLAINT)":" (escalated)")+"\n"+_convo+"\n\n"+(_isComp?"I told the guest I'm sorry and a manager will follow up.":"I told the guest I'd check with a manager.")+" How would you like me to respond? Reply \""+lbl+" <your answer>\" and I\u2019ll send you a suggested reply to approve \u2014 nothing goes to the guest until you reply \""+lbl+" yes\".";
+  const _mid=_isComp?"I told the guest I'm sorry and a manager will follow up.":(ctx.partial?"I answered what I could and told the guest I'd confirm the rest.":"I told the guest I'd check with a manager.");
+  const _tag=_isComp?" (COMPLAINT)":(ctx.partial?" (partial \u2014 needs the rest)":" (escalated)");
+  const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+_tag+"\n"+_convo+"\n\n"+_mid+" To answer, text: "+lbl+" then your reply. Example: "+lbl+" the unit is ready for check-in. I\u2019ll turn it into a guest reply for you to approve \u2014 nothing is sent to the guest until you reply "+lbl+" yes.";
   try{ return await sendSmsGateway(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 
@@ -1313,7 +1327,21 @@ function scrubContact(text){
 }
 function holdingMessage(guestName, complaint){ const f=String(guestName||"").trim().split(/\s+/)[0];
   if(complaint) return "Hi "+(f||"there")+", I\u2019m so sorry for the trouble \u2014 that\u2019s truly not the experience we want you to have. I\u2019m getting my manager involved right now and we\u2019ll get right back to you shortly.";
-  return "Hi "+(f||"there")+"! Thanks for reaching out \u2014 I want to make sure I get you the right info, so let me check with my manager and I\u2019ll get right back to you shortly. \uD83D\uDE0A"; }
+  // item #7 (PENDING GAVIN SIGN-OFF): a STATEMENT that it's going to the manager, with NO question back to the guest.
+  return "Hi "+(f||"there")+"! Thanks for reaching out \u2014 I\u2019m checking with my manager on this and will follow up with you shortly."; }
+// item #2/#3: short, friendly FIRST-CONTACT greeting for a no-message inquiry (no question posed, kept brief).
+function firstContactGreeting(guestName){ const f=String(guestName||"").trim().split(/\s+/)[0];
+  return "Hi "+(f||"there")+"! Thanks so much for reaching out about Parkside Tepees \uD83C\uDFD5\uFE0F We\u2019d love to host you \u2014 let me know if there\u2019s anything I can help with for your stay!"; }
+// item #5: Victor sometimes types the placeholder literally ("Q9 <the answer/fact>") or wraps his real
+// answer in the angle brackets ("Q9 <the unit is ready>"). Strip a wrapping <...> and any bare placeholder
+// token so the remaining text is treated as his answer. Applied to SMS and MMS replies identically.
+function cleanVictorFact(s){
+  var t=String(s||"").replace(/\s+/g," ").trim();
+  var m=t.match(/^<\s*([\s\S]*?)\s*>$/); if(m) t=m[1].trim();
+  if(/^(the answer\s*\/?\s*fact|your answer|the answer|the fact|answer\s*\/\s*fact|answer|fact|placeholder)$/i.test(t)) return "";
+  t=t.replace(/^(the answer\s*\/?\s*fact|your answer|the answer|the fact)\b[\s:>\u2014\-]*/i,"").trim();
+  return t;
+}
 // KB-grounded draft. Returns {known:"full"|"partial"|"none", answer}. NEVER fabricates:
 // unknown parts -> say we will confirm with the manager and follow up (no guessing).
 async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
@@ -1336,6 +1364,7 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
     +"First decide how much of the guest's message the KNOWN INFO answers: 'full' (every part), 'partial' (some parts), or 'none'.\n"
     +"Match the question word to the right fact: 'where'->a location/place/address; 'when'/'what time'->a time; 'how'->a process; 'what'/'which'->the specific item. If the specific thing asked is NOT in KNOWN INFO, treat that part as UNKNOWN (do not substitute a different fact).\n"
     +"Format: ONE warm greeting line ('Hi "+(first||"there")+"!'), then the answer in 1-3 short sentences, then a brief friendly closing. No padding, no over-explaining.\n"
+    +"FIRST CONTACT: if there is no CONVERSATION SO FAR (this is the guest's first message to us), keep the reply especially brief \u2014 a short greeting plus only what's needed. Do not send a long paragraph on first contact.\n"
     +"NEVER include a phone number, email address, or external link, and never say 'call us', 'text us', or 'email us'. The channel BLOCKS messages that contain contact info, so they fail to send. Keep everything inside this message thread.\n"
     +"- full: answer every part using ONLY KNOWN INFO.\n"
     +"- partial: answer the part(s) you DO know from KNOWN INFO; for the unknown part(s) say you'll check with your manager and follow up shortly \u2014 NEVER guess it.\n"
@@ -2913,11 +2942,18 @@ if(action==="email_recipients"){
         const departure=String(e.departure||e.check_out||e.checkout||e.departure_date||"").trim();
         let question=String(e.message||e.notes||e.comments||e.body||e.content||e.text||e.question||e.guest_message||"").trim();
         const hadMessage=!!question;
-        // NEVER drop an inquiry: availability inquiries often carry no message text.
-        // Synthesize a context line so the owner still gets an approval email.
-        if(!question){
-          const ctx=[]; if(arrival) ctx.push(arrival+(departure?(" to "+departure):"")); if(guestName) ctx.push("from "+guestName);
-          question="[New inquiry — no message text] A guest submitted an inquiry"+(ctx.length?(" ("+ctx.join(", ")+")"):"")+". Reply to greet them and ask how we can help with their stay.";
+        // item #2: DEDUPE repeat inquiry events for the same guest/booking/thread within 30 minutes, so a
+        // burst of OwnerRez inquiry notifications can't spawn multiple escalations or multiple guest messages.
+        const _ikey = threadId?("t:"+threadId):(bookingId?("b:"+bookingId):("g:"+String(guestName||guestEmail||pid||"").toLowerCase().replace(/[^a-z0-9]/g,"").slice(0,40)));
+        try{ if(redis && _ikey){ const _last=await redis.get("parkside:inq_seen:"+_ikey); if(_last && (Date.now()-new Date(_last).getTime()) < 30*60*1000){ return res.status(200).json({ok:true, type:"inquiry", deduped:true, skipped:"repeat inquiry within 30m for "+_ikey}); } await redis.set("parkside:inq_seen:"+_ikey, new Date().toISOString(), {ex:6*3600}); } }catch(e){}
+        // item #2/#3: a NO-MESSAGE inquiry (availability check, no question) gets a SHORT friendly greeting
+        // auto-sent (respecting the Messaging master switch) and NEVER escalates to Victor.
+        if(!hadMessage){
+          const _st=await getState(); const _enabled=!!_st.messaging_enabled;
+          const _greet=firstContactGreeting(guestName);
+          let _gs={sent:false}; try{ _gs=await sendGuestReply(_enabled, {threadId, bookingId}, _greet); if(threadId||bookingId) await appendThreadLog(threadId, bookingId, "out", _greet, ""); }catch(e){}
+          await writeWhStatus({ranAt:new Date().toISOString(), event:"inquiry", action:act, entity_id:b.entity_id, note:"no-message inquiry -> short greeting, no escalation", hadMessage:false, arrival, departure});
+          return res.status(200).json({ok:true, type:"inquiry", greeted:true, sent:(_gs.sent===true), no_escalation:true});
         }
         await writeWhStatus({ranAt:new Date().toISOString(), event:"inquiry", action:act, entity_id:b.entity_id, entityKeys:Object.keys(e),
           guestKeys: Object.keys(g), hasThread: !!threadId, propertyId: e.property_id||e.listing_id||null, hadMessage, msgLen: question.length, arrival, departure});
@@ -3319,14 +3355,15 @@ if(action==="email_recipients"){
           else { await ackBack("Which one? Start with the label, e.g. \""+pend[0].smsLabel+" "+bodyRaw.slice(0,40)+"\"."); return res.status(200).json({need_label:true}); }
         }
       }
+      rest=cleanVictorFact(rest); // item #5: unwrap <...> / drop literal placeholder tokens before interpreting his reply
       const lbl=target.smsLabel||"Q?";
       // Auto-message escalations: the holding message already went to the guest. Victor only ever
       // provides a FACT here — it is NEVER sent to the guest directly. We draft a reply from his
       // fact and text it BACK to him; only his "Q# yes" then sends it to the guest.
       if(target.status==="escalated"){
-        if(rest===""){ await ackBack(lbl+": reply with the fact, e.g. \""+lbl+" checkout is 11am\", and I'll draft a reply for you to approve."); return res.status(200).json({need_facts:true, label:lbl}); }
+        if(rest===""){ await ackBack(lbl+": I don\u2019t have the answer yet. To answer, text: "+lbl+" then your answer. Example: "+lbl+" checkout is 11am. Nothing is sent to the guest until you reply "+lbl+" yes."); return res.status(200).json({need_facts:true, label:lbl}); }
         if(isNo(rest)){ const it2=list.find(x=>x.id===target.id); if(it2){ it2.status="closed"; it2.decidedAt=new Date().toISOString(); await setApprovals(list); } await ackBack(lbl+" closed — nothing more sent to the guest."); return res.status(200).json({closed:true, label:lbl}); }
-        if(isYes(rest)){ await ackBack(lbl+": I don't have the fact yet — reply \""+lbl+" <the answer/fact>\" and I'll draft a reply for you to approve."); return res.status(200).json({need_facts:true, label:lbl}); }
+        if(isYes(rest)){ await ackBack(lbl+": I don\u2019t have your answer yet. To answer, text: "+lbl+" then your answer. Example: "+lbl+" checkout is 11am. Nothing is sent to the guest until you reply "+lbl+" yes."); return res.status(200).json({need_facts:true, label:lbl}); }
         const rev2=await reviseFromSms(req, target, rest);
         if(rev2 && rev2.failed){ await ackBack(lbl+": couldn't draft a guest reply from that — try rephrasing the fact."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
         await ackBack(lbl+" — draft reply for the guest:\n"+String(rev2.proposed||"").slice(0,600)+"\n\nReply \""+lbl+" yes\" to send it, or text a correction. Nothing is sent until you reply yes.");
