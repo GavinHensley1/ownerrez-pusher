@@ -712,6 +712,13 @@ async function escalateStaleApprovals(req){
       if(it.status!=="pending" && it.status!=="escalated") continue; // both approval AND fact-needed items nudge the backup
       const t=Date.parse(it.primaryNotifiedAt||it.ts||"");
       if(!isFinite(t) || t>cutoff) continue;
+      // item(#3): ATOMIC one-shot guard. The sweep runs on inbound webhooks + cron + dashboard load, so concurrent
+      // invocations could each send before the escalatedTo2 flag persists (Gavin saw 3x). set-if-absent means only
+      // the FIRST caller across all sweeps sends. Expiry ~ the escalate window so a legitimate re-nudge after a
+      // re-draft (which clears escalatedTo2 + resets the timer) can still fire in a later cycle.
+      let _first=true;
+      try{ if(redis){ const _r=await redis.set("parkside:esc2_once:"+it.id, new Date().toISOString(), {nx:true, ex:Math.max(600, (cfg.escalateMins||60)*60)}); _first=(_r!==null && _r!==false); } }catch(e){}
+      if(!_first){ it.escalatedTo2=true; changed=true; continue; }
       const r=await sendApprovalEmail(req, it, cfg.to2, true);
       it.escalatedTo2=true; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=!!(r&&r.sent===true);
       changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:cfg.to2});
@@ -1101,7 +1108,7 @@ function supplyFactFormHtml(it, token, errMsg){
     +'<input type="hidden" name="step" value="draft">'
     +'<label style="color:#9fb0c0;font-size:13px">What should we tell them? <span style="color:#64748b">(just the fact — e.g. “11pm” or “early check-in is $30”)</span></label>'
     +'<textarea name="fact" autofocus style="width:100%;min-height:90px;font-size:16px;padding:12px;border-radius:10px;border:1px solid #26354a;background:#0c141d;color:#e7eef6;box-sizing:border-box;margin-top:6px" placeholder="Enter the answer / fact"></textarea>'
-    +'<button type="submit" style="width:100%;margin-top:12px;background:#2563eb;color:#fff;border:none;border-radius:10px;padding:15px;font-size:17px;font-weight:700">Write the reply</button>'
+    +'<button type="submit" style="width:100%;margin-top:12px;background:#2563eb;color:#fff;border:none;border-radius:10px;padding:15px;font-size:17px;font-weight:700">Submit this fact</button>'
     +'</form>'
     +'<p style="color:#64748b;font-size:12px;margin-top:10px">You’ll see the full reply before it goes to the guest. Nothing is sent until you confirm. (Ref '+escHtml(it.id)+')</p>'
     +'</div></body></html>';
@@ -1284,6 +1291,7 @@ async function processGuestQuestion(req, p){
   const st=await getState(); const enabled=!!st.messaging_enabled; const kb=st.kb||KB_SEED;
   const auto=await autoMessageOn();
   const history=await getThreadLog(threadId, bookingId);
+  const hasHistory=(history||[]).some(function(m){ return m && m.d==="out"; }); // have we already messaged this guest?
   await appendThreadLog(threadId, bookingId, "in", question, guestName);
   // item B: obvious pleasantry/acknowledgment ("ok", "thanks", "sounds good", a thumbs-up, ...) -> NO reply,
   // NO escalation (logged above for the record). Deterministic so the clear cases never vary. Also stops us
@@ -1314,7 +1322,7 @@ async function processGuestQuestion(req, p){
   }
   const knownFull=(draft.known==="full");
   const isComplaint=!!(draft&&draft.complaint);
-  let proposed=isComplaint?holdingMessage(guestName,true):(draft.answer||holdingMessage(guestName));
+  let proposed=isComplaint?holdingMessage(guestName,true,hasHistory):(draft.answer||holdingMessage(guestName,false,hasHistory));
   const list=await getApprovals();
   const _lbl=await nextSmsLabel();
   const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate:(!knownFull||isComplaint), complaint:isComplaint,
@@ -1347,7 +1355,7 @@ async function processGuestQuestion(req, p){
     return {partial_answered:true, escalated:true, sent:(guestSend.sent===true), id:item.id, victorSms:vsms};
   }
   // Genuinely unknown ("none") OR a complaint: send the generic holding, then text Victor.
-  const hold=holdingMessage(guestName, isComplaint);
+  const hold=holdingMessage(guestName, isComplaint, hasHistory);
   const guestSend=await sendGuestReply(enabled, {threadId, bookingId}, hold);
   item.status="escalated"; item.proposed=hold; item.holdingSent=(guestSend.sent===true);
   list.push(item); await setApprovals(list);
@@ -1387,10 +1395,21 @@ function scrubContact(text){
   t=t.replace(/[ \t]{2,}/g," ").replace(/\s+([.,!?;:])/g,"$1").replace(/\(\s*\)/g,"").trim();
   return t;
 }
-function holdingMessage(guestName, complaint){ const f=String(guestName||"").trim().split(/\s+/)[0];
-  if(complaint) return "Hi "+(f||"there")+", I\u2019m so sorry for the trouble \u2014 that\u2019s truly not the experience we want you to have. I\u2019m getting my manager involved right now and we\u2019ll get right back to you shortly.";
+function holdingMessage(guestName, complaint, hasHistory){ const f=String(guestName||"").trim().split(/\s+/)[0];
+  // GREETING RULE: only greet with "Hi there" on a genuine FIRST contact with an unknown name. In an ONGOING
+  // thread (hasHistory) with no name, skip the generic greeting entirely and just make the statement.
+  const hi = f ? ("Hi "+f+(complaint?", ":"! ")) : (hasHistory ? "" : (complaint?"Hi there, ":"Hi there! "));
+  if(complaint) return hi+"I\u2019m so sorry for the trouble \u2014 that\u2019s truly not the experience we want you to have. I\u2019m getting my manager involved right now and we\u2019ll get right back to you shortly.";
   // item #7 (APPROVED by Gavin): a STATEMENT that it's going to the manager, with NO question back to the guest.
-  return "Hi "+(f||"there")+"! Thanks for reaching out \u2014 I\u2019m checking with my manager on this and will follow up with you shortly."; }
+  return hi+"Thanks for reaching out \u2014 I\u2019m checking with my manager on this and will follow up with you shortly."; }
+// GREETING RULE (deterministic): once we are in an active thread, strip a leading "Hi/Hey/Hello [name]!,\u2014"
+// greeting from a composed reply so we never re-greet ("Hi there... Hi there..."). Never returns empty.
+function stripLeadGreeting(text){
+  var t=String(text||"");
+  var stripped=t.replace(/^\s*(hi|hey|hello)(\s+there)?(\s+[A-Za-z][A-Za-z'\-]*)?\s*[!,.\u2013\u2014-]+\s*/i, "");
+  stripped=stripped.trim();
+  return stripped ? (stripped.charAt(0).toUpperCase()+stripped.slice(1)) : t.trim();
+}
 // item #2/#3: short, friendly FIRST-CONTACT greeting for a no-message inquiry (no question posed, kept brief).
 function firstContactGreeting(guestName){ const f=String(guestName||"").trim().split(/\s+/)[0];
   return "Hi "+(f||"there")+"! Thanks so much for reaching out about Parkside Tepees \uD83C\uDFD5\uFE0F We\u2019d love to host you \u2014 let me know if there\u2019s anything I can help with for your stay!"; }
@@ -1422,6 +1441,7 @@ function cleanVictorFact(s){
 // KB-grounded draft. Returns {known:"full"|"partial"|"none", answer}. NEVER fabricates:
 // unknown parts -> say we will confirm with the manager and follow up (no guessing).
 async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
+  const _hasHist=(Array.isArray(history)?history:[]).some(function(m){ return m && m.d==="out"; }); // already messaged this guest?
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return {known:"none", answer:holdingMessage(guestName), noKey:true};
   const kbFacts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a);
   const bankFacts=((approvedBank)||[]).filter(e=>e&&String(e.a||"").trim()).map(e=>"- "+(e.q?("(previously asked: "+String(e.q).slice(0,70)+") "):"")+String(e.a).trim());
@@ -1444,8 +1464,9 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
     +"CONSERVATIVE RULE: if you are unsure whether a message needs a response, set needs_response=true (better to escalate to a human than to ignore a guest) \u2014 EXCEPT for the obvious pleasantries in (a), which get no reply.\n"
     +"First decide how much of the guest's message the KNOWN INFO answers: 'full' (every part), 'partial' (some parts), or 'none'.\n"
     +"Match the question word to the right fact: 'where'->a location/place/address; 'when'/'what time'->a time; 'how'->a process; 'what'/'which'->the specific item. If the specific thing asked is NOT in KNOWN INFO, treat that part as UNKNOWN (do not substitute a different fact).\n"
-    +"Format: ONE warm greeting line ('Hi "+(first||"there")+"!'), then the answer in 1-3 short sentences, then a brief friendly closing. No padding, no over-explaining.\n"
-    +"FIRST CONTACT: if there is no CONVERSATION SO FAR (this is the guest's first message to us), keep the reply especially brief \u2014 a short greeting plus only what's needed. Do not send a long paragraph on first contact.\n"
+    +"Format: keep the reply to 1-3 short sentences plus a brief friendly closing. No padding, no over-explaining.\n"
+    +"GREETING RULE (important): open with a greeting ONLY on genuine FIRST contact. If there is CONVERSATION SO FAR below \u2014 i.e. we have already been messaging this guest \u2014 do NOT re-greet; answer directly (you may use their first name naturally). A bare 'Hi there!' is ONLY for a true first contact with an unknown name; NEVER say 'Hi there' when we have already been talking with this guest.\n"
+    +"FIRST CONTACT: if there is no CONVERSATION SO FAR (the guest's first message to us), keep it especially brief \u2014 a short greeting plus only what's needed; no long paragraph.\n"
     +"NEVER include a phone number, email address, or external link, and never say 'call us', 'text us', or 'email us'. The channel BLOCKS messages that contain contact info, so they fail to send. Keep everything inside this message thread.\n"
     +"- full: answer every part using ONLY KNOWN INFO.\n"
     +"- partial: answer the part(s) you DO know from KNOWN INFO; for the unknown part(s) say you'll check with your manager and follow up shortly \u2014 NEVER guess it.\n"
@@ -1458,7 +1479,7 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
   try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:350,temperature:0.2,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return {known:"none", answer:holdingMessage(guestName), error:JSON.stringify(j).slice(0,200)};
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
-    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; const needs_response=(o.needs_response===false)?false:true; const complaint=(o.complaint===true); let answer=tidyQuotes(scrubContact(String(o.answer||"").trim())); if(!answer) answer=holdingMessage(guestName, complaint); return {known, answer, needs_response, complaint}; }
+    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; const needs_response=(o.needs_response===false)?false:true; const complaint=(o.complaint===true); let answer=tidyQuotes(scrubContact(String(o.answer||"").trim())); if(!answer) answer=holdingMessage(guestName, complaint, _hasHist); else if(_hasHist && (known==="full"||known==="partial")) answer=stripLeadGreeting(answer); return {known, answer, needs_response, complaint}; }
     catch{ return {known:"none", answer:holdingMessage(guestName)}; }
   }catch(e){ return {known:"none", answer:holdingMessage(guestName), error:String(e.message||e)}; }
 }
@@ -3273,11 +3294,17 @@ if(action==="email_recipients"){
         if(rev && rev.alreadyHandled){ res.statusCode=200; return res.end(htmlPage("Already handled ✓","This was already handled by someone else. The guest was not messaged twice.")); }
         const draft=(rev && rev.proposed && !rev.failed)?String(rev.proposed):"";
         if(!draft){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Couldn’t draft a reply from that — try rephrasing the fact.")); }
-        // reviseFromSms has re-staged the item to 'pending' with proposed=draft. Email that draft for approval,
-        // back to the same contact this escalation went to (validated to a configured address).
+        // #4 FIX: reviseFromSms re-staged the item to 'pending' with proposed=draft in a SEPARATE list copy, so the
+        // 'it' fetched at the top is STALE (still status 'escalated' + old holding) — passing it made sendApprovalEmail
+        // render the wrong (esc2 'answer this') template, not the approval email, so the real approval email only
+        // arrived later from a sweep (the ~8-min lag). RE-FETCH the fresh item and send the approval email INLINE,
+        // awaited, right now. Also mark it emailed (+ set the one-shot key) so the sweep can't duplicate it.
         const _cfg=await getNotifyConfig(); const _cands=[_cfg.to2, _cfg.to].filter(Boolean);
         let _to=String(q.to||"").trim(); if(!_to || _cands.indexOf(_to)===-1) _to=_cfg.to2||_cfg.to||"";
-        let emailed=null; try{ emailed=await sendApprovalEmail(req, it, _to, false, {hideReject:true}); }catch(e){ emailed={sent:false, error:String(e.message||e)}; }
+        const _list2=await getApprovals(); const _it2=_list2.find(x=>x&&x.id===id)||it;
+        let emailed=null; try{ emailed=await sendApprovalEmail(req, _it2, _to, false, {hideReject:true}); }catch(e){ emailed={sent:false, error:String(e.message||e)}; }
+        try{ _it2.escalatedTo2=true; _it2.escalatedTo2At=new Date().toISOString(); _it2.escalatedTo2Sent=!!(emailed&&emailed.sent); await setApprovals(_list2); }catch(e){}
+        try{ if(redis) await redis.set("parkside:esc2_once:"+id, new Date().toISOString(), {ex:Math.max(600,(_cfg.escalateMins||60)*60)}); }catch(e){}
         const _ok=!!(emailed && emailed.sent);
         res.statusCode=200; return res.end(htmlPage("Got it — reply drafted"+(_ok?" ✓":""),
           _ok ? "Thanks! We drafted a reply from that and just emailed it to you. Open that new email and tap “Approve & Send” to send it to the guest. Nothing goes to the guest until you approve."
