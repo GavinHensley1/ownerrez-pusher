@@ -1238,8 +1238,12 @@ async function processGuestQuestion(req, p){
   const auto=await autoMessageOn();
   const history=await getThreadLog(threadId, bookingId);
   await appendThreadLog(threadId, bookingId, "in", question, guestName);
+  // item B: obvious pleasantry/acknowledgment ("ok", "thanks", "sounds good", a thumbs-up, ...) -> NO reply,
+  // NO escalation (logged above for the record). Deterministic so the clear cases never vary. Also stops us
+  // from forwarding a bare "thanks" to Victor when an escalation is open.
+  if(isObviousPleasantry(question)){ return {no_response_needed:true, pleasantry:true, question}; }
   const draft=await aiDraftAnswer(kb, question, guestName, await getApprovedBank(), history);
-  // Skip messages that don't need a reply (thank-you / acknowledgment). No send, no escalation.
+  // Skip messages the AI classifies as pure acknowledgment (no question / no actionable content).
   if(draft && draft.needs_response===false){ return {no_response_needed:true, question}; }
   // If this thread already has an OPEN escalation (a manager is already handling it), do NOT
   // send another "checking with my manager" holding. Stay quiet to the guest and just forward
@@ -1294,7 +1298,11 @@ async function processGuestQuestion(req, p){
   item.status="escalated"; item.proposed=hold; item.holdingSent=(guestSend.sent===true);
   list.push(item); await setApprovals(list);
   const vsms=await sendVictorEscalationSms(req, item, {unit, guestName, complaint:isComplaint});
-  return {escalated:true, complaint:isComplaint, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms};
+  // item B: a COMPLAINT also emails the PRIMARY contact (Gavin) right away so it reaches him immediately,
+  // instead of only nudging the backup/front-desk after escalateMins. (Email only; nothing extra to the guest.)
+  let complaintEmail=null;
+  if(isComplaint){ try{ const _cfg=await getNotifyConfig(); if(_cfg.to){ complaintEmail=await sendApprovalEmail(req, item, _cfg.to, false); item.complaintEmailedTo=_cfg.to; item.complaintEmailedSent=!!(complaintEmail&&complaintEmail.sent); await setApprovals(list); } }catch(e){} }
+  return {escalated:true, complaint:isComplaint, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms, complaintEmail:complaintEmail};
 }
 async function sendVictorEscalationSms(req, item, ctx){
   ctx=ctx||{};
@@ -1332,6 +1340,21 @@ function holdingMessage(guestName, complaint){ const f=String(guestName||"").tri
 // item #2/#3: short, friendly FIRST-CONTACT greeting for a no-message inquiry (no question posed, kept brief).
 function firstContactGreeting(guestName){ const f=String(guestName||"").trim().split(/\s+/)[0];
   return "Hi "+(f||"there")+"! Thanks so much for reaching out about Parkside Tepees \uD83C\uDFD5\uFE0F We\u2019d love to host you \u2014 let me know if there\u2019s anything I can help with for your stay!"; }
+// item B: obvious pleasantries / acknowledgments (no question, no problem) get NO reply. This is a NARROW,
+// conservative fast-path (short filler-only messages) so we never depend on model variance for the clear cases;
+// anything not caught here still goes to the AI classifier, which prefers escalate-over-ignore when unsure.
+function isObviousPleasantry(text){
+  var raw=String(text||"").trim();
+  if(!raw) return true;                                   // empty
+  if(/\?/.test(raw)) return false;                        // any question mark -> not pure filler
+  var letters=raw.toLowerCase().replace(/[^a-z\s]/g," ").replace(/\s+/g," ").trim();
+  if(!letters){ return /[\u{1F000}-\u{1FAFF}\u2600-\u27BF\u2764\uFE0F\u{1F44D}]/u.test(raw) || /^[\s\p{P}]+$/u.test(raw); } // emoji/punctuation only (e.g. a thumbs-up)
+  var words=letters.split(" ").filter(Boolean);
+  if(words.length>4) return false;                        // keep it to short acknowledgments only
+  if(/\b(cancel|refund|leak|leaking|broke|broken|late|early|help|need|issue|problem|dirty|bug|bugs|smell|cold|hot|lost|stuck|emergency|complain|wrong|not|isn|doesn|won|cant|cannot)\b/.test(letters)) return false;
+  var FILLER=new Set(["ok","okay","okey","k","kk","thanks","thank","thankyou","thx","ty","tysm","great","perfect","perfectly","awesome","cool","nice","gotcha","gotit","got","it","yes","yep","yeah","yup","sure","alright","allright","fine","understood","noted","cheers","bet","word","sounds","sound","good","appreciate","appreciated","appreciate","you","u","so","very","much","really","will","do","that","much","thumbs","up"]);
+  return words.every(function(w){ return FILLER.has(w); });
+}
 // item #5: Victor sometimes types the placeholder literally ("Q9 <the answer/fact>") or wraps his real
 // answer in the angle brackets ("Q9 <the unit is ready>"). Strip a wrapping <...> and any bare placeholder
 // token so the remaining text is treated as his answer. Applied to SMS and MMS replies identically.
@@ -1359,8 +1382,12 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
   const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). Your reply may be sent to the guest automatically, so it must be correct and grounded ONLY in known info. "
     +"Use ONLY the KNOWN INFO below. NEVER invent, guess, infer, or substitute a different fact. Keep the reply SHORT.\n"
     +"The KNOWN INFO entries (including previously-approved answers) are REFERENCE FACTS, NOT templates. COMPOSE a fresh reply tailored to exactly what THIS guest asked, pulling only the relevant fact(s). Do NOT paste a whole prior answer that does not match what was asked.\n"
-    +"FIRST decide if this newest guest message needs a reply at all. A pure acknowledgment or pleasantry that asks for nothing \u2014 e.g. 'thank you', 'thanks!', 'ok', 'great', 'sounds good', 'perfect', 'got it', 'awesome', an emoji/thumbs-up \u2014 does NOT need a reply: set needs_response=false. If it asks a question, makes a request, reports a problem, or expects an answer, set needs_response=true.\n"
+    +"FIRST classify this newest guest message into exactly one intent and set the flags accordingly:\n"
+    +"  (a) PLEASANTRY / ACKNOWLEDGMENT that asks for nothing and needs no action \u2014 e.g. 'thank you', 'thanks!', 'ok', 'okay', 'k', 'great', 'sounds good', 'perfect', 'got it', 'awesome', 'will do', 'no worries', a lone emoji/thumbs-up. Set needs_response=false. (When in doubt whether it is JUST filler, treat it as needing a response.)\n"
+    +"  (b) QUESTION or REQUEST \u2014 it asks something or wants us to do/confirm something. Set needs_response=true and answer per the KNOWN INFO rules below.\n"
+    +"  (c) COMPLAINT or ACTIONABLE STATEMENT that needs action even though it may NOT be phrased as a question and may have NO question mark \u2014 e.g. 'the tepee is leaking', 'the AC isn't working', 'there are bugs', 'we're running late', 'we need to cancel', 'we're checking out early', 'the code didn't work'. Set needs_response=true. Do NOT ignore a message just because it is a statement rather than a question.\n"
     +"COMPLAINT DETECTION: set complaint=true if the guest reports a problem or is upset \u2014 e.g. something broken/leaking/dirty, bugs/pests, bad smell, a safety issue, or asks for a refund, credit, compensation, or to leave early. Otherwise complaint=false. When complaint=true be empathetic: apologize for the trouble and say a manager will follow up; do NOT say 'great question' and do NOT use a cheerful emoji.\n"
+    +"CONSERVATIVE RULE: if you are unsure whether a message needs a response, set needs_response=true (better to escalate to a human than to ignore a guest) \u2014 EXCEPT for the obvious pleasantries in (a), which get no reply.\n"
     +"First decide how much of the guest's message the KNOWN INFO answers: 'full' (every part), 'partial' (some parts), or 'none'.\n"
     +"Match the question word to the right fact: 'where'->a location/place/address; 'when'/'what time'->a time; 'how'->a process; 'what'/'which'->the specific item. If the specific thing asked is NOT in KNOWN INFO, treat that part as UNKNOWN (do not substitute a different fact).\n"
     +"Format: ONE warm greeting line ('Hi "+(first||"there")+"!'), then the answer in 1-3 short sentences, then a brief friendly closing. No padding, no over-explaining.\n"
@@ -2920,6 +2947,12 @@ if(action==="email_recipients"){
       }
       // We handle guest messages (thread_message) AND pre-booking inquiries (inquiry).
       if(etype!=="thread_message" && etype!=="inquiry"){ await writeWhStatus({ranAt:new Date().toISOString(), event:"ignored", entity_type:etype}); return res.status(200).json({ok:true, ignored:"entity_type "+etype}); }
+      // item A: DRIVE the 60-minute backup escalation from live inbound traffic. The sweep is also on the
+      // poll_messages cron, but that cron may not fire on the current plan; running it here guarantees that a
+      // still-unanswered escalation reaches the configured backup/front-desk contact (victorEmail2) within one
+      // inbound webhook of the 60-min mark. escalateStaleApprovals is idempotent (marks escalatedTo2) so it
+      // never double-sends. Non-fatal.
+      try{ await escalateStaleApprovals(req); }catch(e){}
 
       // De-dupe by payload id (mark seen BEFORE processing so retries skip).
       const pid=String(b.id||b.entity_id||"");
