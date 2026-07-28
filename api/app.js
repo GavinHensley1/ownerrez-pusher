@@ -3015,7 +3015,35 @@ if(action==="email_recipients"){
 
       const msgBody=String(e.body||e.message||e.content||e.text||"").trim();
       if(isDraft) return res.status(200).json({ok:true, ignored:"draft"});
-      if(!inboundRole){ try{ if(role && msgBody) await appendThreadLog(threadId, bookingId, "out", msgBody, ""); }catch(e2){} return res.status(200).json({ok:true, logged_outbound:!!(role&&msgBody), ignored_for_reply:"from_role="+(e.from_role||"")}); }
+      if(!inboundRole){
+        // Outbound on this thread — either the ENGINE's own send (OwnerRez echoes it back to us) OR a HUMAN
+        // replying to the guest directly in OwnerRez (front desk / owner). Log it; and if it is a human reply
+        // (NOT an echo of a message the engine already sent), CLOSE any open escalation/approval on this thread
+        // so a later "Q# yes"/fact from Victor can NEVER send the guest a SECOND message. Single resolution
+        // across the Victor <-> front-desk boundary. We only close items older than 60s so the engine's own
+        // holding-message echo (which arrives seconds after we open the escalation) can never self-close it.
+        let closedExternally=[];
+        try{
+          const _norm=function(x){ return String(x||"").replace(/\s+/g," ").trim(); };
+          const _nb=_norm(msgBody);
+          const _log=await getThreadLog(threadId, bookingId);
+          const _engineSent = !!_nb && _log.some(function(m){ return m && m.d==="out" && _norm(m.b)===_nb; });
+          if(role && msgBody) await appendThreadLog(threadId, bookingId, "out", msgBody, "");
+          if(_nb && !_engineSent && (threadId||bookingId)){
+            const _al=await getApprovals(); let _ch=false; const _cut=Date.now()-60000;
+            for(const it of _al){ if(!it) continue;
+              if((it.status==="pending"||it.status==="escalated")
+                 && ((threadId&&it.thread_id===threadId)||(bookingId&&String(it.booking_id)===String(bookingId)))
+                 && (Date.parse(it.primaryNotifiedAt||it.ts||"")||0) < _cut){
+                it.status="closed"; it.decidedAt=new Date().toISOString(); it.closedExternally=true; it.closedBy=String(e.from_role||"staff"); it.externalReply=_nb.slice(0,300);
+                _ch=true; closedExternally.push(it.smsLabel||it.id);
+              }
+            }
+            if(_ch) await setApprovals(_al);
+          }
+        }catch(e2){}
+        return res.status(200).json({ok:true, logged_outbound:!!(role&&msgBody), closedExternally:closedExternally, ignored_for_reply:"from_role="+(e.from_role||"")});
+      }
 
       const question=msgBody;
       if(!question) return res.status(200).json({ok:true, ignored:"no text"});
@@ -3398,6 +3426,13 @@ if(action==="email_recipients"){
       }
       rest=cleanVictorFact(rest); // item #5: unwrap <...> / drop literal placeholder tokens before interpreting his reply
       const lbl=target.smsLabel||"Q?";
+      // SINGLE-RESOLUTION LOCK: if this Q# was already resolved by ANYONE — approved/sent, rejected, or CLOSED
+      // because the front desk answered the guest directly in OwnerRez — do NOT act again (no re-draft, no send).
+      // Tell Victor it's handled. This is what guarantees one-and-only-one guest message per escalation.
+      if(target.status && target.status!=="pending" && target.status!=="escalated"){
+        await ackBack(lbl+" was already handled ("+target.status+(target.closedExternally?", the front desk answered the guest directly":"")+"). Nothing more was sent to the guest.");
+        return res.status(200).json({ok:true, already:target.status, label:lbl, closedExternally:!!target.closedExternally});
+      }
       // Auto-message escalations: the holding message already went to the guest. Victor only ever
       // provides a FACT here — it is NEVER sent to the guest directly. We draft a reply from his
       // fact and text it BACK to him; only his "Q# yes" then sends it to the guest.
