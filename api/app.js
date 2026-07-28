@@ -679,10 +679,10 @@ async function sendApprovalEmail(req, item, toAddr, isEsc, opts){ opts=opts||{};
   const unit=item.unit||""; const guestName=item.guest_name||""; const proposed=item.proposed||"";
   const esc2=(item.status==="escalated"); // waiting on a FACT from Victor (no draft to approve yet)
   let threadHtml=""; try{ threadHtml=await renderThread(item, await getApprovals()); }catch(e){}
-  const subject=(isEsc?"No text reply - 2nd notice: ":"")+(esc2?"Guest question needs info":"Parkside approval needed")+(unit?(" - "+unit):"");
+  const subject=(esc2?"Guest question needs info":"Parkside approval needed")+(unit?(" - "+unit):""); // item: removed the "No text reply/2nd notice" concept — this system never escalates on non-response.
   const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
   const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
-    +(isEsc?'<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:12px 14px;margin:0 0 14px;color:#991b1b;font-size:14px"><b>No response to the text within the time limit - escalated to you.</b></div>':'')
+    +'' /* item: removed the "No response to the text within the time limit" banner — this system does not act on non-response */
     +'<h2 style="margin:0 0 8px">Guest message - approval needed</h2>'
     +(unit?'<div style="color:#64748b;font-size:13px">Unit: <b>'+escHtml(unit)+'</b></div>':'')
     +(guestName?'<div style="color:#64748b;font-size:13px">Guest: <b>'+escHtml(guestName)+'</b></div>':'')
@@ -705,29 +705,42 @@ async function escalateStaleApprovals(req){
     const cfg=await getNotifyConfig();
     if(!cfg.to2) return {escalated:0, reason:"no backup email set"};
     if(!cfg.apiKey||!cfg.from) return {escalated:0, reason:"backup email not configured (need Resend key + From)"};
-    const cutoff=Date.now()-cfg.escalateMins*60*1000;
-    const list=await getApprovals(); let changed=false; const done=[];
+    const now=Date.now();
+    const windowMs=(cfg.escalateMins||60)*60*1000;                 // must be OLDER than this (past the answer timer)
+    const maxAgeMs=Math.max(3*3600*1000, windowMs+3600*1000);       // but NEVER older than this — HARD recency guard, no backlog blast
+    const cutoff=now-windowMs;
+    const list=await getApprovals(); let changed=false; const done=[]; let neutralized=0;
     for(const it of list){
       if(!it) continue;
-      // ONE CLEAN FLOW: the backup contact gets EXACTLY ONE "Answer this - supply the fact" email per UNKNOWN-FACT
-      // (escalated) item. PENDING items (a draft awaiting approval) are handled by the supply-fact approval email
-      // and are NEVER nudged here — nudging pending items was the source of the flood AND of the "approval needed
-      // with the holding note as the suggested reply" emails Gavin saw.
+      // Only a genuinely-OPEN unknown-fact item (guest asked; we sent a holding; we still owe a real answer).
       if(it.status!=="escalated") continue;
-      if(it.backupAskSent) continue;                         // PERMANENT one-shot; reviseFromSms does NOT reset this
       const t=Date.parse(it.primaryNotifiedAt||it.ts||"");
-      if(!isFinite(t) || t>cutoff) continue;
-      // ATOMIC one-shot across concurrent sweeps (inbound webhooks + cron + dashboard load), with a LONG expiry so
-      // a short escalateMins can never let the same ask re-fire.
+      if(!isFinite(t)) continue;
+      // (1) HARD RECENCY GUARD: anything older than maxAge is BACKLOG — NEVER escalate. Mark it permanently
+      // ineligible so the old backlog (days-old, already-handled records) can never blast the backup again.
+      if((now-t) > maxAgeMs){ if(!it.backupAskSent){ it.backupAskSent=true; it.backupSkippedStale=true; changed=true; neutralized++; } continue; }
+      if(it.backupAskSent) continue;                         // already asked once (permanent)
+      if(t > cutoff) continue;                               // not past the answer timer yet
+      // (2) ALREADY-REPLIED GUARD: if we have sent the guest a REAL reply (any outbound to them that is NOT our
+      // holding note) after their question, it is HANDLED — never escalate. A guest going silent after OUR message
+      // is NOT an action for this system; we only act when the GUEST still needs a reply FROM us.
+      let handled=false;
+      try{ const _log=await getThreadLog(it.thread_id, it.booking_id);
+        const _norm=function(x){ return String(x||"").replace(/\s+/g," ").trim(); };
+        const _hold=_norm(it.firstProposed||it.proposed||"");
+        for(const m of (_log||[])){ if(m && m.d==="out"){ const _b=_norm(m.b); if(_b && _b!==_hold){ handled=true; break; } } }
+      }catch(e){}
+      if(handled){ it.backupAskSent=true; it.backupSkippedHandled=true; changed=true; continue; }
+      // ATOMIC one-shot across concurrent sweeps (inbound webhooks + cron + dashboard load), 30-day expiry.
       let _first=true;
       try{ if(redis){ const _r=await redis.set("parkside:backup_ask:"+it.id, new Date().toISOString(), {nx:true, ex:30*24*3600}); _first=(_r!==null && _r!==false); } }catch(e){}
       if(!_first){ it.backupAskSent=true; changed=true; continue; }
-      const r=await sendApprovalEmail(req, it, cfg.to2, false);   // isEsc=false: clean "Guest question needs info" subject (this is the first & only email)
+      const r=await sendApprovalEmail(req, it, cfg.to2, false);   // clean "Guest question needs info" subject (first & only email)
       it.backupAskSent=true; it.escalatedTo2=true; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=!!(r&&r.sent===true);
       changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:cfg.to2});
     }
     if(changed) await setApprovals(list);
-    return {escalated:done.length, mins:cfg.escalateMins, items:done};
+    return {escalated:done.length, neutralized:neutralized, maxAgeH:Math.round(maxAgeMs/3600000), mins:cfg.escalateMins, items:done};
   }catch(e){ return {error:String(e.message||e)}; }
 }
 // Auto-resolve: any approval still pending after 24h becomes Rejected (nothing sent to guest).
