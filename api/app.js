@@ -675,6 +675,7 @@ async function sendApprovalEmail(req, item, toAddr, isEsc){
   const base=origin+"/api/app?action=approve&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const yes=base+"&decision=yes", no=base+"&decision=no";
   const editUrl=origin+"/api/app?action=edit_approval&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
+  const supplyUrl=origin+"/api/app?action=supply_fact&id="+encodeURIComponent(item.id)+"&token="+encodeURIComponent(secret);
   const unit=item.unit||""; const guestName=item.guest_name||""; const proposed=item.proposed||"";
   const esc2=(item.status==="escalated"); // waiting on a FACT from Victor (no draft to approve yet)
   let threadHtml=""; try{ threadHtml=await renderThread(item, await getApprovals()); }catch(e){}
@@ -689,8 +690,9 @@ async function sendApprovalEmail(req, item, toAddr, isEsc){
     +'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:4px 12px">'+threadHtml+'</div>'
     +'<div style="margin:14px 0 6px;font-size:12px;color:#64748b;text-transform:uppercase">'+(esc2?"What happened":"Suggested reply")+'</div>'
     +(esc2
-       ? '<div style="background:#fff8e1;border:1px solid #fcd34d;border-radius:10px;padding:10px 12px;font-size:14px;color:#0f172a">The engine did not know the answer, so it sent the guest a short holding message and texted <b>'+escHtml(item.smsLabel||"the manager")+'</b> for the info. No answer has been sent to the guest yet. Text the fact to <b>'+escHtml(item.smsLabel||"that item")+'</b> from your phone (e.g. &ldquo;'+escHtml(item.smsLabel||"Q1")+' checkout is 11am&rdquo;) and a reply will be drafted for approval.</div>'
-         +'<p style="color:#94a3b8;font-size:12px;margin-top:12px">Nothing is sent to the guest until a reply is drafted and approved. (Ref '+escHtml(item.id)+')</p></div>'
+       ? '<div style="background:#fff8e1;border:1px solid #fcd34d;border-radius:10px;padding:10px 12px;font-size:14px;color:#0f172a">The assistant doesn’t have this answer yet. Click below and tell it the fact — it will write the full reply and send it to the guest. You don’t need to write the whole message.</div>'
+         +'<div style="margin:18px 0">'+btn(supplyUrl,"#2563eb","Answer this — supply the fact")+'</div>'
+         +'<p style="color:#94a3b8;font-size:12px">Type just the fact (e.g. “11pm” or “early check-in is $30”), review the reply, then send. Nothing goes to the guest until you confirm. It’s also gone to Victor by text. (Ref '+escHtml(item.id)+')</p></div>'
        : '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:14px;white-space:pre-wrap">'+(proposed?escHtml(proposed):'<i>No suggested reply</i>')+'</div>'
          +'<div style="margin:18px 0">'+btn(yes,"#16a34a","Approve & Send")+btn(editUrl,"#2563eb","Edit")+btn(no,"#dc2626","Reject")+'</div>'
          +'<p style="color:#94a3b8;font-size:12px">Approve sends this reply to the guest. Reject sends nothing. (Ref '+escHtml(item.id)+')</p></div>');
@@ -1077,6 +1079,51 @@ function editPageHtml(it, token, unit, guestName, errMsg){
     +'<button type="submit" style="width:100%;margin-top:12px;background:#16a34a;color:#fff;border:none;border-radius:10px;padding:15px;font-size:17px;font-weight:700">Send reply to guest</button>'
     +'</form>'
     +'<p style="color:#64748b;font-size:12px;margin-top:10px">Sending replies to the guest via OwnerRez and saves this exact answer so similar questions suggest it next time. (Ref '+escHtml(it.id)+')</p>'
+    +'</div></body></html>';
+}
+// item RES: RESERVATIONS/front-desk FACT-SUPPLY pages. The email links here for an UNKNOWN-fact escalation:
+// they type just the fact, the model writes the full guest reply, they review and send. Same design as
+// Victor's "Q# <fact>" flow, routed through decideApproval so it can never double-send with Victor.
+function supplyFactFormHtml(it, token, errMsg){
+  const action='/api/app?action=supply_fact&id='+encodeURIComponent(it.id)+'&token='+encodeURIComponent(token||'');
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Answer the guest</title></head>'
+    +'<body style="font-family:-apple-system,Arial,Helvetica,sans-serif;background:#0f1720;color:#e7eef6;margin:0;padding:16px">'
+    +'<div style="max-width:560px;margin:0 auto">'
+    +'<h1 style="font-size:20px;margin:6px 0 4px 0">A guest needs an answer</h1>'
+    +'<div style="color:#9fb0c0;font-size:13px;margin-bottom:12px">Tell us the fact and the assistant writes the full reply and sends it — you don’t need to write the whole message.</div>'
+    +(it.guest_name?'<div style="color:#9fb0c0;font-size:13px">Guest: <b style="color:#e7eef6">'+escHtml(it.guest_name)+'</b></div>':'')
+    +(it.unit?'<div style="color:#9fb0c0;font-size:13px">Unit: <b style="color:#e7eef6">'+escHtml(it.unit)+'</b></div>':'')
+    +'<div style="background:#16212e;border:1px solid #26354a;border-radius:10px;padding:12px 14px;margin:12px 0">'
+    +'<div style="color:#9fb0c0;font-size:12px;margin-bottom:4px;text-transform:uppercase">Guest asked</div>'
+    +'<div style="font-size:16px">'+escHtml(it.question||"")+'</div></div>'
+    +(errMsg?'<div style="color:#f87171;font-size:13px;margin:6px 0">'+escHtml(errMsg)+'</div>':'')
+    +'<form method="POST" action="'+action+'">'
+    +'<input type="hidden" name="step" value="draft">'
+    +'<label style="color:#9fb0c0;font-size:13px">What should we tell them? <span style="color:#64748b">(just the fact — e.g. “11pm” or “early check-in is $30”)</span></label>'
+    +'<textarea name="fact" autofocus style="width:100%;min-height:90px;font-size:16px;padding:12px;border-radius:10px;border:1px solid #26354a;background:#0c141d;color:#e7eef6;box-sizing:border-box;margin-top:6px" placeholder="Enter the answer / fact"></textarea>'
+    +'<button type="submit" style="width:100%;margin-top:12px;background:#2563eb;color:#fff;border:none;border-radius:10px;padding:15px;font-size:17px;font-weight:700">Write the reply</button>'
+    +'</form>'
+    +'<p style="color:#64748b;font-size:12px;margin-top:10px">You’ll see the full reply before it goes to the guest. Nothing is sent until you confirm. (Ref '+escHtml(it.id)+')</p>'
+    +'</div></body></html>';
+}
+function supplyFactReviewHtml(it, token, fact, draft, errMsg){
+  const action='/api/app?action=supply_fact&id='+encodeURIComponent(it.id)+'&token='+encodeURIComponent(token||'');
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Review & send</title></head>'
+    +'<body style="font-family:-apple-system,Arial,Helvetica,sans-serif;background:#0f1720;color:#e7eef6;margin:0;padding:16px">'
+    +'<div style="max-width:560px;margin:0 auto">'
+    +'<h1 style="font-size:20px;margin:6px 0 12px 0">Review the reply</h1>'
+    +'<div style="background:#16212e;border:1px solid #26354a;border-radius:10px;padding:12px 14px;margin:12px 0">'
+    +'<div style="color:#9fb0c0;font-size:12px;margin-bottom:4px;text-transform:uppercase">Guest asked</div>'
+    +'<div style="font-size:15px">'+escHtml(it.question||"")+'</div></div>'
+    +(errMsg?'<div style="color:#f87171;font-size:13px;margin:6px 0">'+escHtml(errMsg)+'</div>':'')
+    +'<form method="POST" action="'+action+'">'
+    +'<input type="hidden" name="step" value="send">'
+    +'<input type="hidden" name="fact" value="'+escHtml(String(fact||"")).replace(/"/g,'&quot;')+'">'
+    +'<label style="color:#9fb0c0;font-size:13px">This will be sent to the guest (edit if needed):</label>'
+    +'<textarea name="answer" style="width:100%;min-height:150px;font-size:16px;padding:12px;border-radius:10px;border:1px solid #26354a;background:#0c141d;color:#e7eef6;box-sizing:border-box;margin-top:6px">'+escHtml(draft||"")+'</textarea>'
+    +'<button type="submit" style="width:100%;margin-top:12px;background:#16a34a;color:#fff;border:none;border-radius:10px;padding:15px;font-size:17px;font-weight:700">Send to guest</button>'
+    +'</form>'
+    +'<p style="color:#64748b;font-size:12px;margin-top:10px">Sends this reply to the guest via OwnerRez. (Ref '+escHtml(it.id)+')</p>'
     +'</div></body></html>';
 }
 
@@ -1512,6 +1559,9 @@ function findByLabel(list, label){
 // Owner texted a correction for a pending item: fold the new info into the KB, re-draft, record the correction, re-stage.
 async function reviseFromSms(req, item, extraInfo){
   extraInfo=String(extraInfo||"").trim();
+  // SINGLE-RESOLUTION LOCK: never re-draft / re-open a Q that anyone already resolved (approved, rejected, or
+  // closed because the front desk answered the guest directly). Protects the reservations fact-supply path too.
+  try{ const _l=await getApprovals(); const _cur=_l.find(x=>x&&x.id===item.id); if(_cur && _cur.status && _cur.status!=="pending" && _cur.status!=="escalated") return {proposed:_cur.answer||_cur.proposed||"", known:"full", alreadyHandled:true, status:_cur.status}; }catch(e){}
   const st=await getState();
   const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
   // Victor is only ever providing a FACT. Compose a fresh reply using the KB PLUS that fact,
@@ -3197,6 +3247,42 @@ if(action==="email_recipients"){
       if(!it){ res.statusCode=200; return res.end(htmlPage("Not found","This request was not found (it may already be handled).")); }
       if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status+" ✓", "This request was already "+it.status+", most likely by the other recipient. The guest was not messaged twice.")); }
       res.statusCode=200; return res.end(editPageHtml(it, tok, it.unit, it.guest_name, ""));
+    }
+    // item RES: reservations/front-desk FACT SUPPLY. GET -> fact form; POST step=draft -> model composes the
+    // reply and shows it for review; POST step=send -> sends via decideApproval (single-resolution lock).
+    if(action==="supply_fact"){
+      res.setHeader("Content-Type","text/html; charset=utf-8");
+      const q=req.query||{}; const secret=(await getNotifyConfig()).secret;
+      const pwOk=((req.headers||{})["x-app-password"]||"")===(process.env.APP_PASSWORD||"");
+      const tok=String(q.token||"");
+      if(!pwOk && !(secret && tok===secret)){ res.statusCode=403; return res.end(htmlPage("Link error","This link is invalid or expired.")); }
+      const id=String(q.id||"");
+      const list=await getApprovals(); const it=list.find(x=>x.id===id);
+      if(!it){ res.statusCode=200; return res.end(htmlPage("Not found","This request was not found (it may already be handled).")); }
+      if(it.status && it.status!=="pending" && it.status!=="escalated"){ res.statusCode=200; return res.end(htmlPage("Already handled ✓","This guest question was already handled ("+escHtml(it.status)+(it.closedExternally?", the front desk answered the guest directly":"")+"). The guest was not messaged twice.")); }
+      if(req.method==="POST"){
+        let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{b=Object.fromEntries(new URLSearchParams(b));}catch{b={};} } } b=b||{};
+        const step=String(b.step||"draft");
+        if(step==="send"){
+          const answer=String(b.answer||"").trim();
+          if(!answer){ res.statusCode=200; return res.end(supplyFactReviewHtml(it, tok, String(b.fact||""), "", "Please enter a reply before sending.")); }
+          // re-stage an escalated item to pending so decideApproval (the single-resolution choke-point) can send it
+          if(it.status==="escalated"){ it.status="pending"; it.proposed=answer; it.escalate=false; it.factFromVictor=String(b.fact||"").slice(0,500); it.revisedAt=new Date().toISOString(); it.primaryNotifiedAt=it.primaryNotifiedAt||new Date().toISOString(); try{ await setApprovals(list); }catch(e){} }
+          const out=await decideApproval(id, "yes", answer);
+          if(out.ok && out.decision==="approved"){ res.statusCode=200; return res.end(htmlPage(out.sent?"Sent to the guest ✓":"Saved (not sent — messaging is OFF)","We replied to the guest:\n\n“"+String(answer).slice(0,600)+"”")); }
+          if(out.ok===false && /^already /i.test(String(out.error||""))){ res.statusCode=200; return res.end(htmlPage("Already handled ✓","This was already handled by someone else. The guest was not messaged twice.")); }
+          res.statusCode=200; return res.end(htmlPage("Couldn’t send",(out.error||"Unknown error")+".")); 
+        }
+        // step "draft": compose the reply from the supplied fact and show it for review
+        const fact=String(b.fact||"").trim();
+        if(!fact){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Please enter the answer / fact first.")); }
+        let rev=null; try{ rev=await reviseFromSms(req, it, fact); }catch(e){ rev={failed:true}; }
+        if(rev && rev.alreadyHandled){ res.statusCode=200; return res.end(htmlPage("Already handled ✓","This was already handled by someone else. The guest was not messaged twice.")); }
+        const draft=(rev && rev.proposed && !rev.failed)?String(rev.proposed):"";
+        if(!draft){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Couldn’t draft a reply from that — try rephrasing the fact.")); }
+        res.statusCode=200; return res.end(supplyFactReviewHtml(it, tok, fact, draft, ""));
+      }
+      res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, ""));
     }
     // View rejected drafts (password) so the owner can see what was wrong.
     if(action==="rejected_log"){
