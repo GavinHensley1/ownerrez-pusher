@@ -3528,6 +3528,12 @@ if(action==="email_recipients"){
         res.setHeader("Content-Type",ct); res.setHeader("Cache-Control","private, max-age=86400"); return res.status(200).end(buf);
       }catch(e){ return res.status(502).end("err "+String(e.message||e)); }
     }
+    if(action==="sms_debug"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      let _arr=[]; try{ if(redis){ _arr=(await redis.get("parkside:sms_debug"))||[]; if(!Array.isArray(_arr)) _arr=[]; } }catch(e){}
+      const _c=await getNotifyConfig();
+      return res.status(200).json({ count:_arr.length, smsToConfigured:!!_c.smsTo, smsToL10:String(_c.smsTo||"").replace(/\D/g,"").slice(-10), recent:_arr.slice(-20).reverse() });
+    }
     if(action==="sms_inbound"){
       const cfg=await getNotifyConfig();
       let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
@@ -3538,7 +3544,10 @@ if(action==="email_recipients"){
       if(cfg.secret && tok && tok!==cfg.secret) return res.status(200).json({ignored:true, reason:"bad token"});
       // Duplicate-webhook guard: Twilio can POST the same MMS twice (the number AND its Messaging Service). Dedup by MessageSid.
       const _msgSid=String(pl.MessageSid||b.MessageSid||pl.SmsMessageSid||b.SmsMessageSid||pl.SmsSid||b.SmsSid||pl.messageId||b.messageId||"").trim();
-      if(_msgSid && redis){ try{ const _fresh=await redis.set("parkside:mms_seen:"+_msgSid,"1",{nx:true,ex:900}); if(_fresh===null||_fresh===false) return res.status(200).json({ok:true,dedup:true,reason:"duplicate webhook",sid:_msgSid}); }catch(e){} }
+      // ===== inbound-SMS DIAGNOSTIC: record each inbound + the branch/outcome to parkside:sms_debug (read via action=sms_debug) =====
+      const _dbgRec={ at:new Date().toISOString(), from:String(from), fromL10:String(from).replace(/\D/g,"").slice(-10), smsToL10:String(cfg.smsTo||"").replace(/\D/g,"").slice(-10), bodyRaw:String(bodyRaw).slice(0,240), sid:_msgSid, numMedia:(parseInt(pl.NumMedia||b.NumMedia||b.num_media||0,10)||0), bKeys:(b&&typeof b==="object")?Object.keys(b).slice(0,30):[], plKeys:(pl&&typeof pl==="object"&&pl!==b)?Object.keys(pl).slice(0,30):[], outcome:"received" };
+      const _dbg=async(oc)=>{ try{ if(redis){ _dbgRec.outcome=oc||_dbgRec.outcome; _dbgRec.tsOut=new Date().toISOString(); let _a=(await redis.get("parkside:sms_debug"))||[]; if(!Array.isArray(_a)) _a=[]; _a.push(Object.assign({},_dbgRec)); await redis.set("parkside:sms_debug", _a.slice(-20)); } }catch(e){} };
+      if(_msgSid && redis){ try{ const _fresh=await redis.set("parkside:mms_seen:"+_msgSid,"1",{nx:true,ex:900}); if(_fresh===null||_fresh===false){ await _dbg("dedup"); return res.status(200).json({ok:true,dedup:true,reason:"duplicate webhook",sid:_msgSid}); } }catch(e){} }
       // ROBUST MMS/media intake \u2014 runs BEFORE the sender filter so a receipt photo from ANY number (incl. Gavin's own tests) is captured into the Fraud tab.
       { const media=[]; const seen={};
         const isImg=x=>typeof x==="string"&&x.length<4000&&(/^https?:\/\/[^\s]+\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?)(\?|#|$)/i.test(x)||/^data:image\//i.test(x)||/^https?:\/\/[^\s]*(mediaurl|media\/|\/mms|attachment|\/image|\/photo|cloudinary|amazonaws|blob)/i.test(x));
@@ -3550,12 +3559,13 @@ if(action==="email_recipients"){
             for(const mu of media){ blob.receipts.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,7), source:"mms", vendor:"", amount:"", date:etDate(now), ref:"", note:bodyRaw||"", media:mu, from, sid:_msgSid||"", status:"unreviewed", at:now }); }
             blob.receipts=blob.receipts.slice(0,2000); await redis.set("parkside:fraud",blob); } }catch(e){}
           try{ await sendSmsGateway(cfg, "\uD83E\uDDFE Receipt received ("+media.length+" image"+(media.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
-          return res.status(200).json({receipt:true, count:media.length, via:"robust"});
+          await _dbg("media_receipt:"+media.length); return res.status(200).json({receipt:true, count:media.length, via:"robust"});
         }
       }
       const vn=cfg.smsTo||victorNumber();
-      if(vn && from && from.replace(/\D/g,"").slice(-10)!==vn.replace(/\D/g,"").slice(-10))
-        return res.status(200).json({ignored:true, reason:"sender is not the owner's number"});
+      if(vn && from && from.replace(/\D/g,"").slice(-10)!==vn.replace(/\D/g,"").slice(-10)){
+        await _dbg("sender_mismatch from="+_dbgRec.fromL10+" smsTo="+_dbgRec.smsToL10);
+        return res.status(200).json({ignored:true, reason:"sender is not the owner's number"}); }
       // MMS receipt intake: Victor texts a photo of a receipt to the StayDeck number -> store in the Fraud Alert receipts.
       const numMedia=parseInt(pl.NumMedia||b.NumMedia||b.num_media||0,10)||0; const mediaUrls=[];
       if(numMedia>0){ for(let _i=0;_i<numMedia;_i++){ const mu=b["MediaUrl"+_i]||pl["MediaUrl"+_i]; if(mu) mediaUrls.push(String(mu)); } }
@@ -3567,13 +3577,13 @@ if(action==="email_recipients"){
         try{ await sendSmsGateway(cfg, "\uD83E\uDDFE Receipt received ("+mediaUrls.length+" image"+(mediaUrls.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
         return res.status(200).json({receipt:true, count:mediaUrls.length});
       }
-      if(!bodyRaw) return res.status(200).json({ignored:true, reason:"empty"});
+      if(!bodyRaw){ await _dbg("empty_body"); return res.status(200).json({ignored:true, reason:"empty"}); }
       const ackBack=async(t)=>{ if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false}; let _r=null; for(let _i=0;_i<3;_i++){ try{ _r=await sendSmsGateway(cfg, t); if(_r && _r.sent) return _r; }catch(e){ _r={sent:false, error:String(e.message||e)}; } if(_i<2) await new Promise(function(res){setTimeout(res,1200);}); } return _r||{sent:false}; };
       const list=await getApprovals(); const pend=list.filter(x=>x.status==="pending"||x.status==="escalated");
       const lm=bodyRaw.match(/^\s*q\s*0*(\d+)\b\s*([\s\S]*)$/i);
       let target=null, rest=bodyRaw;
       if(lm){ target=findByLabel(list, "Q"+lm[1]); rest=String(lm[2]||"").trim();
-        if(!target){ await ackBack("I don't see a pending Q"+lm[1]+". Pending: "+(pend.map(x=>x.smsLabel||"?").join(", ")||"none")+"."); return res.status(200).json({ignored:true, reason:"label not found"}); } }
+        if(!target){ _dbgRec.matchedQ="Q"+lm[1]; _dbgRec.itemFound=false; await _dbg("label_not_found:Q"+lm[1]); await ackBack("I don't see a pending Q"+lm[1]+". Pending: "+(pend.map(x=>x.smsLabel||"?").join(", ")||"none")+"."); return res.status(200).json({ignored:true, reason:"label not found"}); } }
       // STRICT: only a BARE affirmation/negation counts as a yes/no COMMAND. Anything longer is
       // a correction or (for an escalation) the FACT Victor is supplying — so "no pets allowed"
       // or "yes we have parking" is treated as content, NEVER misread as reject/approve.
@@ -3619,9 +3629,10 @@ if(action==="email_recipients"){
           _draft=directReplyFromFact(target.guest_name, rest, _hasHist);
           try{ const _l2=await getApprovals(); const _it3=_l2.find(function(x){ return x && x.id===target.id; }); if(_it3){ if(_draft) _it3.proposed=_draft; _it3.status="pending"; _it3.escalate=false; _it3.factFromVictor=rest; const _n=new Date().toISOString(); _it3.revisedAt=_n; _it3.ts=_n; _it3.primaryNotifiedAt=_n; await setApprovals(_l2); } }catch(e){}
         }
-        if(!_draft){ await ackBack(lbl+": couldn't draft a guest reply from that — please text the fact again in a few plain words."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
-        await ackBack(lbl+" — draft reply for the guest:\n"+String(_draft).slice(0,600)+"\n\nReply \""+lbl+" yes\" to send it to the guest, or text a correction. Nothing is sent until you reply "+lbl+" yes.");
-        return res.status(200).json({escalation_drafted:true, label:lbl, sentDraftBack:true});
+        if(!_draft){ _dbgRec.matchedQ=lbl; _dbgRec.itemFound=true; _dbgRec.itemStatus=target.status; await _dbg("escalated_fact_no_draft"); await ackBack(lbl+": couldn't draft a guest reply from that — please text the fact again in a few plain words."); return res.status(200).json({revised:false, failed:true, label:lbl}); }
+        const _dbAck=await ackBack(lbl+" — draft reply for the guest:\n"+String(_draft).slice(0,600)+"\n\nReply \""+lbl+" yes\" to send it to the guest, or text a correction. Nothing is sent until you reply "+lbl+" yes.");
+        _dbgRec.matchedQ=lbl; _dbgRec.itemFound=true; _dbgRec.itemStatus=target.status; _dbgRec.draftBackSent=!!(_dbAck&&_dbAck.sent); await _dbg("escalated_draftback sent="+!!(_dbAck&&_dbAck.sent));
+        return res.status(200).json({escalation_drafted:true, label:lbl, sentDraftBack:!!(_dbAck&&_dbAck.sent)});
       }
       if((lm && rest==="")||isYes(rest)){
         const out=await decideApproval(target.id, "yes", null);
