@@ -1310,6 +1310,11 @@ async function processGuestQuestion(req, p){
   const history=await getThreadLog(threadId, bookingId);
   const hasHistory=(history||[]).some(function(m){ return m && m.d==="out"; }); // have we already messaged this guest?
   await appendThreadLog(threadId, bookingId, "in", question, guestName);
+  // COMPLAINT HANDOFF MUTE: once a complaint has handed this thread to a human, the engine sends NO further
+  // auto-response to the guest for ANY subsequent message on the thread (the inbound is logged above for the
+  // human's context; but no reply, no holding, no pleasantry logic, no new escalation text/email). The human
+  // handles everything after the first complaint. Persists for the rest of the conversation (no auto-clear).
+  try{ const _mk=threadKey(threadId, bookingId); if(_mk && redis){ const _muted=await redis.get("parkside:complaint_mute:"+_mk); if(_muted){ return {complaint_muted:true, no_guest_reply:true, question, since:_muted}; } } }catch(e){}
   // item B: obvious pleasantry/acknowledgment ("ok", "thanks", "sounds good", a thumbs-up, ...) -> NO reply,
   // NO escalation (logged above for the record). Deterministic so the clear cases never vary. Also stops us
   // from forwarding a bare "thanks" to Victor when an escalation is open.
@@ -1379,8 +1384,11 @@ async function processGuestQuestion(req, p){
   const vsms=await sendVictorEscalationSms(req, item, {unit, guestName, complaint:isComplaint});
   // A COMPLAINT follows the SAME escalation channel flow as any unknown-fact item: serious holding to the guest +
   // SMS to Victor now, then (item stays status "escalated") the ONE 60-min backup email to to2 via the sweep only
-  // if it is still unanswered. NO simultaneous/immediate primary email (that used to fire an email AND a text at once).
-  return {escalated:true, complaint:isComplaint, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms};
+  // if it is still unanswered. NO simultaneous/immediate primary email.
+  // COMPLAINT HANDOFF: mark the thread MUTED so the first serious holding is the LAST auto-message — every later
+  // guest message on this thread is handled by the human, with no further auto-reply or per-message escalation.
+  if(isComplaint){ try{ const _mk=threadKey(threadId, bookingId); if(_mk && redis){ await redis.set("parkside:complaint_mute:"+_mk, new Date().toISOString()); } }catch(e){} }
+  return {escalated:true, complaint:isComplaint, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms, complaintMuted:isComplaint};
 }
 // item: clip a quoted message to <= max chars WITHOUT cutting mid-word — break on the last whitespace and add
 // an ellipsis. Prevents the escalation SMS context from ending mid-token ("...arrival instructi").
