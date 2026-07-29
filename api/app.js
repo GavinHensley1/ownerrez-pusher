@@ -1377,11 +1377,10 @@ async function processGuestQuestion(req, p){
   item.status="escalated"; item.proposed=hold; item.holdingSent=(guestSend.sent===true);
   list.push(item); await setApprovals(list);
   const vsms=await sendVictorEscalationSms(req, item, {unit, guestName, complaint:isComplaint});
-  // item B: a COMPLAINT also emails the PRIMARY contact (Gavin) right away so it reaches him immediately,
-  // instead of only nudging the backup/front-desk after escalateMins. (Email only; nothing extra to the guest.)
-  let complaintEmail=null;
-  if(isComplaint){ try{ const _cfg=await getNotifyConfig(); if(_cfg.to){ complaintEmail=await sendApprovalEmail(req, item, _cfg.to, false); item.complaintEmailedTo=_cfg.to; item.complaintEmailedSent=!!(complaintEmail&&complaintEmail.sent); await setApprovals(list); } }catch(e){} }
-  return {escalated:true, complaint:isComplaint, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms, complaintEmail:complaintEmail};
+  // A COMPLAINT follows the SAME escalation channel flow as any unknown-fact item: serious holding to the guest +
+  // SMS to Victor now, then (item stays status "escalated") the ONE 60-min backup email to to2 via the sweep only
+  // if it is still unanswered. NO simultaneous/immediate primary email (that used to fire an email AND a text at once).
+  return {escalated:true, complaint:isComplaint, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms};
 }
 // item: clip a quoted message to <= max chars WITHOUT cutting mid-word — break on the last whitespace and add
 // an ellipsis. Prevents the escalation SMS context from ending mid-token ("...arrival instructi").
