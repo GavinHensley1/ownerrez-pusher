@@ -1383,17 +1383,28 @@ async function processGuestQuestion(req, p){
   if(isComplaint){ try{ const _cfg=await getNotifyConfig(); if(_cfg.to){ complaintEmail=await sendApprovalEmail(req, item, _cfg.to, false); item.complaintEmailedTo=_cfg.to; item.complaintEmailedSent=!!(complaintEmail&&complaintEmail.sent); await setApprovals(list); } }catch(e){} }
   return {escalated:true, complaint:isComplaint, holding_sent:guestSend.sent===true, id:item.id, victorSms:vsms, complaintEmail:complaintEmail};
 }
+// item: clip a quoted message to <= max chars WITHOUT cutting mid-word — break on the last whitespace and add
+// an ellipsis. Prevents the escalation SMS context from ending mid-token ("...arrival instructi").
+function clipWords(s, max){
+  s=String(s||"").replace(/\s+/g," ").trim();
+  if(s.length<=max) return s;
+  var cut=s.slice(0, max);
+  var sp=cut.lastIndexOf(" ");
+  if(sp > Math.floor(max*0.5)) cut=cut.slice(0, sp);        // break on whitespace, never mid-word
+  cut=cut.replace(/[\s.,;:!?\u2013\u2014\-]+$/,"");        // trim trailing space/punctuation
+  return cut+"\u2026";                                       // add ellipsis
+}
 async function sendVictorEscalationSms(req, item, ctx){
   ctx=ctx||{};
   const cfg=await getNotifyConfig();
   if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false, reason:"SMS not configured"};
   const unit=ctx.unit||item.unit||""; const guestName=ctx.guestName||item.guest_name||"";
   const lbl=item.smsLabel||"Q?";
-  const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-6);
-  const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"Us: ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim().slice(0,160)).join("\n\n"):("Guest: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,180));
+  const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-5);
+  const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"Us: ":"Guest: ")+clipWords(m.b,150)).join("\n\n"):("Guest: "+clipWords(item.question,180));
   const _ctx=[unit,guestName].filter(Boolean).join(" - ");
   if(ctx.followup){
-    const _nm=String(ctx.newMsg||item.question||"").replace(/\s+/g," ").trim().slice(0,220);
+    const _nm=clipWords(ctx.newMsg||item.question, 220);
     const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent ANOTHER message:\n\""+_nm+"\"\n\nFull recent conversation:\n"+_convo+"\n\nTo answer, text: "+lbl+" then the fact.";
     try{ return await sendSmsGateway(cfg, _ft); }catch(e){ return {sent:false, error:String(e.message||e)}; }
   }
@@ -3529,8 +3540,8 @@ if(action==="email_recipients"){
       }catch(e){ return res.status(502).end("err "+String(e.message||e)); }
     }
     if(action==="sms_debug"){
-      // TEMPORARY diagnostic (like notify_status): readable without a password so the SMS drop can be root-caused
-      // live. Re-gate / remove after diagnosis. Shows only last-10 phone digits + short body of recent inbounds.
+      // Re-gated now that transport is confirmed (kept as a diagnostic). App or Gavin password required.
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       res.setHeader("Cache-Control","no-store, max-age=0");
       let _arr=[]; try{ if(redis){ _arr=(await redis.get("parkside:sms_debug"))||[]; if(!Array.isArray(_arr)) _arr=[]; } }catch(e){}
       const _c=await getNotifyConfig();
