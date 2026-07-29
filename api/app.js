@@ -1401,10 +1401,14 @@ async function sendVictorEscalationSms(req, item, ctx){
   const unit=ctx.unit||item.unit||""; const guestName=ctx.guestName||item.guest_name||"";
   const lbl=item.smsLabel||"Q?";
   const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-5);
-  const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"Us: ":"Guest: ")+clipWords(m.b,150)).join("\n\n"):("Guest: "+clipWords(item.question,180));
+  // Show each recent turn's text IN FULL — no per-message clipping/ellipsis (Gavin wants complete context).
+  const _line=function(m){ return (m.d==="out"?"Us: ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim(); };
+  let _convo=_hist.length?_hist.map(_line).join("\n\n"):("Guest: "+String(item.question||"").replace(/\s+/g," ").trim());
+  // Safety ONLY: if the total context is very large, drop the OLDEST whole turns — never clip a shown message.
+  if(_hist.length>1){ let _t=_hist.slice(); while(_convo.length>3000 && _t.length>1){ _t=_t.slice(1); _convo=_t.map(_line).join("\n\n"); } }
   const _ctx=[unit,guestName].filter(Boolean).join(" - ");
   if(ctx.followup){
-    const _nm=clipWords(ctx.newMsg||item.question, 220);
+    const _nm=String(ctx.newMsg||item.question||"").replace(/\s+/g," ").trim();
     const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent ANOTHER message:\n\""+_nm+"\"\n\nFull recent conversation:\n"+_convo+"\n\nTo answer, text: "+lbl+" then the fact.";
     try{ return await sendSmsGateway(cfg, _ft); }catch(e){ return {sent:false, error:String(e.message||e)}; }
   }
