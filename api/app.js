@@ -1470,6 +1470,17 @@ function isObviousPleasantry(text){
 // item #5: Victor sometimes types the placeholder literally ("Q9 <the answer/fact>") or wraps his real
 // answer in the angle brackets ("Q9 <the unit is ready>"). Strip a wrapping <...> and any bare placeholder
 // token so the remaining text is treated as his answer. Applied to SMS and MMS replies identically.
+// item: detect an iMessage/RCS TAPBACK reaction delivered as text (e.g. 'Laughed at "Q140 sent..."', 'Removed a
+// laugh from "..."') or an emoji/punctuation-only body. These are NOT replies — the parser must ignore them silently.
+function isReaction(t){
+  var x=String(t||"").replace(/\s+/g," ").trim();
+  if(!x) return true;                                                   // empty
+  if(!/[a-z0-9]/i.test(x)) return true;                                 // emoji / punctuation only (a lone reaction glyph)
+  if(/^(laughed at|emphasi[sz]ed|questioned|reacted)\b/i.test(x)) return true;          // distinctive tapback verbs
+  if(/^removed (a|an) [a-z ]+ from\b/i.test(x)) return true;                            // reaction removals ("Removed a laugh from ...")
+  if(/["“”'‘’]/.test(x) && /^(loved|liked|disliked)\b/i.test(x)) return true;           // ambiguous verbs: require the quoted reference
+  return false;
+}
 function cleanVictorFact(s){
   var t=String(s||"").replace(/\s+/g," ").trim();
   var m=t.match(/^<\s*([\s\S]*?)\s*>$/); if(m) t=m[1].trim();
@@ -3603,6 +3614,10 @@ if(action==="email_recipients"){
       }
       if(!bodyRaw){ await _dbg("empty_body"); return res.status(200).json({ignored:true, reason:"empty"}); }
       const ackBack=async(t)=>{ if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false}; let _r=null; for(let _i=0;_i<3;_i++){ try{ _r=await sendSmsGateway(cfg, t); if(_r && _r.sent) return _r; }catch(e){ _r={sent:false, error:String(e.message||e)}; } if(_i<2) await new Promise(function(res){setTimeout(res,1200);}); } return _r||{sent:false}; };
+      // TAPBACK/REACTION GUARD: a reaction (or emoji-only) inbound is NOT a reply. Ignore it entirely — no prompt,
+      // no processing, and there is NO path from here to a guest message (guest sends only happen on decideApproval
+      // via an explicit "Q# yes"). Silently drop.
+      if(isReaction(bodyRaw)){ await _dbg("reaction_ignored"); return res.status(200).json({ignored:true, reason:"tapback/reaction"}); }
       const list=await getApprovals(); const pend=list.filter(x=>x.status==="pending"||x.status==="escalated");
       const lm=bodyRaw.match(/^\s*q\s*0*(\d+)\b\s*([\s\S]*)$/i);
       let target=null, rest=bodyRaw;
@@ -3620,6 +3635,11 @@ if(action==="email_recipients"){
           else if(pend.length===0){ await ackBack("Nothing pending right now."); return res.status(200).json({ignored:true}); }
           else { await ackBack("You have "+pend.length+" pending ("+pend.map(x=>x.smsLabel).join(", ")+"). Reply e.g. \""+pend[0].smsLabel+" yes\"."); return res.status(200).json({need_label:true}); }
         } else {
+          // Only nag ("which one?" / "start with a label") when the text PLAUSIBLY looks like an attempted answer/fact
+          // (reactions are already filtered above). Stray non-reply noise is ignored silently.
+          const _clean=String(rest).trim();
+          const _looksLikeAnswer = /\d/.test(_clean) || _clean.split(/\s+/).filter(Boolean).length>=2 || _clean.replace(/[^A-Za-z]/g,"").length>=8;
+          if(!_looksLikeAnswer){ await _dbg("ignored_noise"); return res.status(200).json({ignored:true, reason:"non-reply noise"}); }
           if(pend.length===1){ target=pend[0]; rest=bodyRaw; }
           else if(pend.length===0){ await ackBack("Nothing pending. Replies start with the label, e.g. \"Q1 yes\"."); return res.status(200).json({ignored:true}); }
           else { await ackBack("Which one? Start with the label, e.g. \""+pend[0].smsLabel+" "+bodyRaw.slice(0,40)+"\"."); return res.status(200).json({need_label:true}); }
