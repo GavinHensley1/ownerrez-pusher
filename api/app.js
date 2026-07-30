@@ -721,17 +721,13 @@ async function escalateStaleApprovals(req){
       if((now-t) > maxAgeMs){ if(!it.backupAskSent){ it.backupAskSent=true; it.backupSkippedStale=true; changed=true; neutralized++; } continue; }
       if(it.backupAskSent) continue;                         // already asked once (permanent)
       if(t > cutoff) continue;                               // not past the answer timer yet
-      // (2) ALREADY-REPLIED GUARD (timestamp-based — robust): HANDLED only if we sent the guest a real follow-up
-      // AFTER the holding, detected by TIME (an outbound logged >2 min after this item was created). We do NOT
-      // compare text: the holding is tidied/scrubbed before it is logged, so a text compare against firstProposed
-      // MISFIRED and wrongly marked legit, still-open escalations as handled (that blocked Gavin's backup email).
-      // The holding note is sent at creation time and is always within the 2-min window, so it never counts as a reply.
-      let handled=false;
-      try{ const _log=await getThreadLog(it.thread_id, it.booking_id);
-        const _ht=Date.parse(it.primaryNotifiedAt||it.ts||"")||0;
-        if(_ht){ for(const m of (_log||[])){ if(m && m.d==="out"){ const _mt=Date.parse(m.t||"")||0; if(_mt && _mt > _ht+120000){ handled=true; break; } } } }
-      }catch(e){}
-      if(handled){ it.backupAskSent=true; it.backupSkippedHandled=true; changed=true; continue; }
+      // (2) 'ALREADY HANDLED' IS DETERMINED SOLELY BY ITEM STATUS via the single-resolution lock — NOT by the
+      // presence of any outbound on the thread. Our own holding note, OwnerRez booking/confirmation automations,
+      // and other engine messages are ALL logged as "out", so a time-based "outbound after creation" test wrongly
+      // marked genuinely-unanswered escalations as handled and PERMANENTLY suppressed their backup email (Q122).
+      // A real human answer flips the item away from "escalated" (decideApproval / "Q# yes" / front-desk
+      // closeExternally), so anything STILL "escalated" here is genuinely unanswered and MUST get its one backup
+      // email. No outbound-based suppression.
       // ATOMIC one-shot across concurrent sweeps (inbound webhooks + cron + dashboard load), 30-day expiry.
       let _first=true;
       try{ if(redis){ const _r=await redis.set("parkside:backup_ask:"+it.id, new Date().toISOString(), {nx:true, ex:30*24*3600}); _first=(_r!==null && _r!==false); } }catch(e){}
@@ -1337,6 +1333,25 @@ async function processGuestQuestion(req, p){
       if(!_open.firstQuestion) _open.firstQuestion=_open.question||"";
       _open.question=String((_open.question?(_open.question+"\n\n[Follow-up from guest] "):"")+question).slice(-2000);
       _open.ts=_now; _open.lastGuestMsgAt=_now;
+      // FRESH BACKUP CYCLE on re-escalation: if this open item's previous backup cycle is already SPENT (an email
+      // fired or its one-shot/skip flags were set) OR its answer timer is so old the recency guard would neutralize
+      // it, treat this new guest ask as the START of a fresh cycle — re-anchor primaryNotifiedAt to now and clear
+      // the one-shot so it gets exactly one clean backup email after escalateMins. A follow-up during an ACTIVE,
+      // un-spent, still-recent cycle does NOT touch the timer (Gavin: follow-ups must not reset the timer).
+      try{
+        const _cfg=await getNotifyConfig();
+        const _winMs=(_cfg.escalateMins||60)*60*1000;
+        const _maxAgeMs=Math.max(3*3600*1000, _winMs+3600*1000);
+        const _anchor=Date.parse(_open.primaryNotifiedAt||_open.ts||"")||0;
+        const _spent=!!(_open.backupAskSent||_open.escalatedTo2||_open.escalatedTo2Sent||_open.backupSkippedStale||_open.backupSkippedHandled);
+        const _stale=_anchor>0 && (Date.now()-_anchor)>_maxAgeMs;
+        if(_spent || _stale){
+          _open.primaryNotifiedAt=_now;
+          _open.backupAskSent=false; _open.escalatedTo2=false; _open.escalatedTo2Sent=false; _open.escalatedTo2At=null;
+          _open.backupSkippedStale=false; _open.backupSkippedHandled=false; _open.backupCycleAt=_now;
+          try{ if(redis) await redis.del("parkside:backup_ask:"+_open.id); }catch(e){}
+        }
+      }catch(e){}
       await setApprovals(_al);
       const vsms=await sendVictorEscalationSms(req, _open, {complaint:!!_open.complaint, followup:true, newMsg:question});
       return {forwarded_to_manager:true, no_guest_reply:true, id:_open.id, victorSms:vsms, question};
@@ -3113,11 +3128,32 @@ if(action==="email_recipients"){
     }
     if(action==="run_escalations"){
       res.setHeader("Cache-Control","no-store, max-age=0");
+      // ONE-TIME poisoned-backlog cleanup (silent — sends NO email): close pre-existing STALE escalated items
+      // (older than the recency guard) that were stuck backupAskSent=true, some stamped "handled" without an email
+      // ever sending. Guarded by a redis flag so it runs exactly once; only ever touches items already past maxAge.
+      let _cleanup=null;
+      try{ if(redis){
+        const _done=await redis.get("parkside:cleanup_stale_v1");
+        if(!_done){
+          const _cfg=await getNotifyConfig();
+          const _winMs=(_cfg.escalateMins||60)*60*1000;
+          const _maxAgeMs=Math.max(3*3600*1000, _winMs+3600*1000);
+          const _nowMs=Date.now();
+          const _list=await getApprovals(); let _ch=false; const _closed=[];
+          for(const it of _list){ if(!it||it.status!=="escalated") continue;
+            const _t=Date.parse(it.primaryNotifiedAt||it.ts||"")||0;
+            if(_t && (_nowMs-_t)>_maxAgeMs){ it.status="closed"; it.decidedAt=new Date().toISOString(); it.closedReason="stale backlog cleanup (one-time)"; _ch=true; _closed.push(it.smsLabel||it.id); }
+          }
+          if(_ch) await setApprovals(_list);
+          await redis.set("parkside:cleanup_stale_v1", new Date().toISOString());
+          _cleanup={ranOnce:true, closed:_closed.length, labels:_closed};
+        } else { _cleanup={alreadyRan:true, at:_done}; }
+      } }catch(e){ _cleanup={error:String(e&&e.message||e)}; }
       let _esc=null, _autorej=null;
       try{ _esc=await escalateStaleApprovals(req); }catch(e){ _esc={error:String(e&&e.message||e)}; }
       try{ _autorej=await autoRejectStaleApprovals(req); }catch(e){ _autorej={error:String(e&&e.message||e)}; }
       let _verify=null; try{ _verify=await runVictorVerifyReminder(new Date().toISOString()); }catch(e){ _verify={error:String(e&&e.message||e)}; }
-      return res.status(200).json({ok:true, ranAt:new Date().toISOString(), escalation:_esc, autoReject:_autorej, verifyReminder:_verify});
+      return res.status(200).json({ok:true, ranAt:new Date().toISOString(), cleanup:_cleanup, escalation:_esc, autoReject:_autorej, verifyReminder:_verify});
     }
     if(action==="tick"){
       const tok=String((req.query&&req.query.token)||""); const secret=(await getNotifyConfig()).secret;
