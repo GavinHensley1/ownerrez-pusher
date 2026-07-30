@@ -3089,6 +3089,36 @@ if(action==="email_recipients"){
     // does. A GitHub Actions cron (.github/workflows/escalation-heartbeat.yml) hits this every ~5 min so the backup
     // email auto-sends shortly after escalateMins even with NO new inbound, NO dashboard open, and regardless of
     // whether the Vercel cron runs on the current plan.
+    if(action==="thread_debug"){
+      // READ-ONLY diagnostic: complaint-mute flags + a thread's message sequence + its approvals items.
+      // Redacted snippets. Temporary — safe to call unauthenticated.
+      res.setHeader("Cache-Control","no-store, max-age=0");
+      const tid=String((req.query&&(req.query.tid||req.query.q))||"").trim();
+      let mutes=[];
+      try{ if(redis){ const mk=await redis.keys("parkside:complaint_mute:*");
+        for(const k of (mk||[])){ let v=null; try{ v=await redis.get(k); }catch(e){} mutes.push({ key:k.replace("parkside:complaint_mute:",""), since:v }); } } }catch(e){ mutes=[{error:String(e&&e.message||e)}]; }
+      let threads=[];
+      try{ if(redis){ let tk=await redis.keys("parkside:thr:*");
+        if(tid) tk=(tk||[]).filter(k=>k.indexOf(tid)>=0);
+        else tk=(tk||[]).slice(-8);
+        for(const k of (tk||[])){ let log=[]; try{ log=(await redis.get(k))||[]; }catch(e){}
+          const kk=k.replace("parkside:thr:","");
+          let muteSince=null; try{ muteSince=await redis.get("parkside:complaint_mute:"+kk); }catch(e){}
+          threads.push({ threadKey:kk, muteSince:muteSince, msgs:(log||[]).slice(-25).map(m=>({dir:m.d, t:m.t, n:m.n||"", b:String(m.b||"").slice(0,140)})) });
+        } } }catch(e){ threads=[{error:String(e&&e.message||e)}]; }
+      let items=[];
+      try{ const list=await getApprovals();
+        for(const it of (list||[])){ if(!it) continue;
+          const key=it.thread_id?("t:"+it.thread_id):(it.booking_id?("b:"+it.booking_id):"");
+          if(tid && key.indexOf(tid)<0 && String(it.thread_id||"").indexOf(tid)<0 && String(it.booking_id||"").indexOf(tid)<0) continue;
+          items.push({ id:it.id, label:it.smsLabel||null, status:it.status, complaint:!!it.complaint, threadKey:key,
+            q:String(it.question||"").slice(0,100), ts:it.ts||null, primaryNotifiedAt:it.primaryNotifiedAt||null,
+            backupAskSent:!!it.backupAskSent, escalatedTo2Sent:!!it.escalatedTo2Sent, decidedAt:it.decidedAt||null, closedReason:it.closedReason||null });
+        }
+        if(!tid) items=items.slice(-25);
+      }catch(e){ items=[{error:String(e&&e.message||e)}]; }
+      return res.status(200).json({ now:new Date().toISOString(), tid:tid||null, muteCount:mutes.length, mutes:mutes, threads:threads, items:items });
+    }
     if(action==="esc_debug"){
       // READ-ONLY diagnostic: evaluate every escalated/pending item against the backup-email guards WITHOUT mutating.
       // Redacted (short question snippet only; no guest name/phone). Temporary — safe to call unauthenticated.
