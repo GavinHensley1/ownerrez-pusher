@@ -3068,6 +3068,19 @@ if(action==="email_recipients"){
     // PUBLIC plan-free heartbeat: hit by an external free cron (cron-job.org/UptimeRobot)
     // or by page loads. Token-gated by the approve-link secret. Drives intake without
     // a Vercel paid plan / Vercel cron.
+    // Plan-independent heartbeat for the 60-min backup escalation. SAFE to call unauthenticated: it only runs the
+    // idempotent sweep (one-shot per item via the parkside:backup_ask lock; emails ONLY the configured backup
+    // contact to2) plus the 24h auto-reject — no attacker-controllable side effects, same work notify_status already
+    // does. A GitHub Actions cron (.github/workflows/escalation-heartbeat.yml) hits this every ~5 min so the backup
+    // email auto-sends shortly after escalateMins even with NO new inbound, NO dashboard open, and regardless of
+    // whether the Vercel cron runs on the current plan.
+    if(action==="run_escalations"){
+      res.setHeader("Cache-Control","no-store, max-age=0");
+      let _esc=null, _autorej=null;
+      try{ _esc=await escalateStaleApprovals(req); }catch(e){ _esc={error:String(e&&e.message||e)}; }
+      try{ _autorej=await autoRejectStaleApprovals(req); }catch(e){ _autorej={error:String(e&&e.message||e)}; }
+      return res.status(200).json({ok:true, ranAt:new Date().toISOString(), escalation:_esc, autoReject:_autorej});
+    }
     if(action==="tick"){
       const tok=String((req.query&&req.query.token)||""); const secret=(await getNotifyConfig()).secret;
       if(!secret || tok!==secret) return res.status(403).json({error:"bad or missing token"});
