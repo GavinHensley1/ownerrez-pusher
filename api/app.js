@@ -3074,6 +3074,43 @@ if(action==="email_recipients"){
     // does. A GitHub Actions cron (.github/workflows/escalation-heartbeat.yml) hits this every ~5 min so the backup
     // email auto-sends shortly after escalateMins even with NO new inbound, NO dashboard open, and regardless of
     // whether the Vercel cron runs on the current plan.
+    if(action==="esc_debug"){
+      // READ-ONLY diagnostic: evaluate every escalated/pending item against the backup-email guards WITHOUT mutating.
+      // Redacted (short question snippet only; no guest name/phone). Temporary — safe to call unauthenticated.
+      res.setHeader("Cache-Control","no-store, max-age=0");
+      const cfg=await getNotifyConfig();
+      const now=Date.now();
+      const windowMs=(cfg.escalateMins||60)*60*1000;
+      const maxAgeMs=Math.max(3*3600*1000, windowMs+3600*1000);
+      const cutoff=now-windowMs;
+      const list=await getApprovals();
+      const rows=[];
+      for(const it of list){
+        if(!it) continue;
+        if(it.status!=="escalated" && it.status!=="pending") continue;
+        const t=Date.parse(it.primaryNotifiedAt||it.ts||"");
+        const ageMin=isFinite(t)?Math.round((now-t)/60000):null;
+        let handled=false, outAfter=null;
+        try{ const _log=await getThreadLog(it.thread_id, it.booking_id);
+          const _ht=Date.parse(it.primaryNotifiedAt||it.ts||"")||0;
+          if(_ht){ for(const m of (_log||[])){ if(m && m.d==="out"){ const _mt=Date.parse(m.t||"")||0; if(_mt && _mt>_ht+120000){ handled=true; outAfter=m.t; break; } } } }
+        }catch(e){}
+        let verdict="ELIGIBLE (would email)";
+        if(it.status!=="escalated") verdict="skip: status="+it.status+" (not escalated)";
+        else if(!isFinite(t)) verdict="skip: no parseable timestamp";
+        else if((now-t)>maxAgeMs) verdict="skip: NEUTRALIZED stale (age "+ageMin+"m > maxAge "+Math.round(maxAgeMs/60000)+"m)";
+        else if(it.backupAskSent) verdict="skip: backupAskSent=true (already asked / stamped)";
+        else if(t>cutoff) verdict="skip: not past timer yet (age "+ageMin+"m < "+cfg.escalateMins+"m)";
+        else if(handled) verdict="skip: already-replied (out msg after +2m)";
+        rows.push({ id:it.id, label:it.smsLabel||null, status:it.status, q:String(it.question||it.firstQuestion||"").slice(0,80),
+          ts:it.ts||null, primaryNotifiedAt:it.primaryNotifiedAt||null, revisedAt:it.revisedAt||null, decidedAt:it.decidedAt||null,
+          ageMin:ageMin, backupAskSent:!!it.backupAskSent, escalatedTo2:!!it.escalatedTo2, escalatedTo2Sent:!!it.escalatedTo2Sent,
+          backupSkippedStale:!!it.backupSkippedStale, backupSkippedHandled:!!it.backupSkippedHandled,
+          closedExternally:!!it.closedExternally, handledByReply:handled, outAfter:outAfter, verdict:verdict });
+      }
+      return res.status(200).json({ now:new Date(now).toISOString(), escalateMins:cfg.escalateMins, windowMin:Math.round(windowMs/60000),
+        maxAgeMin:Math.round(maxAgeMs/60000), to2Set:!!cfg.to2, resendConfigured:!!(cfg.apiKey&&cfg.from), count:rows.length, items:rows.slice(-25) });
+    }
     if(action==="run_escalations"){
       res.setHeader("Cache-Control","no-store, max-age=0");
       let _esc=null, _autorej=null;
