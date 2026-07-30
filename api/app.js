@@ -3079,7 +3079,8 @@ if(action==="email_recipients"){
       let _esc=null, _autorej=null;
       try{ _esc=await escalateStaleApprovals(req); }catch(e){ _esc={error:String(e&&e.message||e)}; }
       try{ _autorej=await autoRejectStaleApprovals(req); }catch(e){ _autorej={error:String(e&&e.message||e)}; }
-      return res.status(200).json({ok:true, ranAt:new Date().toISOString(), escalation:_esc, autoReject:_autorej});
+      let _verify=null; try{ _verify=await runVictorVerifyReminder(new Date().toISOString()); }catch(e){ _verify={error:String(e&&e.message||e)}; }
+      return res.status(200).json({ok:true, ranAt:new Date().toISOString(), escalation:_esc, autoReject:_autorej, verifyReminder:_verify});
     }
     if(action==="tick"){
       const tok=String((req.query&&req.query.token)||""); const secret=(await getNotifyConfig()).secret;
