@@ -1307,10 +1307,61 @@ async function processGuestQuestion(req, p){
   const hasHistory=(history||[]).some(function(m){ return m && m.d==="out"; }); // have we already messaged this guest?
   await appendThreadLog(threadId, bookingId, "in", question, guestName);
   // COMPLAINT HANDOFF MUTE: once a complaint has handed this thread to a human, the engine sends NO further
-  // auto-response to the guest for ANY subsequent message on the thread (the inbound is logged above for the
-  // human's context; but no reply, no holding, no pleasantry logic, no new escalation text/email). The human
-  // handles everything after the first complaint. Persists for the rest of the conversation (no auto-clear).
-  try{ const _mk=threadKey(threadId, bookingId); if(_mk && redis){ const _muted=await redis.get("parkside:complaint_mute:"+_mk); if(_muted){ return {complaint_muted:true, no_guest_reply:true, question, since:_muted}; } } }catch(e){}
+  // auto-response TO THE GUEST for ANY subsequent message on the thread (the inbound is logged above for the
+  // human's context; no holding, no composed reply, no pleasantry logic). BUT the human is STILL alerted on
+  // EVERY subsequent message: we text Victor the new message and re-arm the ONE backup email so a genuinely new
+  // unanswered complaint message still produces a backup email. Guest never gets another auto-message; the human
+  // always gets pinged. Mute persists for the rest of the conversation (no auto-clear).
+  try{
+    const _mk=threadKey(threadId, bookingId);
+    if(_mk && redis){
+      const _muted=await redis.get("parkside:complaint_mute:"+_mk);
+      if(_muted){
+        const _now=new Date().toISOString();
+        const _al=await getApprovals();
+        let _open=_al.find(it=>it && it.status==="escalated" && ((threadId&&it.thread_id===threadId)||(bookingId&&String(it.booking_id)===String(bookingId))));
+        if(_open){
+          // Fold the new message into the open complaint item for the human's context (never send to the guest).
+          if(!_open.firstQuestion) _open.firstQuestion=_open.question||"";
+          _open.question=String((_open.question?(_open.question+"\n\n[Follow-up from guest] "):"")+question).slice(-2000);
+          _open.ts=_now; _open.lastGuestMsgAt=_now; _open.complaint=true;
+          // FRESH BACKUP CYCLE (same re-anchor logic as the open-item re-escalation path below): if this item's
+          // previous backup cycle is already SPENT (an email fired / its one-shot/skip flags are set) OR its timer
+          // is stale, re-anchor primaryNotifiedAt=now and clear the one-shot/skip flags so exactly one clean backup
+          // email fires after escalateMins. An active, un-spent, still-recent cycle keeps its existing timer (still
+          // one backup email) — a follow-up must not reset an in-flight timer.
+          try{
+            const _cfg=await getNotifyConfig();
+            const _winMs=(_cfg.escalateMins||60)*60*1000;
+            const _maxAgeMs=Math.max(3*3600*1000, _winMs+3600*1000);
+            const _anchor=Date.parse(_open.primaryNotifiedAt||_open.ts||"")||0;
+            const _spent=!!(_open.backupAskSent||_open.escalatedTo2||_open.escalatedTo2Sent||_open.backupSkippedStale||_open.backupSkippedHandled);
+            const _stale=_anchor>0 && (Date.now()-_anchor)>_maxAgeMs;
+            if(_spent || _stale){
+              _open.primaryNotifiedAt=_now;
+              _open.backupAskSent=false; _open.escalatedTo2=false; _open.escalatedTo2Sent=false; _open.escalatedTo2At=null;
+              _open.backupSkippedStale=false; _open.backupSkippedHandled=false; _open.backupCycleAt=_now;
+              try{ if(redis) await redis.del("parkside:backup_ask:"+_open.id); }catch(e){}
+            }
+          }catch(e){}
+          await setApprovals(_al);
+          const vsms=await sendVictorEscalationSms(req, _open, {complaint:true, followup:true, newMsg:question});
+          return {complaint_muted:true, no_guest_reply:true, forwarded_to_manager:true, id:_open.id, victorSms:vsms, question, since:_muted};
+        } else {
+          // No open escalation on this muted thread (e.g. the prior complaint item was answered/closed). Create a
+          // FRESH escalated complaint item — with NO guest send — so the backup-email sweep still covers this new
+          // message, and text Victor now. The guest still gets nothing.
+          const _lbl=await nextSmsLabel();
+          const _item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed:"", escalate:true, complaint:true,
+            unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", ts:_now,
+            smsLabel:_lbl, smsCode:mkSmsCode(), firstProposed:"", primaryNotifiedAt:_now, status:"escalated", holdingSent:false, mutedFollowup:true };
+          _al.push(_item); await setApprovals(_al);
+          const vsms=await sendVictorEscalationSms(req, _item, {unit, guestName, complaint:true});
+          return {complaint_muted:true, no_guest_reply:true, forwarded_to_manager:true, id:_item.id, victorSms:vsms, question, since:_muted};
+        }
+      }
+    }
+  }catch(e){}
   // item B: obvious pleasantry/acknowledgment ("ok", "thanks", "sounds good", a thumbs-up, ...) -> NO reply,
   // NO escalation (logged above for the record). Deterministic so the clear cases never vary. Also stops us
   // from forwarding a bare "thanks" to Victor when an escalation is open.
@@ -1584,6 +1635,10 @@ async function decideApproval(id, decision, overrideAnswer, reason){
   if(it.status!=="pending") return {ok:false, error:"already "+it.status, item:it};
   const st=await getState(); const enabled=!!st.messaging_enabled;
   if(decision==="yes"||decision==="approve"){
+    // COMPLAINT = human-only: the engine NEVER sends a composed/approved reply to a complaint guest. The only
+    // guest-facing message on a complaint is the ONE initial serious holding, sent directly at intake. Block the
+    // entire compose-approve send path here so a complaint reply can never auto-reach the guest.
+    if(it.complaint){ return {ok:false, error:"complaint is human-only — no reply was sent to the guest", complaint:true, humanOnly:true}; }
     const isOverride=!!(overrideAnswer&&overrideAnswer.trim());
     let answer=(isOverride?overrideAnswer.trim():"")||it.proposed||"";
     if(!answer) return {ok:false, error:"no answer to send (proposed was empty — supply an answer)"};
@@ -1676,6 +1731,9 @@ async function reviseFromSms(req, item, extraInfo){
   // SINGLE-RESOLUTION LOCK: never re-draft / re-open a Q that anyone already resolved (approved, rejected, or
   // closed because the front desk answered the guest directly). Protects the reservations fact-supply path too.
   try{ const _l=await getApprovals(); const _cur=_l.find(x=>x&&x.id===item.id); if(_cur && _cur.status && _cur.status!=="pending" && _cur.status!=="escalated") return {proposed:_cur.answer||_cur.proposed||"", known:"full", alreadyHandled:true, status:_cur.status}; }catch(e){}
+  // COMPLAINT = human-only: never compose or stage a guest-facing reply for a complaint item. Complaints skip the
+  // compose-approve flow entirely — the guest only ever gets the ONE initial holding; the manager replies directly.
+  try{ const _l=await getApprovals(); const _cur=_l.find(x=>x&&x.id===item.id); if(_cur && _cur.complaint) return {proposed:"", known:"full", complaint:true, humanOnly:true, failed:true}; }catch(e){}
   // Compose the guest reply FROM the supplied fact with a FOCUSED composer (NOT the general classifier, which
   // could decide known=none and punt to the "checking with my manager" holding). Answer the ORIGINAL question
   // (firstQuestion) so later pleasantry follow-ups in the thread cannot derail it. Nothing is sent to the guest
@@ -3091,7 +3149,8 @@ if(action==="email_recipients"){
     // whether the Vercel cron runs on the current plan.
     if(action==="thread_debug"){
       // READ-ONLY diagnostic: complaint-mute flags + a thread's message sequence + its approvals items.
-      // Redacted snippets. Temporary — safe to call unauthenticated.
+      // GATED (app-password only) — no longer public now that diagnosis is complete.
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       res.setHeader("Cache-Control","no-store, max-age=0");
       const tid=String((req.query&&(req.query.tid||req.query.q))||"").trim();
       let mutes=[];
@@ -3121,7 +3180,8 @@ if(action==="email_recipients"){
     }
     if(action==="esc_debug"){
       // READ-ONLY diagnostic: evaluate every escalated/pending item against the backup-email guards WITHOUT mutating.
-      // Redacted (short question snippet only; no guest name/phone). Temporary — safe to call unauthenticated.
+      // GATED (app-password only) — no longer public now that diagnosis is complete.
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       res.setHeader("Cache-Control","no-store, max-age=0");
       const cfg=await getNotifyConfig();
       const now=Date.now();
@@ -3179,11 +3239,37 @@ if(action==="email_recipients"){
           _cleanup={ranOnce:true, closed:_closed.length, labels:_closed};
         } else { _cleanup={alreadyRan:true, at:_done}; }
       } }catch(e){ _cleanup={error:String(e&&e.message||e)}; }
+      // ONE-TIME (v1) complaint-mute retest cleanup (SILENT — sends NO email/text): clear the two complaint-mute
+      // flags Gavin wants to retest, and close any leftover escalation/pending items on those two threads so their
+      // backup one-shot can never fire. Guarded by a redis flag so it runs exactly once. Touches ONLY these two
+      // specific threads; changing item status to "closed" makes the sweep below skip them entirely.
+      let _muteClear=null;
+      try{ if(redis){
+        const _mdone=await redis.get("parkside:clear_complaint_mute_v1");
+        if(!_mdone){
+          const _threads=["t:11172469","t:11485376"];
+          const _mres={mutesDeleted:[], itemsClosed:[], backupKeysDeleted:[]};
+          for(const _tk of _threads){ try{ const _d=await redis.del("parkside:complaint_mute:"+_tk); _mres.mutesDeleted.push({key:_tk, deleted:_d}); }catch(e){ _mres.mutesDeleted.push({key:_tk, error:String(e&&e.message||e)}); } }
+          const _tids=_threads.map(k=>k.replace(/^t:/,""));
+          const _list=await getApprovals(); let _mch=false;
+          for(const it of (_list||[])){ if(!it) continue; if(_tids.indexOf(String(it.thread_id||""))<0) continue;
+            if(it.status==="escalated"||it.status==="pending"){
+              it.status="closed"; it.decidedAt=new Date().toISOString(); it.closedReason="complaint-mute retest cleanup (one-time)";
+              it.backupAskSent=true; it.escalatedTo2=true; it.escalatedTo2Sent=false; it.backupSkippedHandled=true; _mch=true;
+              _mres.itemsClosed.push(it.smsLabel||it.id);
+              try{ await redis.del("parkside:backup_ask:"+it.id); _mres.backupKeysDeleted.push(it.id); }catch(e){}
+            }
+          }
+          if(_mch) await setApprovals(_list);
+          await redis.set("parkside:clear_complaint_mute_v1", new Date().toISOString());
+          _muteClear=Object.assign({ranOnce:true}, _mres);
+        } else { _muteClear={alreadyRan:true, at:_mdone}; }
+      } else { _muteClear={error:"no redis"}; } }catch(e){ _muteClear={error:String(e&&e.message||e)}; }
       let _esc=null, _autorej=null;
       try{ _esc=await escalateStaleApprovals(req); }catch(e){ _esc={error:String(e&&e.message||e)}; }
       try{ _autorej=await autoRejectStaleApprovals(req); }catch(e){ _autorej={error:String(e&&e.message||e)}; }
       let _verify=null; try{ _verify=await runVictorVerifyReminder(new Date().toISOString()); }catch(e){ _verify={error:String(e&&e.message||e)}; }
-      return res.status(200).json({ok:true, ranAt:new Date().toISOString(), cleanup:_cleanup, escalation:_esc, autoReject:_autorej, verifyReminder:_verify});
+      return res.status(200).json({ok:true, ranAt:new Date().toISOString(), cleanup:_cleanup, muteClear:_muteClear, escalation:_esc, autoReject:_autorej, verifyReminder:_verify});
     }
     if(action==="tick"){
       const tok=String((req.query&&req.query.token)||""); const secret=(await getNotifyConfig()).secret;
@@ -3254,6 +3340,9 @@ if(action==="email_recipients"){
         // content — it always falls through to processGuestQuestion (exact webhook retries are already caught by
         // the payload-id parkside:wh_seen guard above).
         if(!hadMessage){
+          // COMPLAINT MUTE also suppresses the contentless-inquiry greeting: once a thread is handed to a human,
+          // the guest gets NO further auto-message of any kind (not even a first-contact greeting).
+          try{ const _mk=threadKey(threadId, bookingId); if(_mk && redis){ const _m=await redis.get("parkside:complaint_mute:"+_mk); if(_m){ return res.status(200).json({ok:true, type:"inquiry", complaint_muted:true, no_guest_reply:true, no_escalation:true}); } } }catch(e){}
           const _ikey = threadId?("t:"+threadId):(bookingId?("b:"+bookingId):("g:"+String(guestName||guestEmail||pid||"").toLowerCase().replace(/[^a-z0-9]/g,"").slice(0,40)));
           try{ if(redis && _ikey){ const _last=await redis.get("parkside:inq_seen:"+_ikey); if(_last && (Date.now()-new Date(_last).getTime()) < 30*60*1000){ return res.status(200).json({ok:true, type:"inquiry", deduped:true, contentless:true, skipped:"repeat no-message inquiry within 30m for "+_ikey}); } await redis.set("parkside:inq_seen:"+_ikey, new Date().toISOString(), {ex:6*3600}); } }catch(e){}
           const _st=await getState(); const _enabled=!!_st.messaging_enabled;
@@ -3487,6 +3576,7 @@ if(action==="email_recipients"){
         // on this page; it comes back as its own email, exactly like the engine texting Victor the draft to approve.
         let rev=null; try{ rev=await reviseFromSms(req, it, fact); }catch(e){ rev={failed:true}; }
         if(rev && rev.alreadyHandled){ res.statusCode=200; return res.end(htmlPage("Already handled ✓","This was already handled by someone else. The guest was not messaged twice.")); }
+        if(rev && rev.humanOnly){ res.statusCode=200; return res.end(htmlPage("Complaint — reply directly","This is a complaint, so the engine won’t compose or send a guest reply. Please respond to the guest directly. Nothing was sent to the guest.")); }
         const draft=(rev && rev.proposed && !rev.failed)?String(rev.proposed):"";
         if(!draft){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Couldn’t draft a reply from that — try rephrasing the fact.")); }
         // #4 FIX: reviseFromSms re-staged the item to 'pending' with proposed=draft in a SEPARATE list copy, so the
@@ -3774,6 +3864,14 @@ if(action==="email_recipients"){
       // Auto-message escalations: the holding message already went to the guest. Victor only ever
       // provides a FACT here — it is NEVER sent to the guest directly. We draft a reply from his
       // fact and text it BACK to him; only his "Q# yes" then sends it to the guest.
+      // COMPLAINT = human-only after the first holding: the engine NEVER composes/sends a guest reply for a
+      // complaint (escalated OR the legacy pending case). The manager replies to the guest directly (in OwnerRez).
+      // "Q# no" still closes it; anything else is acknowledged as human-only and NOTHING is sent to the guest.
+      if(target.complaint){
+        if(isNo(rest)){ const it2=list.find(x=>x.id===target.id); if(it2){ it2.status="closed"; it2.decidedAt=new Date().toISOString(); it2.closedReason="complaint closed by manager"; await setApprovals(list); } await ackBack(lbl+" (complaint) closed \u2014 nothing was sent to the guest."); return res.status(200).json({closed:true, complaint:true, label:lbl}); }
+        await ackBack(lbl+" is a COMPLAINT \u2014 please reply to the guest directly in OwnerRez. I won\u2019t auto-send anything to the guest on a complaint. (Text \""+lbl+" no\" to close it.)");
+        return res.status(200).json({complaint_human_only:true, label:lbl});
+      }
       if(target.status==="escalated"){
         if(rest===""){ await ackBack(lbl+": I don\u2019t have the answer yet. To answer, text: "+lbl+" then your answer. Example: "+lbl+" checkout is 11am. Nothing is sent to the guest until you reply "+lbl+" yes."); return res.status(200).json({need_facts:true, label:lbl}); }
         if(isNo(rest)){ const it2=list.find(x=>x.id===target.id); if(it2){ it2.status="closed"; it2.decidedAt=new Date().toISOString(); await setApprovals(list); } await ackBack(lbl+" closed — nothing more sent to the guest."); return res.status(200).json({closed:true, label:lbl}); }
