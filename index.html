@@ -796,15 +796,20 @@
 
 
   <div class="card">
-    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">
-      <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Cleans this month by Parkside</div>
-      <div style="font-size:11.5px;color:#64758d">two logs · resets automatically each month</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Cleans by Parkside</div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span onclick="cleansMonthStep(-1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:16px">‹</span>
+        <b id="cleansMonthLabel" style="font-size:13px;min-width:110px;text-align:center">—</b>
+        <span id="cleansMonthNext" onclick="cleansMonthStep(1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:16px">›</span>
+      </div>
+      <span id="cleansMonthBadge" style="font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#f4b942"></span>
     </div>
     <div style="display:flex;gap:18px;flex-wrap:wrap">
       <div style="flex:1;min-width:230px">
         <div style="font-weight:700">Monday check-in / check-out cleans</div>
         <div id="cleansMondayTotal" style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;margin:2px 0">0</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <div id="cleanMondayControls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
           <input id="cleanMondayNote" type="text" placeholder="Which unit / note (optional)" style="flex:1;min-width:140px">
           <button onclick="addClean('monday')">+ Log</button>
           <button class="ghost" onclick="undoClean('monday')">Undo</button>
@@ -814,7 +819,7 @@
       <div style="flex:1;min-width:230px">
         <div style="font-weight:700">All other cleans Parkside did</div>
         <div id="cleansOtherTotal" style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;margin:2px 0">0</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <div id="cleanOtherControls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
           <input id="cleanOtherNote" type="text" placeholder="Which unit / note (optional)" style="flex:1;min-width:140px">
           <button onclick="addClean('other')">+ Log</button>
           <button class="ghost" onclick="undoClean('other')">Undo</button>
@@ -2352,10 +2357,24 @@ async function loadTodo(){ try{ const r=await fetch(api('todo_get')+'&cb='+Date.
   const a=document.getElementById('todoOpen'); if(a){ if(j&&j.source_url){ a.href=j.source_url; a.textContent='Open document'; a.style.pointerEvents=''; a.style.opacity=''; } else { a.href='#'; a.textContent='No document connected yet'; a.style.pointerEvents='none'; a.style.opacity='.5'; } }
   const st=document.getElementById('todoStatus'); if(st) st.textContent=(j&&j.source==='doc')?('Your task list from Gavin \u00b7 synced from his document'+(j.updated_at?(' \u00b7 '+fmtWhen(j.updated_at)):'')):'Your task list from Gavin.'; }catch(e){} }
 async function saveTodo(){ const st=document.getElementById('todoStatus'); if(st) st.textContent='Saving…'; const h={'Content-Type':'application/json'}; if(PW) h['x-app-password']=PW; try{ const r=await fetch(api('todo_post'),{method:'POST',headers:h,body:JSON.stringify({text:(document.getElementById('todoText')||{}).value||''})}); const j=await r.json(); if(st) st.textContent=(j&&j.ok)?('Saved ✓ '+(j.updated_at?fmtWhen(j.updated_at):'')):'Save failed'; }catch(e){ if(st) st.textContent='Error: '+e.message; } }
+// item MW-9: cleans-card month picker. Browse any past month's stored tally (read-only). Only the
+// current month is editable — +Log/Undo always write the current-month key on the server (cleans_post
+// ignores any month and uses etMonth()), so historical months can be viewed but never mutated.
+function cleansCurMonth(){ var d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
+var CLEANS_SEL=cleansCurMonth();
+function cleansShiftM(sel,delta){ var p=sel.split('-'); var y=+p[0], m=(+p[1])-1+delta; while(m<0){m+=12;y--;} while(m>11){m-=12;y++;} return y+'-'+String(m+1).padStart(2,'0'); }
+function cleansMonthName(sel){ var p=sel.split('-'); return BFULL[(+p[1])-1]+' '+p[0]; }
+function cleansMonthStep(delta){ var next=cleansShiftM(CLEANS_SEL,delta); if(delta>0 && next>cleansCurMonth()) return; CLEANS_SEL=next; loadCleans(); }
 async function loadCleans(){
-  try{ const r=await fetch(api('cleans_get')+'&cb='+Date.now()); const j=await r.json();
+  try{
+    const cur=cleansCurMonth(), isCur=(CLEANS_SEL===cur);
+    const r=await fetch(api('cleans_get')+'&month='+encodeURIComponent(CLEANS_SEL)+'&cb='+Date.now()); const j=await r.json();
     renderCleanBucket('Monday', j.monday||{}); renderCleanBucket('Other', j.other||{});
-    const m=document.getElementById('cleansMonth'); if(m) m.textContent='Month: '+(j.month||'')+' \u00b7 '+((j.count)||0)+' total';
+    const lbl=document.getElementById('cleansMonthLabel'); if(lbl) lbl.textContent=cleansMonthName(CLEANS_SEL);
+    const nx=document.getElementById('cleansMonthNext'); if(nx) nx.style.visibility=isCur?'hidden':'visible';
+    const bg=document.getElementById('cleansMonthBadge'); if(bg) bg.textContent=isCur?'':('viewing '+cleansMonthName(CLEANS_SEL)+' — read only');
+    ['Monday','Other'].forEach(function(k){ var c=document.getElementById('clean'+k+'Controls'); if(c) c.style.display=isCur?'':'none'; });
+    const m=document.getElementById('cleansMonth'); if(m) m.textContent=(isCur?'This month':'Month')+': '+(j.month||CLEANS_SEL)+' \u00b7 '+((j.count)||0)+' total'+(isCur?'':' \u00b7 read only');
   }catch(e){}
 }
 function renderCleanBucket(key, bucket){
