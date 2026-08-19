@@ -1467,10 +1467,10 @@ async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementB
     (function(){
       var setT=function(id,v,col){ var el=document.getElementById(id); if(el){ el.innerHTML=v; if(col) el.style.color=col; } };
       var hoursV = h.available ? (h.hours+'h') : '\u2014';
-      // item V9: show the REAL WebWork activity level (avg_activity_pct from the activity/timeline
-      // report) instead of (tracked-idle)/tracked "presence" %, which reads far higher than WebWork's
-      // own activity number and was the source of the mismatch.
-      var realAct = (j.apps&&j.apps.avg_activity_pct!=null)?j.apps.avg_activity_pct:((j.screen&&j.screen.avg_activity_pct!=null)?j.screen.avg_activity_pct:(h.available?h.active_pct:null));
+      // "Computer active" = WebWork's actual % active (active minutes / tracked minutes) from the
+      // hours report — the SAME number shown on the "Hours worked (WebWork)" line below. The old
+      // avg activity-level average read like a day total (Gavin flagged it), so use the hours % active.
+      var realAct = (h.available && h.active_pct!=null) ? h.active_pct : null;
       var actV = (realAct!=null) ? (realAct+'%') : '\u2014';
       var actCol = (realAct!=null) ? (realAct>=60?'#34d399':(realAct>=35?'#fbbf24':'#f87171')) : '#e6ecf5';
       var onsiteV = (z.on_site_min!=null) ? (z.on_site_min+'m') : '\u2014';
