@@ -1016,7 +1016,7 @@ async function buildWeeklyReport(weekStart){
   for(let i=0;i<7;i++){ const date=etDateAddDays(weekStart,i);
     let score=null, grade=null; try{ if(redis){ score=await redis.get("parkside:score:"+date); grade=await redis.get("parkside:grade:"+date); } }catch(e){}
     const ownerG=!!(grade&&grade.grade!=null);
-    const g = ownerG ? Number(grade.grade) : (score&&score.productivity_score!=null?Number(score.productivity_score):null);
+    const g = ownerG ? Number(grade.grade) : (score&&score.truth_score!=null?Number(score.truth_score):null);
     const src = ownerG ? "owner" : (score?"ai":null);
     const expl = (grade&&grade.note)? String(grade.note) : (score&&score.summary?String(score.summary):"");
     if(g!=null){ sum+=g; graded++; } if(score) scored++;
@@ -1927,11 +1927,10 @@ async function scoreDay(date, device){
     "Do NOT nitpick that every minute was active \u2014 short breaks, phone calls, and idle gaps are normal and fine. Judge productivity at an hour-to-two-hour granularity: was the time GENERALLY productive and not wasted (the real concern is an employee on his phone all day, not one who took a call). "+
     "Cross-check any CLEANING claims against the bookings/cleaning ground-truth: a unit needs a full turnover clean when a guest checked OUT that day. If he claims he cleaned MORE units than there were checkouts, flag the excess as unverified in discrepancies; markedly fewer cleanings than checkouts may mean turnovers were skipped. "+
     "RECORDED TIME OFF IS APPROVED AND AUTHORITATIVE: when the data says Victor logged time off (a number of hours, or a full day), you MUST exclude that time from all productivity expectations \u2014 judge him ONLY over his on-duty hours and NEVER lower any score because of inactivity, absence, or low activity that falls within his recorded time off. "+"If a to-do list is provided, treat work that advances items on it as valued/expected; he should stay roughly (not exactly) aligned to it, and maintenance is expected even if unlisted. Use the WebWork data PRIMARILY to verify he was actually ACTIVE and what he genuinely used (apps & websites / URLs + activity rate) to corroborate desk/admin/computer claims; do NOT treat WebWork project/task names as proof of what he worked on (those labels can be stale). "+
-    "Return ONLY a JSON object: {\"truth_score\":0-100, \"productivity_score\":1-5, \"hours_worked\":<number, from the data>, \"matches\":[\"...\"], \"discrepancies\":[\"...\"], \"summary\":\"exactly two sentences\"}. "+
-    "truth_score = how well his report is corroborated by the data (100 = fully consistent, low = claims contradicted by the data). "+
-    "productivity_score = a WHOLE-NUMBER grade from 1 to 5 for how productive and on-list the day was, given the to-do list, GPS on-site time, and screen activity (5 = clearly productive on valued work all day; 4 = solid, productive day; 3 = mixed/average; 2 = little productive work; 1 = essentially no productive work). "+
+    "Return ONLY a JSON object: {\"truth_score\":1-5, \"hours_worked\":<number, from the data>, \"matches\":[\"...\"], \"discrepancies\":[\"...\"], \"summary\":\"exactly two sentences\"}. "+
+    "truth_score = the ONE overall grade for the day: a WHOLE NUMBER from 1 to 5 for how truthful and accurate his self-report is against the objective GPS + computer-activity data (5 = fully corroborated / truthful; 4 = mostly consistent; 3 = mixed, some claims unverified; 2 = several claims contradicted or unsupported; 1 = report largely contradicted by the data). "+
     "summary = EXACTLY TWO SENTENCES and concise. First sentence: state that his actions/report were verified against the tracking data. Second sentence: give the single main reason for the grade. Do NOT list every good and every bad thing \u2014 just that actions were verified and the one main reason (e.g. \"His actions were verified against the GPS and computer activity data. The grade reflects a productive day focused on the listed turnover cleaning.\"). "+
-    "If example gradings from the owner (Gavin) are provided below, your productivity_score MUST predict the 1-5 grade GAVIN would give \u2014 learn his standard from those examples; his grading is the ground truth.";
+    "If example gradings from the owner (Gavin) are provided below, your truth_score MUST predict the 1-5 grade GAVIN would give \u2014 learn his standard from those examples; his grading is the ground truth.";
   const todoBlock=(todoDoc&&todoDoc.trim())?("\nVICTOR'S CURRENT TO-DO LIST (living doc \u2014 admin + general tasks; maintenance expected, may be unlisted):\n"+String(todoDoc).slice(0,3000)+"\n"):"";
   let exBlock="";
   if(gradeExamples&&gradeExamples.length){ exBlock="\nHOW GAVIN (owner) GRADED PAST DAYS FOR PRODUCTIVITY (1-5) \u2014 match his standard:\n"+gradeExamples.map(function(e){ const sn=e.snap||{}; return "- "+e.date+" \u2192 "+Math.round(e.grade)+"/5"+(e.note?(" ("+String(e.note).slice(0,140)+")"):"")+". Data: "+(sn.hours_summary||"")+"; "+(sn.gps_summary||"")+"; "+(sn.screen_summary||"")+"."; }).join("\n")+"\n"; }
@@ -1944,7 +1943,7 @@ async function scoreDay(date, device){
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim(); let o=null;
     try{ const m=text.match(/\{[\s\S]*\}/); o=JSON.parse(m?m[0]:text); }catch(e){ o=null; }
     if(!o) return {error:"could not parse AI response", raw:text.slice(0,300)};
-    const out={ date, scored_at:new Date().toISOString(), truth_score:Number(o.truth_score), productivity_score:Math.max(1,Math.min(5,Math.round(Number(o.productivity_score!=null?o.productivity_score:3))||3)), hours_worked:Number(o.hours_worked!=null?o.hours_worked:(hours.hours||0)),
+    const out={ date, scored_at:new Date().toISOString(), truth_score:Math.max(1,Math.min(5,Math.round(Number(o.truth_score))||3)), hours_worked:Number(o.hours_worked!=null?o.hours_worked:(hours.hours||0)),
       matches:Array.isArray(o.matches)?o.matches:[], discrepancies:Array.isArray(o.discrepancies)?o.discrepancies:[], summary:String(o.summary||""),
       data:{hours, zones, screen, todo_present:!!(todoDoc&&todoDoc.trim()), timeoff:{hours:(timeOff&&timeOff.hours)||0, off_min:offMin, full_day:!!(timeOff&&timeOff.fullDay)}} };
     try{ if(redis) await redis.set("parkside:score:"+date, out); }catch(e){}
@@ -2556,7 +2555,7 @@ if(action==="email_recipients"){
       while(d<=last){
         let score=null, grade=null; try{ if(redis){ score=await redis.get("parkside:score:"+d); grade=await redis.get("parkside:grade:"+d); } }catch(e){}
         const ownerG=!!(grade&&grade.grade!=null);
-        const g = ownerG ? Number(grade.grade) : (score&&score.productivity_score!=null?Number(score.productivity_score):null);
+        const g = ownerG ? Number(grade.grade) : (score&&score.truth_score!=null?Number(score.truth_score):null);
         const expl = (grade&&grade.note)?String(grade.note):(score&&score.summary?String(score.summary):"");
         if(g!=null) days.push({date:d, grade:Math.round(g), owner:ownerG, explanation:expl});
         d=etDateAddDays(d,1);
@@ -2587,7 +2586,7 @@ if(action==="email_recipients"){
         if(isGavin || hid.indexOf(d)===-1){
           let score=null, grade=null; try{ if(redis){ score=await redis.get("parkside:score:"+d); grade=await redis.get("parkside:grade:"+d); } }catch(e){}
           const ownerG=!!(grade&&grade.grade!=null);
-          const g = ownerG ? Number(grade.grade) : (score&&score.productivity_score!=null?Number(score.productivity_score):null);
+          const g = ownerG ? Number(grade.grade) : (score&&score.truth_score!=null?Number(score.truth_score):null);
           const expl = (grade&&grade.note)?String(grade.note):(score&&score.summary?String(score.summary):"");
           // item MW-5: the model isn't trained/published yet — do NOT expose per-day AI reasoning to
           // Victor. Only Gavin's view receives the explanation text; Victor gets the bare score.
