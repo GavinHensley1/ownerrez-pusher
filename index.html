@@ -472,7 +472,7 @@
         <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:6px">Grade this day</div>
         <div id="gradeProgress" style="font-size:12px;color:#7f8fa6;line-height:1.6;margin-bottom:12px">How productive was this day, at an hour-by-hour level? The engine learns your standard.</div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-          <input id="gradeVal" type="number" min="0" max="100" step="1" placeholder="0-100" style="width:90px">
+          <input id="gradeVal" type="number" min="1" max="5" step="1" placeholder="1-5" style="width:90px">
           <input id="gradeNote" type="text" placeholder="Why? (optional &mdash; teaches the engine)" style="flex:1;min-width:120px">
         </div>
         <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
@@ -767,7 +767,7 @@
         <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8;margin-bottom:6px">This month</div>
         <div style="display:flex;align-items:baseline;gap:8px">
           <span id="aiScoreAvg" style="font-family:'IBM Plex Mono',monospace;font-size:36px;font-weight:600;color:#7f8fa6;line-height:1">&mdash;</span>
-          <span style="font-size:12px;color:#64758d">/100 avg</span>
+          <span style="font-size:12px;color:#64758d">/5 avg</span>
         </div>
         <div id="aiScoreCount" style="font-size:11.5px;color:#64758d;margin-top:4px">&mdash;</div>
         <div id="aiScoreBody" class="legend" style="font-size:12.5px;color:#b9c6d8;margin-top:14px"><span class="muted">tap a day for its score</span></div>
@@ -1477,11 +1477,11 @@ async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementB
       // item 6: on-location time in hours, shown next to Hours worked
       var locHoursV = (z.on_site_min!=null) ? ((z.on_site_min/60).toFixed(1)+'h') : '\u2014';
       var gr = (j.grade&&j.grade.grade!=null)?j.grade.grade:null;
-      var grCol = gr==null?'#7f8fa6':(gr>=75?'#34d399':gr>=45?'#fbbf24':'#f87171');
+      var grCol = gr==null?'#7f8fa6':(gr>=4?'#34d399':gr>=3?'#fbbf24':'#f87171');
       // item 8: engine's own computed grade (its productivity score; falls back to truth score)
-      var engRaw = (j.score&&j.score.productivity_score!=null) ? j.score.productivity_score : ((j.score&&j.score.truth_score!=null) ? j.score.truth_score : null);
+      var engRaw = (j.score&&j.score.productivity_score!=null) ? j.score.productivity_score : null;
       var eng = (engRaw!=null&&isFinite(engRaw)) ? Math.round(engRaw) : null;
-      var engCol = eng==null?'#7f8fa6':(eng>=75?'#34d399':eng>=45?'#fbbf24':'#f87171');
+      var engCol = eng==null?'#7f8fa6':(eng>=4?'#34d399':eng>=3?'#fbbf24':'#f87171');
       setT('stHours',hoursV,'#e6ecf5'); setT('stLocHours',locHoursV,'#e6ecf5'); setT('stActive',actV,actCol);
       // item 2: don't grade a weekend day (Fri/Sat) that hasn't happened yet. Past weekend days grade normally;
       // today or a future Fri/Sat shows "—" for both grade cards (weekdays are unaffected).
@@ -1540,7 +1540,7 @@ async function runScore(){ const date=(document.getElementById('monDate')||{}).v
 async function saveGrade(){ const date=(document.getElementById('monDate')||{}).value||''; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const st=document.getElementById('gradeStatus'); if(st) st.textContent='Saving…';
   const val=(document.getElementById('gradeVal')||{}).value; const note=(document.getElementById('gradeNote')||{}).value||'';
   try{ const r=await fetch(api('grade_set')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):''),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({grade:val,note})}); const j=await r.json();
-    if(j&&j.ok){ if(st) st.textContent='Saved ✓'; if(SC_GRADED&&j.date){SC_GRADED.add(j.date);} renderMonCal(); const gp=document.getElementById('gradeProgress'); if(gp){ const c=j.graded_count||0; gp.textContent=c+' day'+(c===1?'':'s')+' graded'+(c<10?(' — grade ~'+(10-c)+' more to calibrate'):' — calibrated to your standard'); } }
+    if(j&&j.ok){ if(st) st.textContent='Saved ✓'; if(SC_GRADED&&j.date){SC_GRADED.add(j.date);} renderMonCal(); loadScorecard(); const gp=document.getElementById('gradeProgress'); if(gp){ const c=j.graded_count||0; gp.textContent=c+' day'+(c===1?'':'s')+' graded'+(c<10?(' — grade ~'+(10-c)+' more to calibrate'):' — calibrated to your standard'); } }
     else { if(st) st.textContent=(j&&j.error)||'Save failed'; }
   }catch(e){ if(st) st.textContent='Error: '+e.message; } }
 async function loadConn(){ if(!GPW) return; const st=document.getElementById('connStatus'); if(st) st.textContent='Checking\u2026'; try{ const r=await fetch(api('conn_check')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(st) st.textContent=''; renderConn(j); }catch(e){ if(st) st.textContent='error'; } }
@@ -1571,8 +1571,8 @@ function renderConn(j){ const el=document.getElementById('connBody'); if(!el) re
   el.innerHTML=html; }
 async function loadMonthly(){ if(!GPW) return; const st=document.getElementById('monthlyStatus'); if(st) st.textContent='Loading\u2026'; const mo=(document.getElementById('monthlyMonth')||{}).value||''; try{ const r=await fetch(api('monthly_report')+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(st) st.textContent=''; renderMonthly(j); }catch(e){ if(st) st.textContent='error'; } }
 function renderMonthly(j){ const el=document.getElementById('monthlyBody'); if(!el) return; const weeks=(j&&j.weeks)||[]; if(!weeks.length){ el.innerHTML='<span class="muted">No graded days this month yet.</span>'; return; }
-  el.innerHTML=weeks.map(function(w){ const days=(w.days||[]).map(function(d){ return '<tr><td style="white-space:nowrap;color:var(--mut)">'+esc((d.weekday||'').slice(0,3))+' '+esc((d.date||'').slice(5))+'</td><td style="font-weight:600;white-space:nowrap">'+(d.grade==null?'\u2014':d.grade+'/100')+'</td><td style="word-break:break-word">'+esc(d.explanation||'')+'</td></tr>'; }).join('');
-    return '<div style="margin-bottom:12px"><b>Week of '+esc(w.weekStart)+' \u2013 '+esc(w.weekEnd)+'</b>'+(w.avgGrade!=null?(' \u00b7 avg '+w.avgGrade+'/100'):'')+(w.narrative?('<div class="muted" style="font-size:12px;margin:2px 0">'+esc(w.narrative)+'</div>'):'')+'<table style="width:100%;table-layout:fixed"><colgroup><col style="width:64px"><col style="width:62px"><col></colgroup>'+days+'</table></div>'; }).join(''); }
+  el.innerHTML=weeks.map(function(w){ const days=(w.days||[]).map(function(d){ return '<tr><td style="white-space:nowrap;color:var(--mut)">'+esc((d.weekday||'').slice(0,3))+' '+esc((d.date||'').slice(5))+'</td><td style="font-weight:600;white-space:nowrap">'+(d.grade==null?'\u2014':d.grade+'/5')+'</td><td style="word-break:break-word">'+esc(d.explanation||'')+'</td></tr>'; }).join('');
+    return '<div style="margin-bottom:12px"><b>Week of '+esc(w.weekStart)+' \u2013 '+esc(w.weekEnd)+'</b>'+(w.avgGrade!=null?(' \u00b7 avg '+w.avgGrade+'/5'):'')+(w.narrative?('<div class="muted" style="font-size:12px;margin:2px 0">'+esc(w.narrative)+'</div>'):'')+'<table style="width:100%;table-layout:fixed"><colgroup><col style="width:64px"><col style="width:62px"><col></colgroup>'+days+'</table></div>'; }).join(''); }
 async function emailMonthly(){ if(!GPW) return; if(!confirm('Email the monthly report to you and Victor now?')) return; const st=document.getElementById('monthlyStatus'); if(st) st.textContent='Sending\u2026'; const mo=(document.getElementById('monthlyMonth')||{}).value||''; try{ const r=await fetch(api('monthly_report')+'&send=1'+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); if(st) st.textContent=(j&&j.sent)?('Emailed \u2713 to '+((j.to||[]).join(', '))):((j&&j.reason)||(j&&j.detail)||'send failed'); }catch(e){ if(st) st.textContent='error'; } }
 // item R1: on-demand month report generation (Gavin). Averages the month's dailies + AI 2-sentence recurring summary.
 async function genMonthReport(){ if(!GPW) return; var st=document.getElementById('monthlyStatus'); var body=document.getElementById('genMonthBody');
@@ -1581,8 +1581,8 @@ async function genMonthReport(){ if(!GPW) return; var st=document.getElementById
   try{ var r=await fetch(api('gen_month_report')+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json();
     if(st) st.textContent='';
     if(!j||j.average==null||j.count===0){ if(body) body.innerHTML='<span class="muted">No graded days for '+esc((j&&j.month)||mo||'this month')+' yet.</span>'; return; }
-    var avg=j.average; var col=avg>=75?'#4ade80':avg>=45?'#f4b942':'#f87171';
-    var h='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px"><div style="font-size:40px;font-weight:800;color:'+col+'">'+avg+'<span style="font-size:16px;color:var(--mut)">/100</span></div><div><div style="font-weight:600">Average grade · '+esc(j.month||'')+'</div><div class="muted" style="font-size:12px">'+j.count+' graded day'+(j.count===1?'':'s')+'</div></div></div>';
+    var avg=j.average; var col=avg>=4?'#4ade80':avg>=3?'#f4b942':'#f87171';
+    var h='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px"><div style="font-size:40px;font-weight:800;color:'+col+'">'+avg+'<span style="font-size:16px;color:var(--mut)">/5</span></div><div><div style="font-weight:600">Average grade · '+esc(j.month||'')+'</div><div class="muted" style="font-size:12px">'+j.count+' graded day'+(j.count===1?'':'s')+'</div></div></div>';
     h+=j.report?('<div class="legend" style="line-height:1.7;white-space:pre-wrap">'+esc(j.report)+'</div>'):'<span class="muted">No summary generated (no AI key or no notes).</span>';
     if(body) body.innerHTML=h;
   }catch(e){ if(st) st.textContent='error'; }
@@ -1608,7 +1608,7 @@ function renderScore(sc){ const el=document.getElementById('scResult'); if(!el) 
   el.innerHTML='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">'
     +'<div style="font-size:34px;font-weight:800;color:'+col+'">'+ts+'<span style="font-size:16px;color:var(--mut)">/100</span></div>'
     +'<div><div style="font-weight:600">Truthfulness score</div><div class="muted" style="font-size:12px">'+esc(sc.summary||'')+'</div></div></div>'
-    +(sc.productivity_score!=null?('<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:6px"><div style="font-size:28px;font-weight:800;color:'+((function(p){return p>=75?"#4ade80":p>=45?"#f4b942":"#f87171";})(Math.max(0,Math.min(100,Number(sc.productivity_score)||0))))+'">'+Math.max(0,Math.min(100,Number(sc.productivity_score)||0))+'<span style="font-size:14px;color:var(--mut)">/100</span></div><div style="font-weight:600">Productivity / on-list</div></div>'):'')
+    +(sc.productivity_score!=null?('<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:6px"><div style="font-size:28px;font-weight:800;color:'+((function(p){return p>=4?"#4ade80":p>=3?"#f4b942":"#f87171";})(Math.max(1,Math.min(5,Number(sc.productivity_score)||0))))+'">'+Math.max(1,Math.min(5,Number(sc.productivity_score)||0))+'<span style="font-size:14px;color:var(--mut)">/5</span></div><div style="font-weight:600">Productivity / on-list</div></div>'):'')
     +(sc.hours_worked!=null?('<div class="legend" style="margin-top:8px"><b>Hours worked (assessed):</b> '+esc(String(sc.hours_worked))+'h</div>'):'')
     +(sc.matches&&sc.matches.length?('<div style="margin-top:8px;font-size:13px"><b style="color:#4ade80">✓ Matches</b>'+list(sc.matches,'#a7d9b5')):'')
     +(sc.discrepancies&&sc.discrepancies.length?('<div style="margin-top:4px;font-size:13px"><b style="color:#f87171">⚠ Discrepancies</b>'+list(sc.discrepancies,'#e6a5a5')):'')
@@ -2178,7 +2178,7 @@ function aiCalApply(){
   var av=document.getElementById('aiScoreAvg');
   var sum=0, cnt=0; for(var k in AICAL.map){ if(mwIsOffDate(k)) continue; if(aiCalTimeoffFull(k)) continue; var g=AICAL.map[k].grade; if(g!=null){ sum+=Number(g); cnt++; } }
   AICAL.avg=cnt?Math.round(sum/cnt):null; AICAL.count=cnt;
-  var c=(AICAL.avg==null)?'#7f8fa6':(AICAL.avg>=75?'#34d399':AICAL.avg>=45?'#fbbf24':'#f87171'); if(av){ av.textContent=(AICAL.avg==null?'—':AICAL.avg); av.style.color=c; }
+  var c=(AICAL.avg==null)?'#7f8fa6':(AICAL.avg>=4?'#34d399':AICAL.avg>=3?'#fbbf24':'#f87171'); if(av){ av.textContent=(AICAL.avg==null?'—':AICAL.avg); av.style.color=c; }
   var ct=document.getElementById('aiScoreCount'); if(ct) ct.textContent=(cnt?(cnt+' graded work-day'+(cnt===1?'':'s')+' this month'):'no graded work-days yet');
   renderAiCal();
 }
@@ -2196,24 +2196,24 @@ function renderAiCal(){ var lbl=document.getElementById('aiCalLabel'); var dow=d
       if(aiCalTimeoffFull(ds)){ cells+='<div class="scday toff'+(AICAL.sel===ds?' sel':'')+'" onclick="aiCalPick(\''+ds+'\')" title="Time off logged"><div>'+day+'</div><div style="font-size:7px;letter-spacing:.04em;color:#7fb0e6">OFF</div></div>'; continue; }
       var rec=AICAL.map[ds]; var has=!!rec;
       var toffH=(TOFF[ds]&&TOFF[ds].kind==='hours'); // partial (hours) off — still graded, just flagged
-      var col=has?(rec.grade>=75?'#34d399':rec.grade>=45?'#fbbf24':'#f87171'):'#2c3a51';
+      var col=has?(rec.grade>=4?'#34d399':rec.grade>=3?'#fbbf24':'#f87171'):'#2c3a51';
       cells+='<div class="scday'+(has?' has':'')+(AICAL.sel===ds?' sel':'')+'" '+((has||toffH)?('onclick="aiCalPick(\''+ds+'\')"'):'')+'><div>'+day+'</div>'+(has?('<div class="dot" style="background:'+col+'"></div>'):'')+(toffH?('<div style="font-size:6.5px;letter-spacing:.03em;color:#7fb0e6">-'+(TOFF[ds].hours||0)+'h</div>'):'')+'</div>';
     }
     grid.innerHTML=cells;
   }
   // item MW-5: no reasoning surfaced to Victor — only prompt to tap for the score number.
-  if(body && !AICAL.sel){ body.innerHTML=(AICAL.count===0)?'<span class="muted">No graded work-days this month yet.</span>':('<span class="muted">Tap a day for its score. Sun/Mon/Tues are off-days (N/A).</span>'); }
+  if(body && !AICAL.sel){ body.innerHTML=(AICAL.count===0)?'<span class="muted">No graded work-days this month yet.</span>':('<span class="muted">Tap a day for its score and reason. Sun/Mon/Tues are off-days (N/A).</span>'); }
 }
 function aiCalPick(ds){ if(mwIsOffDate(ds)) return; AICAL.sel=ds; renderAiCal(); var rec=AICAL.map[ds]; var body=document.getElementById('aiScoreBody'); if(!body) return;
   // item MW-11: if Victor logged time off on this day, surface it on the day it applies to.
   var toff=TOFF[ds];
   var toffLine=toff?('<div style="font-size:12px;color:#7fb0e6;margin-bottom:6px">🌴 Time off logged'+(toff.kind==='hours'?(' — '+(toff.hours||0)+'h'):' — full day (not counted against your score)')+(toff.note?(' · '+esc(toff.note)):'')+'</div>'):'';
   if(!rec){ body.innerHTML=toffLine+(toff&&toff.kind!=='hours'?'<span class="muted">Day off — no grade, and it doesn’t affect your average.</span>':'<span class="muted">No grade for this day.</span>'); return; }
-  var col=rec.grade>=75?'#34d399':rec.grade>=45?'#fbbf24':'#f87171';
+  var col=rec.grade>=4?'#34d399':rec.grade>=3?'#fbbf24':'#f87171';
   var wd=''; try{ wd=new Date(ds+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}); }catch(e){ wd=ds; }
   // item MW-5: show Victor the SCORE only. The model isn't trained/published yet, so its per-day
   // reasoning is intentionally NOT shown here (Gavin's view keeps the explanation).
-  body.innerHTML=toffLine+'<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><b style="color:'+col+';font-size:22px">'+rec.grade+'</b><span class="muted" style="font-size:12px">/100 · '+esc(wd)+'</span></div><span class="muted" style="font-size:12px">Detailed feedback isn’t published yet — only your score is shown for now.</span>';
+  var _reason=rec.explanation?esc(rec.explanation):''; body.innerHTML=toffLine+'<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px"><b style="color:'+col+';font-size:22px">'+rec.grade+'</b><span class="muted" style="font-size:12px">/5 &middot; '+esc(wd)+'</span></div>'+(_reason?('<div style="font-size:13px;line-height:1.45;color:#c8d3e0;margin-top:2px">'+_reason+'</div>'):'<span class="muted" style="font-size:12px">No reason recorded for this day.</span>');
 }
 
 // ===== Bonus / incentive comp (owner entry + Victor summary) =====
@@ -2342,16 +2342,16 @@ function renderEmailFlags(){ ['gapAlert','monthlyReport','verifyReminder'].forEa
 async function toggleEmailFlag(k){ if(!GPW) return; EMAILFLAGS[k]=(EMAILFLAGS[k]===false); renderEmailFlags(); var st=document.getElementById('sysEmailStatus'); if(st) st.textContent='Saving…'; try{ var r=await fetch(api('email_flags'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({flags:EMAILFLAGS})}); var j=await r.json(); if(j&&j.flags){ EMAILFLAGS=j.flags; renderEmailFlags(); } if(st) st.textContent='Saved ✓'; }catch(e){ if(st) st.textContent='error'; } }
 // ===== Month summary: average grade + good/bad (Feature 2) =====
 async function scoreSummary(){ if(!GPW) return; var el=document.getElementById('scoreSummaryBody'); if(el) el.innerHTML='<span class="muted">Loading…</span>'; var mo=(document.getElementById('monthlyMonth')||{}).value||''; try{ var r=await fetch(api('score_summary')+(mo?('&month='+mo):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json(); renderScoreSummary(j); }catch(e){ if(el) el.textContent='error'; } }
-function renderScoreSummary(j){ var el=document.getElementById('scoreSummaryBody'); if(!el) return; if(!j||j.average==null||j.count===0){ el.innerHTML='<span class="muted">No graded days for '+esc((j&&j.month)||'this month')+' yet.</span>'; return; } var avg=j.average; var col=avg>=75?'#4ade80':avg>=45?'#f4b942':'#f87171'; var lst=function(arr,c){ return (arr&&arr.length)?('<ul style="margin:4px 0 8px 18px;color:'+c+'">'+arr.map(function(x){return '<li>'+esc(x)+'</li>';}).join('')+'</ul>'):'<div class="muted" style="font-size:12px;margin:2px 0 8px">none</div>'; }; el.innerHTML='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><div style="font-size:40px;font-weight:800;color:'+col+'">'+avg+'<span style="font-size:16px;color:var(--mut)">/100</span></div><div><div style="font-weight:600">Average grade · '+esc(j.month||'')+'</div><div class="muted" style="font-size:12px">'+j.count+' graded day'+(j.count===1?'':'s')+'</div></div></div>'+(j.summary?('<div class="legend" style="margin-top:8px;white-space:pre-wrap">'+esc(j.summary)+'</div>'):'')+'<div style="margin-top:8px;font-size:13px"><b style="color:#4ade80">✓ What went well</b>'+lst(j.good,'#a7d9b5')+'</div><div style="font-size:13px"><b style="color:#f87171">⚠ To work on</b>'+lst(j.bad,'#e6a5a5')+'</div>'; }
+function renderScoreSummary(j){ var el=document.getElementById('scoreSummaryBody'); if(!el) return; if(!j||j.average==null||j.count===0){ el.innerHTML='<span class="muted">No graded days for '+esc((j&&j.month)||'this month')+' yet.</span>'; return; } var avg=j.average; var col=avg>=4?'#4ade80':avg>=3?'#f4b942':'#f87171'; var lst=function(arr,c){ return (arr&&arr.length)?('<ul style="margin:4px 0 8px 18px;color:'+c+'">'+arr.map(function(x){return '<li>'+esc(x)+'</li>';}).join('')+'</ul>'):'<div class="muted" style="font-size:12px;margin:2px 0 8px">none</div>'; }; el.innerHTML='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><div style="font-size:40px;font-weight:800;color:'+col+'">'+avg+'<span style="font-size:16px;color:var(--mut)">/5</span></div><div><div style="font-weight:600">Average grade · '+esc(j.month||'')+'</div><div class="muted" style="font-size:12px">'+j.count+' graded day'+(j.count===1?'':'s')+'</div></div></div>'+(j.summary?('<div class="legend" style="margin-top:8px;white-space:pre-wrap">'+esc(j.summary)+'</div>'):'')+'<div style="margin-top:8px;font-size:13px"><b style="color:#4ade80">✓ What went well</b>'+lst(j.good,'#a7d9b5')+'</div><div style="font-size:13px"><b style="color:#f87171">⚠ To work on</b>'+lst(j.bad,'#e6a5a5')+'</div>'; }
 async function loadWeeklyHide(){ if(!GPW) return; try{ var r=await fetch(api('weekly_hide')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json(); var c=document.getElementById('weeklyHideChk'); if(c) c.checked=!!(j&&j.hidden); }catch(e){} }
 async function setWeeklyHide(){ if(!GPW) return; var c=document.getElementById('weeklyHideChk'); var st=document.getElementById('weeklyHideStatus'); if(st) st.textContent='Saving...'; try{ var r=await fetch(api('weekly_hide'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({hidden:!!(c&&c.checked)})}); var j=await r.json(); if(st) st.textContent=(j&&j.ok)?((j.hidden)?'Hidden from Victor':'Visible to Victor'):'failed'; }catch(e){ if(st) st.textContent='error'; } }
 
 function renderWeekly(j){ if(j&&j.hidden){ var _wd=document.getElementById('weeklyDays'); if(_wd) _wd.innerHTML='<span class="muted">Your weekly report is being updated - it will be back shortly.</span>'; var _nr=document.getElementById('weeklyNarrative'); if(_nr) _nr.innerHTML=''; var _r0=document.getElementById('weeklyRange'); if(_r0) _r0.textContent='updating...'; return; }
-  const rng=document.getElementById('weeklyRange'); if(rng) rng.textContent=(j.weekStart||'')+' \u2192 '+(j.weekEnd||'')+(j.avgGrade!=null?('  \u00b7  avg '+j.avgGrade+'/100'):'  \u00b7  no grades yet');
+  const rng=document.getElementById('weeklyRange'); if(rng) rng.textContent=(j.weekStart||'')+' \u2192 '+(j.weekEnd||'')+(j.avgGrade!=null?('  \u00b7  avg '+j.avgGrade+'/5'):'  \u00b7  no grades yet');
   const nar=document.getElementById('weeklyNarrative'); if(nar) nar.innerHTML=j.narrative?('<b>This week:</b> '+esc(j.narrative)):'';
   const el=document.getElementById('weeklyDays'); if(!el) return;
-  const rows=(j.days||[]).map(function(d){ const c=(d.grade==null)?'#9fb0c0':(d.grade>=75?'#4ade80':d.grade>=45?'#f4b942':'#f87171');
-    return '<div style="padding:8px 0;border-top:1px solid #26354a"><div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline"><b>'+esc(d.weekday)+' '+esc((d.date||'').slice(5))+'</b><span style="color:'+c+';font-weight:700">'+(d.grade==null?'\u2014':d.grade+'/100')+(d.owner_graded?' \u2713':'')+'</span></div>'+(d.explanation?('<div class="muted" style="font-size:12px;margin-top:2px">'+esc(d.explanation)+'</div>'):'')+'</div>'; }).join('');
+  const rows=(j.days||[]).map(function(d){ const c=(d.grade==null)?'#9fb0c0':(d.grade>=4?'#4ade80':d.grade>=3?'#f4b942':'#f87171');
+    return '<div style="padding:8px 0;border-top:1px solid #26354a"><div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline"><b>'+esc(d.weekday)+' '+esc((d.date||'').slice(5))+'</b><span style="color:'+c+';font-weight:700">'+(d.grade==null?'\u2014':d.grade+'/5')+(d.owner_graded?' \u2713':'')+'</span></div>'+(d.explanation?('<div class="muted" style="font-size:12px;margin-top:2px">'+esc(d.explanation)+'</div>'):'')+'</div>'; }).join('');
   el.innerHTML=rows||'<span class="muted">No grades this week yet.</span>'; }
 async function loadTodo(){ try{ const r=await fetch(api('todo_get')+'&cb='+Date.now()); const j=await r.json();
   const a=document.getElementById('todoOpen'); if(a){ if(j&&j.source_url){ a.href=j.source_url; a.textContent='Open document'; a.style.pointerEvents=''; a.style.opacity=''; } else { a.href='#'; a.textContent='No document connected yet'; a.style.pointerEvents='none'; a.style.opacity='.5'; } }

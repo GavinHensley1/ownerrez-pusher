@@ -1029,9 +1029,9 @@ async function weeklyNarrative(rep, force){
   if(!rep.days.some(function(d){return d.grade!=null;})) return null;
   const cacheKey="parkside:weekly_ai:"+rep.weekStart;
   if(!force){ try{ if(redis){ const c=await redis.get(cacheKey); if(c && c.gradedDays===rep.gradedDays && c.text) return c.text; } }catch(e){} }
-  const lines=rep.days.map(function(d){ return d.date+" ("+d.weekday+"): "+(d.grade!=null?(d.grade+"/100"+(d.source==="owner"?" [owner-graded]":"")):"no grade")+(d.explanation?(" — "+d.explanation):""); }).join("\n");
+  const lines=rep.days.map(function(d){ return d.date+" ("+d.weekday+"): "+(d.grade!=null?(d.grade+"/5"+(d.source==="owner"?" [owner-graded]":"")):"no grade")+(d.explanation?(" — "+d.explanation):""); }).join("\n");
   const sys="You write a short, constructive WEEKLY work summary addressed directly to Victor (maintenance/operations at a glamping resort). Honest but encouraging and specific. Cover: how the week went overall, which days were strong and why, which were weak or need improvement and where to focus. 3-5 short sentences, plain paragraph (no JSON, no lists).";
-  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0.3,system:sys,messages:[{role:"user",content:"Week of "+rep.weekStart+" to "+rep.weekEnd+". Average grade: "+(rep.avgGrade!=null?(rep.avgGrade+"/100"):"n/a")+".\nDaily grades:\n"+lines}]})});
+  try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0.3,system:sys,messages:[{role:"user",content:"Week of "+rep.weekStart+" to "+rep.weekEnd+". Average grade: "+(rep.avgGrade!=null?(rep.avgGrade+"/5"):"n/a")+".\nDaily grades:\n"+lines}]})});
     const j=await r.json(); if(!r.ok) return null; const text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
     try{ if(redis&&text) await redis.set(cacheKey,{text,gradedDays:rep.gradedDays}); }catch(e){}
     return text||null;
@@ -1052,10 +1052,10 @@ function monthlyReportHtml(mr){
   if(!mr.weeks.length) body+='<p>No graded days this month yet.</p>';
   for(const w of mr.weeks){
     body+='<div style="border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;margin-bottom:12px">'
-      +'<div style="font-weight:700;margin-bottom:4px">Week of '+escHtml(w.weekStart)+' – '+escHtml(w.weekEnd)+(w.avgGrade!=null?(' · avg '+w.avgGrade+'/100'):'')+'</div>';
+      +'<div style="font-weight:700;margin-bottom:4px">Week of '+escHtml(w.weekStart)+' – '+escHtml(w.weekEnd)+(w.avgGrade!=null?(' · avg '+w.avgGrade+'/5'):'')+'</div>';
     if(w.narrative) body+='<div style="font-size:13px;color:#334155;margin-bottom:8px">'+escHtml(w.narrative)+'</div>';
     body+='<table style="width:100%;border-collapse:collapse;font-size:13px">';
-    for(const d of w.days){ const g=(d.grade==null?'—':d.grade+'/100'); body+='<tr><td style="padding:3px 0;color:#475569;white-space:nowrap">'+escHtml(d.weekday.slice(0,3))+' '+escHtml(d.date.slice(5))+'</td><td style="padding:3px 8px;font-weight:600;white-space:nowrap">'+g+'</td><td style="padding:3px 0;color:#64748b">'+escHtml(d.explanation||'')+'</td></tr>'; }
+    for(const d of w.days){ const g=(d.grade==null?'—':d.grade+'/5'); body+='<tr><td style="padding:3px 0;color:#475569;white-space:nowrap">'+escHtml(d.weekday.slice(0,3))+' '+escHtml(d.date.slice(5))+'</td><td style="padding:3px 8px;font-weight:600;white-space:nowrap">'+g+'</td><td style="padding:3px 0;color:#64748b">'+escHtml(d.explanation||'')+'</td></tr>'; }
     body+='</table></div>';
   }
   body+='<p style="color:#94a3b8;font-size:12px">Automated monthly report from the Parkside engine.</p></div>';
@@ -1927,13 +1927,14 @@ async function scoreDay(date, device){
     "Do NOT nitpick that every minute was active \u2014 short breaks, phone calls, and idle gaps are normal and fine. Judge productivity at an hour-to-two-hour granularity: was the time GENERALLY productive and not wasted (the real concern is an employee on his phone all day, not one who took a call). "+
     "Cross-check any CLEANING claims against the bookings/cleaning ground-truth: a unit needs a full turnover clean when a guest checked OUT that day. If he claims he cleaned MORE units than there were checkouts, flag the excess as unverified in discrepancies; markedly fewer cleanings than checkouts may mean turnovers were skipped. "+
     "RECORDED TIME OFF IS APPROVED AND AUTHORITATIVE: when the data says Victor logged time off (a number of hours, or a full day), you MUST exclude that time from all productivity expectations \u2014 judge him ONLY over his on-duty hours and NEVER lower any score because of inactivity, absence, or low activity that falls within his recorded time off. "+"If a to-do list is provided, treat work that advances items on it as valued/expected; he should stay roughly (not exactly) aligned to it, and maintenance is expected even if unlisted. Use the WebWork data PRIMARILY to verify he was actually ACTIVE and what he genuinely used (apps & websites / URLs + activity rate) to corroborate desk/admin/computer claims; do NOT treat WebWork project/task names as proof of what he worked on (those labels can be stale). "+
-    "Return ONLY a JSON object: {\"truth_score\":0-100, \"productivity_score\":0-100, \"hours_worked\":<number, from the data>, \"matches\":[\"...\"], \"discrepancies\":[\"...\"], \"summary\":\"1-2 sentences\"}. "+
+    "Return ONLY a JSON object: {\"truth_score\":0-100, \"productivity_score\":1-5, \"hours_worked\":<number, from the data>, \"matches\":[\"...\"], \"discrepancies\":[\"...\"], \"summary\":\"exactly two sentences\"}. "+
     "truth_score = how well his report is corroborated by the data (100 = fully consistent, low = claims contradicted by the data). "+
-    "productivity_score = how productive and on-list the day was given the to-do list, GPS on-site time, and screen activity (100 = clearly productive on valued work, low = little evidence of productive/valued work). "+
-    "If example gradings from the owner (Gavin) are provided below, your productivity_score MUST predict the grade GAVIN would give \u2014 learn his standard from those examples; his grading is the ground truth.";
+    "productivity_score = a WHOLE-NUMBER grade from 1 to 5 for how productive and on-list the day was, given the to-do list, GPS on-site time, and screen activity (5 = clearly productive on valued work all day; 4 = solid, productive day; 3 = mixed/average; 2 = little productive work; 1 = essentially no productive work). "+
+    "summary = EXACTLY TWO SENTENCES and concise. First sentence: state that his actions/report were verified against the tracking data. Second sentence: give the single main reason for the grade. Do NOT list every good and every bad thing \u2014 just that actions were verified and the one main reason (e.g. \"His actions were verified against the GPS and computer activity data. The grade reflects a productive day focused on the listed turnover cleaning.\"). "+
+    "If example gradings from the owner (Gavin) are provided below, your productivity_score MUST predict the 1-5 grade GAVIN would give \u2014 learn his standard from those examples; his grading is the ground truth.";
   const todoBlock=(todoDoc&&todoDoc.trim())?("\nVICTOR'S CURRENT TO-DO LIST (living doc \u2014 admin + general tasks; maintenance expected, may be unlisted):\n"+String(todoDoc).slice(0,3000)+"\n"):"";
   let exBlock="";
-  if(gradeExamples&&gradeExamples.length){ exBlock="\nHOW GAVIN (owner) GRADED PAST DAYS FOR PRODUCTIVITY (0-100) \u2014 match his standard:\n"+gradeExamples.map(function(e){ const sn=e.snap||{}; return "- "+e.date+" \u2192 "+Math.round(e.grade)+"/100"+(e.note?(" ("+String(e.note).slice(0,140)+")"):"")+". Data: "+(sn.hours_summary||"")+"; "+(sn.gps_summary||"")+"; "+(sn.screen_summary||"")+"."; }).join("\n")+"\n"; }
+  if(gradeExamples&&gradeExamples.length){ exBlock="\nHOW GAVIN (owner) GRADED PAST DAYS FOR PRODUCTIVITY (1-5) \u2014 match his standard:\n"+gradeExamples.map(function(e){ const sn=e.snap||{}; return "- "+e.date+" \u2192 "+Math.round(e.grade)+"/5"+(e.note?(" ("+String(e.note).slice(0,140)+")"):"")+". Data: "+(sn.hours_summary||"")+"; "+(sn.gps_summary||"")+"; "+(sn.screen_summary||"")+"."; }).join("\n")+"\n"; }
   const offBlock=(offMin>0)?("\nRECORDED TIME OFF (authoritative): Victor logged "+timeOff.hours+" hour(s) off on "+date+". Carve this out of all productivity expectations \u2014 evaluate ONLY his on-duty hours and do not count any inactivity during the recorded time off against him.\n"):"";
   const userMsg=dataBlock+offBlock+todoBlock+exBlock+"\nVICTOR'S SELF-REPORT:\n"+String(report).slice(0,4000);
   try{
@@ -1943,7 +1944,7 @@ async function scoreDay(date, device){
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim(); let o=null;
     try{ const m=text.match(/\{[\s\S]*\}/); o=JSON.parse(m?m[0]:text); }catch(e){ o=null; }
     if(!o) return {error:"could not parse AI response", raw:text.slice(0,300)};
-    const out={ date, scored_at:new Date().toISOString(), truth_score:Number(o.truth_score), productivity_score:Number(o.productivity_score!=null?o.productivity_score:o.truth_score), hours_worked:Number(o.hours_worked!=null?o.hours_worked:(hours.hours||0)),
+    const out={ date, scored_at:new Date().toISOString(), truth_score:Number(o.truth_score), productivity_score:Math.max(1,Math.min(5,Math.round(Number(o.productivity_score!=null?o.productivity_score:3))||3)), hours_worked:Number(o.hours_worked!=null?o.hours_worked:(hours.hours||0)),
       matches:Array.isArray(o.matches)?o.matches:[], discrepancies:Array.isArray(o.discrepancies)?o.discrepancies:[], summary:String(o.summary||""),
       data:{hours, zones, screen, todo_present:!!(todoDoc&&todoDoc.trim()), timeoff:{hours:(timeOff&&timeOff.hours)||0, off_min:offMin, full_day:!!(timeOff&&timeOff.fullDay)}} };
     try{ if(redis) await redis.set("parkside:score:"+date, out); }catch(e){}
@@ -2530,15 +2531,15 @@ if(action==="email_recipients"){
       }
       const count=graded.length;
       const average=count?Math.round(graded.reduce(function(s,x){return s+x.grade;},0)/count):null;
-      const fmt=function(x){ return x.date+" — "+x.grade+"/100"+(x.note?(" ("+x.note+")"):""); };
-      const good=graded.filter(function(x){return x.grade>=80;}).map(fmt);
-      const bad=graded.filter(function(x){return x.grade<60;}).map(fmt);
+      const fmt=function(x){ return x.date+" — "+x.grade+"/5"+(x.note?(" ("+x.note+")"):""); };
+      const good=graded.filter(function(x){return x.grade>=4;}).map(fmt);
+      const bad=graded.filter(function(x){return x.grade<=2;}).map(fmt);
       let summary="";
       const key=process.env.ANTHROPIC_API_KEY;
       if(key && count){
-        const lines=graded.map(function(x){ return x.date+": "+x.grade+"/100"+(x.note?(" — "+x.note):""); }).join("\n");
-        const sys="You summarize a maintenance/operations worker's month at a glamping resort using the owner's daily grades (0-100) and notes. Write 3-5 short sentences: what went well this month, and what to work on / improve next month. Honest, specific, constructive. Plain prose paragraph, no lists, no JSON.";
-        try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0.3,system:sys,messages:[{role:"user",content:"Month "+month+". Average grade: "+(average!=null?(average+"/100"):"n/a")+" across "+count+" graded day(s).\nDaily grades:\n"+lines}]})});
+        const lines=graded.map(function(x){ return x.date+": "+x.grade+"/5"+(x.note?(" — "+x.note):""); }).join("\n");
+        const sys="You summarize a maintenance/operations worker's month at a glamping resort using the owner's daily grades (1-5) and notes. Write 3-5 short sentences: what went well this month, and what to work on / improve next month. Honest, specific, constructive. Plain prose paragraph, no lists, no JSON.";
+        try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:400,temperature:0.3,system:sys,messages:[{role:"user",content:"Month "+month+". Average grade: "+(average!=null?(average+"/5"):"n/a")+" across "+count+" graded day(s).\nDaily grades:\n"+lines}]})});
           const j=await r.json(); if(r.ok) summary=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
         }catch(e){}
       }
@@ -2565,9 +2566,9 @@ if(action==="email_recipients"){
       let report="";
       const key=process.env.ANTHROPIC_API_KEY;
       if(key && count){
-        const lines=days.map(function(x){ return x.date+": "+x.grade+"/100"+(x.owner?" [owner]":"")+(x.explanation?(" - "+x.explanation):""); }).join("\n");
-        const sys="You are writing a VERY SHORT monthly performance report for a maintenance/operations worker at a glamping resort, from the owner's daily grades (0-100) and notes for the month. Write about TWO sentences. Call out the RECURRING strengths (patterns that repeat across multiple days) and the RECURRING weaknesses (issues that repeat across multiple days). Focus on what repeats, not one-off days. Plain prose, no lists, no JSON, no preamble.";
-        try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:220,temperature:0.3,system:sys,messages:[{role:"user",content:"Month "+month+". Average grade: "+(average!=null?(average+"/100"):"n/a")+" across "+count+" graded day(s).\nDaily grades + notes:\n"+lines}]})});
+        const lines=days.map(function(x){ return x.date+": "+x.grade+"/5"+(x.owner?" [owner]":"")+(x.explanation?(" - "+x.explanation):""); }).join("\n");
+        const sys="You are writing a VERY SHORT monthly performance report for a maintenance/operations worker at a glamping resort, from the owner's daily grades (1-5) and notes for the month. Write about TWO sentences. Call out the RECURRING strengths (patterns that repeat across multiple days) and the RECURRING weaknesses (issues that repeat across multiple days). Focus on what repeats, not one-off days. Plain prose, no lists, no JSON, no preamble.";
+        try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:220,temperature:0.3,system:sys,messages:[{role:"user",content:"Month "+month+". Average grade: "+(average!=null?(average+"/5"):"n/a")+" across "+count+" graded day(s).\nDaily grades + notes:\n"+lines}]})});
           const j=await r.json(); if(r.ok) report=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
         }catch(e){}
       }
@@ -2590,7 +2591,7 @@ if(action==="email_recipients"){
           const expl = (grade&&grade.note)?String(grade.note):(score&&score.summary?String(score.summary):"");
           // item MW-5: the model isn't trained/published yet — do NOT expose per-day AI reasoning to
           // Victor. Only Gavin's view receives the explanation text; Victor gets the bare score.
-          if(g!=null){ const drec={date:d, grade:Math.round(g), source:ownerG?"owner":"ai"}; if(isGavin) drec.explanation=expl; days.push(drec); sum+=g; cnt++; }
+          if(g!=null){ const drec={date:d, grade:Math.round(g), source:ownerG?"owner":"ai", explanation:expl}; days.push(drec); sum+=g; cnt++; }
         }
         d=etDateAddDays(d,1);
       }
@@ -2610,9 +2611,9 @@ if(action==="email_recipients"){
       const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
       if(b.grade===""||b.grade==null){ if(redis){ try{ await redis.del("parkside:grade:"+date); await redis.zrem("parkside:grades_index",date); }catch(e){} } return res.status(200).json({ok:true, cleared:true, date}); }
-      const g=Number(b.grade); if(!isFinite(g)) return res.status(400).json({error:"grade must be a number 0-100"});
+      const g=Number(b.grade); if(!isFinite(g)) return res.status(400).json({error:"grade must be a number 1-5"});
       const snap=await buildDaySnapshot(date, device);
-      const rec={date, grade:Math.max(0,Math.min(100,Math.round(g))), note:String(b.note||"").slice(0,500), by:"gavin", at:new Date().toISOString(), snap};
+      const rec={date, grade:Math.max(1,Math.min(5,Math.round(g))), note:String(b.note||"").slice(0,500), by:"gavin", at:new Date().toISOString(), snap};
       try{ if(redis){ await redis.set("parkside:grade:"+date, rec); await redis.zadd("parkside:grades_index",{score:Number(date.replace(/-/g,'')),member:date}); } }catch(e){}
       let count=0; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); count=(z||[]).length; } }catch(e){}
       return res.status(200).json(Object.assign({ok:true, graded_count:count}, rec));
