@@ -181,6 +181,21 @@ async function getSavedTurnoverDay(ds){ try{ if(redis){ const v=await redis.get(
 async function resolveTurnovers(fromDate,days){ const live=await getTurnovers(fromDate,days,true); const etToday=etDate(new Date().toISOString()); const out={};
   for(const ds of Object.keys(live)){ if(ds<etToday){ const saved=await getSavedTurnoverDay(ds); if(saved){ out[ds]=saved; continue; } } out[ds]=live[ds]; if(ds<=etToday){ await saveTurnoverDay(ds,live[ds]); } }
   return out; }
+// Historical booking events straight from the OwnerRez bookings API (the iCal feed drops PAST stays,
+// so this is the only source that can rebuild cleaning ground-truth for days that already passed).
+async function apiBookingEvents(fromDate,toDate){
+  const pids=UNITS.map(function(u){return u.orp;}).join(","); const byUnit={}; for(const u of UNITS) byUnit[u.orp]=[];
+  let offset=0, guard=0;
+  while(guard++<25){
+    const url="https://api.ownerrez.com/v2/bookings?property_ids="+encodeURIComponent(pids)+"&from="+fromDate+"&to="+toDate+"&limit=100&offset="+offset;
+    let r,data; try{ r=await orFetch(url,{prefer:"basic",headers:{Accept:"application/json"}}); data=await r.json(); }catch(e){ break; }
+    if(!r||!r.ok) break;
+    const items=(data.items||[]).filter(function(b){return !b.is_block && (b.type==="booking"||!b.type);});
+    for(const b of items){ const arr=String(b.arrival||"").slice(0,10), dep=String(b.departure||"").slice(0,10); if(arr&&dep&&byUnit[b.property_id]) byUnit[b.property_id].push([arr,dep]); }
+    if(items.length<100) break; offset+=100;
+  }
+  return byUnit;
+}
 
 function buildAgg(booked,start,days){
   const s=new Date(start+"T00:00:00Z"); const unitAgg={},poolAgg={},nightPool={}; for(const u of UNITS)unitAgg[u.orp]={};
@@ -2100,6 +2115,25 @@ module.exports=async(req,res)=>{
       let tv={}; try{ tv=await resolveTurnovers(from,ndays); }catch(e){ return res.status(200).json({error:"booking feed unavailable",days:[]}); }
       const rows=Object.keys(tv).sort().map(function(ds){ const t=tv[ds]; return { date:ds, occupied:t.occupied.length, cleaningsNeeded:t.checkouts.length, checkoutUnits:t.checkouts, arrivals:t.arrivals.length, isToday:ds===etToday, future:ds>etToday }; });
       return res.status(200).json({ today:etToday, unitCount:UNITS.length, days:rows });
+    }
+    // One-time backfill: rebuild + persist cleaning ground-truth for PAST days from the OwnerRez bookings API.
+    if(action==="turn_backfill"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      if(!orBasicHeader() && !(await orOauthHeader())) return res.status(503).json({error:"OwnerRez API credentials not set"});
+      const etToday=etDate(new Date().toISOString());
+      const from=String((req.query&&req.query.from)||"").trim(); const to=String((req.query&&req.query.to)||etToday).trim();
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(from)) return res.status(400).json({error:"from=YYYY-MM-DD required"});
+      const qStart=new Date(from+"T00:00:00Z"); qStart.setUTCDate(qStart.getUTCDate()-21); const apiFrom=qStart.toISOString().slice(0,10);
+      let byUnit; try{ byUnit=await apiBookingEvents(apiFrom,to); }catch(e){ return res.status(502).json({error:"OwnerRez fetch failed: "+String(e.message||e)}); }
+      const nameOf={}; for(const u of UNITS) nameOf[u.orp]=u.name;
+      const s=new Date(from+"T00:00:00Z"), e=new Date(to+"T00:00:00Z"); const saved=[]; let n=0;
+      for(let d=new Date(s); d<=e; d.setUTCDate(d.getUTCDate()+1)){ const ds=d.toISOString().slice(0,10);
+        const occ=[],co=[],arr=[];
+        for(const u of UNITS){ const nm=nameOf[u.orp]; for(const pair of (byUnit[u.orp]||[])){ const st=pair[0], en=pair[1]; if(st<=ds&&ds<en&&occ.indexOf(nm)<0)occ.push(nm); if(en===ds&&co.indexOf(nm)<0)co.push(nm); if(st===ds&&arr.indexOf(nm)<0)arr.push(nm); } }
+        const t={occupied:occ,checkouts:co,arrivals:arr};
+        if(ds<=etToday && (co.length||occ.length||arr.length)){ await saveTurnoverDay(ds,t); n++; saved.push(ds+" co:"+co.length+" occ:"+occ.length); }
+      }
+      return res.status(200).json({ok:true, from, to, apiFrom, savedDays:n, sample:saved.slice(0,60)});
     }
     // ===== Fraud Alert (Gavin-only): payout-account integrity + receipt reconciliation =====
     // Storage blob parkside:fraud = { accounts:{channel:{...}}, checks:[], receipts:[], alerts:[] }
