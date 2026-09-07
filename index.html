@@ -527,7 +527,11 @@
           <div style="background:#101a29;border:1px solid #1e2b3f;border-radius:12px;overflow:hidden">
             <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:14px 16px 12px">
               <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">Location</div>
-              <button id="tepEditBtn" class="ghost" onclick="tepEditToggle()" style="padding:5px 11px;font-size:11.5px">📍 Fix tepee positions</button>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span id="gvPlayTime" style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:#7f8fa6"></span>
+                <button id="gvPlayBtn" class="ghost" onclick="gvPlayDay()" style="padding:5px 11px;font-size:11.5px">▶ Play day</button>
+                <button id="tepEditBtn" class="ghost" onclick="tepEditToggle()" style="padding:5px 11px;font-size:11.5px">📍 Fix tepee positions</button>
+              </div>
             </div>
             <div id="monMap" style="height:320px;margin:0 16px;border-radius:10px;overflow:hidden;border:1px solid #223047;background:#0c141d"></div>
             <!-- Click-to-place tepee editor (Gavin fixes tepee positions by clicking the map; no coords/API needed). -->
@@ -1385,7 +1389,7 @@ function renderAuditCard(c){
   +'</div>';
 }
 // ===== Monitoring (Gavin) tab: GPS map overlay =====
-let GPW='', MON_MAP=null, MON_LAYERS=null, MON_TIMER=null, MON_EDIT_LAYERS=null;
+let GPW='', MON_MAP=null, MON_LAYERS=null, MON_TIMER=null, MON_EDIT_LAYERS=null, MON_TRAIL=[], MON_PLAY_TIMER=null, MON_LAST_J=null;
 // Tepee position editor (drag-and-drop) state.
 var TEPEE_EDIT=false, TEPEE_EDIT_LIST=[], TEPEE_ACTIVE=0, TEPEE_EDIT_OBJ=[];
 // item 9: coherent, legible zone palette. Each location gets one distinct hue and off-site is a
@@ -1629,6 +1633,33 @@ function initMonMap(){ if(MON_MAP) return;
 }
 function monAutoToggle(){ const el=document.getElementById('monAuto'); const on=el?el.checked:true; if(MON_TIMER){clearInterval(MON_TIMER);MON_TIMER=null;} if(on&&GPW) MON_TIMER=setInterval(loadMonitor,45000); }
 function fmtWhen(t){ try{ return new Date(t).toLocaleString(); }catch(e){ return t||''; } }
+// Playback: reveal the day's GPS points from first to last at ~100x real time (idle gaps compressed,
+// each step's delay = real gap / 100, clamped 15-1200ms) with a moving cursor + growing trail.
+function gvPlayStop(silent){ if(MON_PLAY_TIMER){ clearTimeout(MON_PLAY_TIMER); MON_PLAY_TIMER=null; } var b=document.getElementById('gvPlayBtn'); if(b) b.textContent='▶ Play day'; if(!silent){ var tl=document.getElementById('gvPlayTime'); if(tl) tl.textContent=''; } }
+function gvPlayDay(){
+  var btn=document.getElementById('gvPlayBtn'); var tl=document.getElementById('gvPlayTime');
+  if(MON_PLAY_TIMER){ gvPlayStop(true); if(MON_LAST_J) renderMonitor(MON_LAST_J); if(tl) tl.textContent=''; return; }
+  var trail=(MON_TRAIL||[]).filter(function(p){return p&&isFinite(p.lat)&&isFinite(p.lon);});
+  if(trail.length<2){ if(tl) tl.textContent='no location trail for this day'; return; }
+  try{ MON_LAYERS.clearLayers(); }catch(e){}
+  if(MON_LAST_J) monDrawContext(MON_LAST_J);
+  try{ MON_MAP.fitBounds(trail.map(function(p){return [p.lat,p.lon];}),{padding:[30,30]}); }catch(e){}
+  var line=L.polyline([],{color:'#ffffff',weight:2.5,opacity:0.85}).addTo(MON_LAYERS);
+  var cursor=null, i=0; if(btn) btn.textContent='⏸ Stop';
+  function step(){
+    if(i>=trail.length){ MON_PLAY_TIMER=null; if(btn) btn.textContent='↻ Replay day'; if(tl) tl.textContent='finished · '+trail.length+' points'; return; }
+    var p=trail[i]; var c=ZONE_COLORS[p.zone||'off']||'#94a3b8';
+    if(i===0){ L.circleMarker([p.lat,p.lon],{radius:7,color:'#22c55e',fillColor:'#22c55e',fillOpacity:1,weight:2}).addTo(MON_LAYERS).bindTooltip('Start · '+fmtWhen(p.t),{direction:'top'}); }
+    line.addLatLng([p.lat,p.lon]);
+    L.circleMarker([p.lat,p.lon],{radius:3.5,color:c,fillColor:c,fillOpacity:0.9,weight:1}).addTo(MON_LAYERS);
+    if(cursor){ try{ MON_LAYERS.removeLayer(cursor); }catch(e){} }
+    cursor=L.circleMarker([p.lat,p.lon],{radius:8,color:'#fff',fillColor:c,fillOpacity:1,weight:2}).addTo(MON_LAYERS);
+    if(tl) tl.textContent=fmtWhen(p.t)+'  ·  '+(i+1)+'/'+trail.length;
+    var delay=180; if(i+1<trail.length){ var gap=(new Date(trail[i+1].t)-new Date(p.t)); if(isFinite(gap)&&gap>0){ delay=Math.max(15,Math.min(1200, gap/100)); } }
+    i++; MON_PLAY_TIMER=setTimeout(step, delay);
+  }
+  step();
+}
 function agoStr(t){ try{ var s=(Date.now()-new Date(t).getTime())/1000; if(!isFinite(s)) return ''; if(s<0)s=0; if(s<90) return Math.round(s)+'s ago'; if(s<5400) return Math.round(s/60)+' min ago'; if(s<172800) return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago'; }catch(e){ return ''; } }
 async function loadMonitor(){ if(!GPW) return; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const date=(document.getElementById('monDate')||{}).value||'';
   try{ const r=await fetch(api('gps_status')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}});
@@ -1639,7 +1670,7 @@ async function loadMonitor(){ if(!GPW) return; const dev=(document.getElementByI
     renderMonitor(j); try{ renderTepeeDwell(j._tepees); }catch(e){} }
   catch(e){ document.getElementById('monNow').textContent='Error: '+e.message; }
 }
-function renderMonitor(j){ if(!MON_MAP) initMonMap(); MON_LAYERS.clearLayers();
+function monDrawContext(j){
   const zones=j.zones||[];
   for(const z of zones){ if(z.name==='resort') continue; const c=ZONE_COLORS[z.name]||'#93c5fd';
     L.circle([z.lat,z.lon],{radius:z.radius_m,color:c,weight:1.5,fillColor:c,fillOpacity:0.10}).addTo(MON_LAYERS).bindTooltip(z.name,{permanent:true,direction:'center'}); }
@@ -1651,7 +1682,9 @@ function renderMonitor(j){ if(!MON_MAP) initMonMap(); MON_LAYERS.clearLayers();
     for(const t of _tps){ if(!isFinite(t.lat)||!isFinite(t.lon)) continue; const _cf=!!t.confirmed;
       L.circle([t.lat,t.lon],{radius:(t.display_radius_m||t.radius_m||12),color:'#f472b6',weight:_cf?1.6:1.2,dashArray:_cf?null:'4 4',fillColor:'#f472b6',fillOpacity:0.10}).addTo(MON_LAYERS)
         .bindTooltip(t.name+(t.min?(' · '+t.min+'m'):''),{permanent:true,direction:'center',className:'tepeeLbl'}); } }catch(e){} }
-  const trail=(j.trail||[]).filter(function(p){return p&&isFinite(p.lat)&&isFinite(p.lon);});
+}
+function renderMonitor(j){ if(!MON_MAP) initMonMap(); gvPlayStop(true); MON_LAST_J=j; MON_LAYERS.clearLayers(); monDrawContext(j);
+  const trail=(j.trail||[]).filter(function(p){return p&&isFinite(p.lat)&&isFinite(p.lon);}); MON_TRAIL=trail;
   if(trail.length>1) L.polyline(trail.map(function(p){return [p.lat,p.lon];}),{color:'#ffffff',weight:2,opacity:0.55}).addTo(MON_LAYERS);
   for(const p of trail){ const c=ZONE_COLORS[p.zone||'off']||'#94a3b8'; L.circleMarker([p.lat,p.lon],{radius:4,color:c,fillColor:c,fillOpacity:0.9,weight:1}).addTo(MON_LAYERS).bindPopup((p.zone||'off')+' · '+fmtWhen(p.t)); }
   const last=j.last; if(last&&isFinite(last.lat)){ const c=ZONE_COLORS[last.zone||'off']||'#94a3b8';
