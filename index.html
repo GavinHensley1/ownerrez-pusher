@@ -485,6 +485,7 @@
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#101a29;border:1px solid #1e2b3f;border-radius:12px;padding:16px;padding:8px 12px">
         <div id="gvAutoChip" onclick="gvAutoGrade()" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:5px 11px;border-radius:7px;font-size:12px;font-weight:600;background:#12271e;border:1px solid #1f4634;color:#6ee7b7">
           <span style="width:7px;height:7px;border-radius:50%;display:block;background:#34d399"></span> Auto-grade on</div>
+        <div id="gvHideAiChip" onclick="gvHideAi()" title="When on, auto-graded (AI) days stay hidden from Victor; your manual grades still show." style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:5px 11px;border-radius:7px;font-size:12px;font-weight:600;background:#0e1622;border:1px solid #223047;color:#7f8fa6"><span style="width:7px;height:7px;border-radius:50%;display:block;background:#3a4658"></span> AI grades shown to Victor</div>
         <span style="font-size:11.5px;color:#64758d">Engine drafts a grade; you confirm below.</span>
         <span style="flex:1"></span>
         <!-- item 8: real per-day hide toggle (persists to backend; hides the day's grade from Victor). -->
@@ -1394,7 +1395,7 @@ const ZONE_COLORS={office:'#60a5fa', tepees:'#22d3ee', maintenance:'#f59e0b', re
 async function gavinUnlock(){
   const v=(document.getElementById('gpw').value||'').trim(); const err=document.getElementById('gavinErr'); err.textContent='';
   try{ const r=await fetch(api('gavin_auth'),{headers:{'x-gavin-password':v}}); const j=await r.json();
-    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); loadEmailFlags(); monAutoToggle(); initMonCal(); gvAutoGradeInit(); gvNav('day'); }
+    if(j&&j.ok){ GPW=v; document.getElementById('gavinGate').style.display='none'; document.getElementById('gavinBody').style.display='grid'; initMonMap(); await populateDevices(); await populateDays(); loadMonitor(); loadScorecard(); loadWebActivity(); loadBonusOwner(); loadFraud(); loadCleaning(); loadCalls(); loadConn(); loadTodoDoc(); loadWeeklyHide(); loadEmailRecip(); loadEmailFlags(); monAutoToggle(); initMonCal(); gvAutoGradeInit(); loadHideAi(); gvNav('day'); }
     else if(j&&j.unset){ err.textContent='No Gavin password set on the server yet.'; }
     else { err.textContent='Wrong password'; } }
   catch(e){ err.textContent='Error: '+e.message; }
@@ -1431,6 +1432,12 @@ async function loadAutograde(){ if(!GPW) return;
     var on=(j&&j.enabled!==false); gvApplyAutoGrade(on); try{ localStorage.setItem('orp_autoGradeOff', on?'0':'1'); }catch(e){}
   }catch(e){}
 }
+function gvApplyHideAi(on){ var c=document.getElementById('gvHideAiChip'); if(!c) return; c.dataset.on=on?'1':'0';
+  if(on){ c.style.background='#1a1410'; c.style.borderColor='#45391f'; c.style.color='#e8c37a'; c.innerHTML='<span style="width:7px;height:7px;border-radius:50%;display:block;background:#e8c37a"></span> AI grades hidden from Victor'; }
+  else { c.style.background='#0e1622'; c.style.borderColor='#223047'; c.style.color='#7f8fa6'; c.innerHTML='<span style="width:7px;height:7px;border-radius:50%;display:block;background:#3a4658"></span> AI grades shown to Victor'; } }
+function gvHideAi(){ var c=document.getElementById('gvHideAiChip'); if(!c) return; var on=c.dataset.on==='1'; on=!on; gvApplyHideAi(on);
+  try{ fetch(api('hide_ai'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({enabled:on})}); }catch(e){} }
+async function loadHideAi(){ if(!GPW) return; try{ var r=await fetch(api('hide_ai')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); var j=await r.json(); gvApplyHideAi(!!(j&&j.enabled)); }catch(e){} }
 // item 8: per-day "Hide this day" — persists to the backend (survives reload) and removes the day's grade
 // from Victor's month snippet. Uses the selected date, or today (ET) when viewing the live day.
 function gvEffDate(){ var d=(document.getElementById('monDate')||{}).value||''; if(d) return d; try{ return new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'}); }catch(e){ return new Date().toISOString().slice(0,10); } }
@@ -2119,7 +2126,7 @@ async function loadBonus(){ loadCleans(); loadRefunds(); loadTodo(); loadTimeoff
 var WW_ACTIVE_WINDOW_MIN=15;
 async function loadWebworkVictor(){ var el=document.getElementById('wwAppsList'); if(!el) return; var h={}; if(PW) h['x-app-password']=PW;
   try{ var r=await fetch(api('ww_activity')+'&cb='+Date.now(),{headers:h}); var j=await r.json(); var a=j.apps||{};
-    var pct=document.getElementById('wwActPct'); if(pct) pct.textContent=(a.avg_activity_pct!=null?(a.avg_activity_pct+'% active'):'— active');
+    var hh=j.hours||{}; var pct=document.getElementById('wwActPct'); if(pct) pct.textContent=((hh.available&&hh.active_pct!=null)?(hh.active_pct+'% active'):'— active');
     (function(){ var dot=document.getElementById('wwDot'), lab=document.getElementById('wwLabel');
       var lat=j.last_active_ts||j.last_ts||null;
       var mins=lat?((Date.now()-new Date(lat).getTime())/60000):Infinity;

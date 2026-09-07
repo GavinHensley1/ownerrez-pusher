@@ -935,6 +935,9 @@ async function setEmailFlags(o){ o=o||{}; const clean={ gapAlert:(o.gapAlert!==f
 let _memAG=null;
 async function getAutograde(){ try{ const v=redis?(await redis.get("parkside:autograde_enabled")):_memAG; if(v!==null&&v!==undefined) return !(v===false||v==="false"||v==="0"||v===0); }catch(e){} return true; }
 async function setAutograde(on){ const en=(on!==false&&on!=="false"&&on!=="0"&&on!==0); try{ if(redis) await redis.set("parkside:autograde_enabled", en); else _memAG=en; }catch(e){} return en; }
+let _memHideAi=false;
+async function getHideAiDays(){ try{ const v=redis?(await redis.get("parkside:hide_ai_days")):_memHideAi; if(v!==null&&v!==undefined) return (v===true||v==="true"||v==="1"||v===1); }catch(e){} return false; }
+async function setHideAiDays(on){ const en=(on===true||on==="true"||on==="1"||on===1); try{ if(redis) await redis.set("parkside:hide_ai_days", en); else _memHideAi=en; }catch(e){} return en; }
 const EMAIL_CATALOG=[
   {key:"gap_alert", name:"Daily data-gap alert", desc:"When the engine can't fully grade a day (missing WebWork, GPS, or Victor's report)."},
   {key:"monthly", name:"Monthly work report", desc:"Full month summary of Victor's grades, emailed on the 1st."},
@@ -2299,7 +2302,7 @@ module.exports=async(req,res)=>{
       // Victor may read his OWN WebWork activity (My Work panel), as well as Gavin.
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
-      return res.status(200).json(Object.assign(await wwScreenActivity(date), {apps: await wwAppsWebsites(date)}));
+      return res.status(200).json(Object.assign(await wwScreenActivity(date), {apps: await wwAppsWebsites(date), hours: await wwHoursForDate(date)}));
     }
     // item MW5 (My Work): today's per-zone TIME (minutes) for the Location working card. Victor + Gavin.
     if(action==="my_location"){
@@ -2432,6 +2435,11 @@ if(action==="email_recipients"){
     if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(403).json({error:"gavin only"});
     if(req.method==="POST"){ let _b=req.body; if(typeof _b==="string"){ try{ _b=JSON.parse(_b);}catch(e){ _b={}; } } _b=_b||{}; const _want=(_b.enabled!==undefined?_b.enabled:_b.on); const _saved=await setAutograde(_want); return res.status(200).json({ok:true, enabled:_saved}); }
     return res.status(200).json({enabled:await getAutograde()});
+  }
+  if(action==="hide_ai"){
+    if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(403).json({error:"gavin only"});
+    if(req.method==="POST"){ let _b=req.body; if(typeof _b==="string"){ try{ _b=JSON.parse(_b);}catch(e){ _b={}; } } _b=_b||{}; const _want=(_b.enabled!==undefined?_b.enabled:_b.on); const _saved=await setHideAiDays(_want); return res.status(200).json({ok:true, enabled:_saved}); }
+    return res.status(200).json({enabled:await getHideAiDays()});
   }
   if(action==="weekly_hide"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
@@ -2581,16 +2589,20 @@ if(action==="email_recipients"){
       const first=month+"-01", last=monthLastDay(month);
       const isGavin=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x"));
       let hid=[]; if(!isGavin){ try{ if(redis){ const raw=await redis.get("parkside:day_hidden"); hid=Array.isArray(raw)?raw:(raw?JSON.parse(raw):[]); } }catch(e){ hid=[]; } }
+      let hideAi=false; if(!isGavin){ try{ hideAi=await getHideAiDays(); }catch(e){} }
       const days=[]; let d=first, sum=0, cnt=0;
       while(d<=last){
         if(isGavin || hid.indexOf(d)===-1){
           let score=null, grade=null; try{ if(redis){ score=await redis.get("parkside:score:"+d); grade=await redis.get("parkside:grade:"+d); } }catch(e){}
           const ownerG=!!(grade&&grade.grade!=null);
-          const g = ownerG ? Number(grade.grade) : (score&&score.truth_score!=null?Number(score.truth_score):null);
+          // "Hide AI grades from Victor": when on, Victor sees only Gavin's manual (owner) grades.
+          if(!(!isGavin && hideAi && !ownerG)){
+          let g = ownerG ? Number(grade.grade) : (score&&score.truth_score!=null?Number(score.truth_score):null);
+          // stale pre-1-5 AI scores were stored on a 0-100 scale; fold them onto 1-5 for display.
+          if(!ownerG && g!=null && g>5){ g=Math.max(1,Math.min(5,Math.round(g/20))); }
           const expl = (grade&&grade.note)?String(grade.note):(score&&score.summary?String(score.summary):"");
-          // item MW-5: the model isn't trained/published yet — do NOT expose per-day AI reasoning to
-          // Victor. Only Gavin's view receives the explanation text; Victor gets the bare score.
           if(g!=null){ const drec={date:d, grade:Math.round(g), source:ownerG?"owner":"ai", explanation:expl}; days.push(drec); sum+=g; cnt++; }
+          }
         }
         d=etDateAddDays(d,1);
       }
