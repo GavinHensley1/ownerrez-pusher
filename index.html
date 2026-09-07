@@ -2176,8 +2176,8 @@ async function loadAiScoreVictor(){ var av=document.getElementById('aiScoreAvg')
 function aiCalApply(){
   var av=document.getElementById('aiScoreAvg');
   var sum=0, cnt=0; for(var k in AICAL.map){ if(mwIsOffDate(k)) continue; if(aiCalTimeoffFull(k)) continue; var g=AICAL.map[k].grade; if(g!=null){ sum+=Number(g); cnt++; } }
-  AICAL.avg=cnt?Math.round(sum/cnt):null; AICAL.count=cnt;
-  var c=(AICAL.avg==null)?'#7f8fa6':(AICAL.avg>=4?'#34d399':AICAL.avg>=3?'#fbbf24':'#f87171'); if(av){ av.textContent=(AICAL.avg==null?'—':AICAL.avg); av.style.color=c; }
+  AICAL.avg=cnt?Math.round(sum/cnt*100)/100:null; AICAL.count=cnt;
+  var c=(AICAL.avg==null)?'#7f8fa6':(AICAL.avg>=4?'#34d399':AICAL.avg>=3?'#fbbf24':'#f87171'); if(av){ av.textContent=(AICAL.avg==null?'—':AICAL.avg.toFixed(2)); av.style.color=c; }
   var ct=document.getElementById('aiScoreCount'); if(ct) ct.textContent=(cnt?(cnt+' graded work-day'+(cnt===1?'':'s')+' this month'):'no graded work-days yet');
   renderAiCal();
 }

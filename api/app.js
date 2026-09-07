@@ -1022,7 +1022,7 @@ async function buildWeeklyReport(weekStart){
     if(g!=null){ sum+=g; graded++; } if(score) scored++;
     days.push({ date, weekday:weekdayName(date), grade:(g!=null?Math.round(g):null), source:src, owner_graded:ownerG, explanation:expl, truth:(score&&score.truth_score!=null?Math.round(score.truth_score):null), hours:(score&&score.hours_worked!=null?score.hours_worked:null) });
   }
-  return { weekStart, weekEnd:etDateAddDays(weekStart,6), days, avgGrade:(graded?Math.round(sum/graded):null), gradedDays:graded, scoredDays:scored };
+  return { weekStart, weekEnd:etDateAddDays(weekStart,6), days, avgGrade:(graded?Math.round(sum/graded*100)/100:null), gradedDays:graded, scoredDays:scored };
 }
 async function weeklyNarrative(rep, force){
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return null;
@@ -2529,7 +2529,7 @@ if(action==="email_recipients"){
         if(Array.isArray(_hid)&&_hid.length){ for(let _i=graded.length-1;_i>=0;_i--){ if(_hid.indexOf(graded[_i].date)!==-1) graded.splice(_i,1); } }
       }
       const count=graded.length;
-      const average=count?Math.round(graded.reduce(function(s,x){return s+x.grade;},0)/count):null;
+      const average=count?Math.round(graded.reduce(function(s,x){return s+x.grade;},0)/count*100)/100:null;
       const fmt=function(x){ return x.date+" — "+x.grade+"/5"+(x.note?(" ("+x.note+")"):""); };
       const good=graded.filter(function(x){return x.grade>=4;}).map(fmt);
       const bad=graded.filter(function(x){return x.grade<=2;}).map(fmt);
@@ -2561,7 +2561,7 @@ if(action==="email_recipients"){
         d=etDateAddDays(d,1);
       }
       const count=days.length;
-      const average=count?Math.round(days.reduce(function(s,x){return s+x.grade;},0)/count):null;
+      const average=count?Math.round(days.reduce(function(s,x){return s+x.grade;},0)/count*100)/100:null;
       let report="";
       const key=process.env.ANTHROPIC_API_KEY;
       if(key && count){
@@ -2594,7 +2594,7 @@ if(action==="email_recipients"){
         }
         d=etDateAddDays(d,1);
       }
-      return res.status(200).json({month, days, average:(cnt?Math.round(sum/cnt):null), count:cnt});
+      return res.status(200).json({month, days, average:(cnt?Math.round(sum/cnt*100)/100:null), count:cnt});
     }
     // Gavin's manual grade for a day (ground truth the auto-grader learns from). Gavin-gated.
     if(action==="grade_get"){
