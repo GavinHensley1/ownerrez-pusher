@@ -1013,7 +1013,9 @@ async function runDailyScore(nowIso){
   if(!zones || zones.points===0) gaps.push("GPS location data — tracking may be off");
   let result;
   if(gaps.length){ const _ef=await getEmailFlags(); let email; if(_ef.gapAlert===false){ console.log("[email_flags] gap alert suppressed for "+date); email={sent:false, skipped:"gap-alert email turned off (email_flags.gapAlert=false)"}; } else { email=await sendScoreGapEmail(date, gaps, cfg); } result={date, graded:false, gaps, email}; }
-  else { const out=await scoreDay(date, device); result={date, graded:!out.error, score:out, gaps:[]}; }
+  else { const out=await scoreDay(date, device);
+    if(!out.error && out.truth_score!=null){ try{ if(redis){ const _ex=await redis.get("parkside:grade:"+date); if(!_ex || _ex.by==="auto"){ const _snap=await buildDaySnapshot(date, device); await redis.set("parkside:grade:"+date, {date, grade:Math.max(1,Math.min(5,Math.round(Number(out.truth_score))||3)), note:String(out.summary||""), by:"auto", auto:true, at:new Date().toISOString(), snap:_snap}); } } }catch(e){} }
+    result={date, graded:!out.error, score:out, gaps:[]}; }
   try{ if(redis) await redis.set(dk, new Date().toISOString()); }catch(e){}
   return result;
 }
@@ -1030,7 +1032,7 @@ async function buildDaySnapshot(date, device){
 }
 async function getGavinGradeExamples(limit){
   let dates=[]; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); dates=(z||[]).slice().reverse().slice(0,limit||8); } }catch(e){}
-  const out=[]; for(const d of dates){ try{ const g=await redis.get("parkside:grade:"+d); if(g&&g.grade!=null) out.push(g); }catch(e){} }
+  const out=[]; for(const d of dates){ try{ const g=await redis.get("parkside:grade:"+d); if(g&&g.grade!=null&&g.by!=="auto") out.push(g); }catch(e){} }
   return out;
 }
 // ===== Weekly + Monthly work reports (Victor sees weekly in his tab; monthly emailed to Gavin+Victor) =====
@@ -2641,14 +2643,14 @@ if(action==="email_recipients"){
       while(d<=last){
         if(isGavin || hid.indexOf(d)===-1){
           let score=null, grade=null; try{ if(redis){ score=await redis.get("parkside:score:"+d); grade=await redis.get("parkside:grade:"+d); } }catch(e){}
-          const ownerG=!!(grade&&grade.grade!=null);
-          // "Hide AI grades from Victor": when on, Victor sees only Gavin's manual (owner) grades.
-          if(!(!isGavin && hideAi && !ownerG)){
-          let g = ownerG ? Number(grade.grade) : (score&&score.truth_score!=null?Number(score.truth_score):null);
+          const ownerConfirmed=!!(grade&&grade.grade!=null&&grade.by!=="auto");
+          // Victor sees only CONFIRMED owner grades when "hide AI" is on; auto-grade drafts + AI scores stay hidden until Gavin saves.
+          if(isGavin || ownerConfirmed || !hideAi){
+          let g = (grade&&grade.grade!=null) ? Number(grade.grade) : (score&&score.truth_score!=null?Number(score.truth_score):null);
           // stale pre-1-5 AI scores were stored on a 0-100 scale; fold them onto 1-5 for display.
-          if(!ownerG && g!=null && g>5){ g=Math.max(1,Math.min(5,Math.round(g/20))); }
+          if(!ownerConfirmed && g!=null && g>5){ g=Math.max(1,Math.min(5,Math.round(g/20))); }
           const expl = (grade&&grade.note)?String(grade.note):(score&&score.summary?String(score.summary):"");
-          if(g!=null){ const drec={date:d, grade:Math.round(g), source:ownerG?"owner":"ai", explanation:expl}; days.push(drec); sum+=g; cnt++; }
+          if(g!=null){ const drec={date:d, grade:Math.round(g), source:ownerConfirmed?"owner":"ai", explanation:expl}; days.push(drec); sum+=g; cnt++; }
           }
         }
         d=etDateAddDays(d,1);
