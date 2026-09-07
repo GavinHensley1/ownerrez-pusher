@@ -173,6 +173,14 @@ async function getTurnovers(fromDate,days,useCache=true){
     out[ds]={ occupied:occ, checkouts:co, arrivals:arr }; }
   return out;
 }
+// Persist per-date turnover ground-truth so PAST days survive after they age out of the live iCal feed.
+// saveTurnoverDay only writes days that actually have booking data (never blanks over a good snapshot).
+async function saveTurnoverDay(ds,t){ if(!redis||!t) return; const has=((t.occupied&&t.occupied.length)||(t.checkouts&&t.checkouts.length)||(t.arrivals&&t.arrivals.length)); if(!has) return; try{ await redis.set("parkside:turn:"+ds,{occupied:t.occupied||[],checkouts:t.checkouts||[],arrivals:t.arrivals||[],at:Date.now()}); }catch(e){} }
+async function getSavedTurnoverDay(ds){ try{ if(redis){ const v=await redis.get("parkside:turn:"+ds); if(v) return {occupied:v.occupied||[],checkouts:v.checkouts||[],arrivals:v.arrivals||[]}; } }catch(e){} return null; }
+// Prefer the saved snapshot for PAST days (they are settled + may have aged out of the feed); live for today/future.
+async function resolveTurnovers(fromDate,days){ const live=await getTurnovers(fromDate,days,true); const etToday=etDate(new Date().toISOString()); const out={};
+  for(const ds of Object.keys(live)){ if(ds<etToday){ const saved=await getSavedTurnoverDay(ds); if(saved){ out[ds]=saved; continue; } } out[ds]=live[ds]; if(ds<=etToday){ await saveTurnoverDay(ds,live[ds]); } }
+  return out; }
 
 function buildAgg(booked,start,days){
   const s=new Date(start+"T00:00:00Z"); const unitAgg={},poolAgg={},nightPool={}; for(const u of UNITS)unitAgg[u.orp]={};
@@ -1002,7 +1010,8 @@ async function buildDaySnapshot(date, device){
   const hs=hours.available?(hours.hours+"h, "+hours.active_pct+"% active"):"no WebWork hours";
   const gs=(zones.on_site_min||0)+"/"+(zones.total_min||0)+" min on-site (office "+(bz.office||0)+", tepees "+(bz.tepees||0)+", maint "+(bz.maintenance||0)+", resort "+(bz.resort||0)+", off "+(bz.off||0)+")";
   const ss=screen.available?(screen.entries+" segs, "+screen.active_min+" active min"+(screen.avg_activity_pct!=null?(", "+screen.avg_activity_pct+"% activity"):"")+(screen.top_activities&&screen.top_activities.length?("; top "+screen.top_activities.slice(0,4).map(function(a){return a.label+"("+a.min+"m)";}).join(", ")):"")):"no screen activity";
-  return { hours_summary:hs, gps_summary:gs, screen_summary:ss, report_excerpt:String(report).slice(0,600) };
+  let cleaning_summary=""; try{ const _tv=await resolveTurnovers(date,1); const _t=_tv[date]; if(_t) cleaning_summary=_t.checkouts.length+" checkout turnover clean(s)"+(_t.checkouts.length?(" ("+_t.checkouts.join(", ")+")"):"")+"; "+_t.occupied.length+" occupied, "+_t.arrivals.length+" arrival(s)"; }catch(e){}
+  return { hours_summary:hs, gps_summary:gs, screen_summary:ss, report_excerpt:String(report).slice(0,600), cleaning_summary };
 }
 async function getGavinGradeExamples(limit){
   let dates=[]; try{ if(redis){ const z=await redis.zrange("parkside:grades_index",0,-1); dates=(z||[]).slice().reverse().slice(0,limit||8); } }catch(e){}
@@ -1900,10 +1909,10 @@ async function scoreDay(date, device){
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return {error:"ANTHROPIC_API_KEY not set"};
   const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device, date);
   const screen=await wwScreenActivity(date); const apps=await wwAppsWebsites(date); let todoDoc=""; try{ todoDoc=((await getTodo())||{}).text||""; }catch(e){}
-  let gradeExamples=[]; try{ gradeExamples=await getGavinGradeExamples(8); }catch(e){}
+  let gradeExamples=[]; try{ gradeExamples=await getGavinGradeExamples(60); }catch(e){}
   let report=""; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; } }catch(e){}
   if(!report || !String(report).trim()) return {error:"no self-report on file for "+date+" (nothing to score against)"};
-  let turn=null; try{ const tv=await getTurnovers(date,1,true); turn=tv[date]; }catch(e){}
+  let turn=null; try{ const tv=await resolveTurnovers(date,1); turn=tv[date]; }catch(e){}
   // item MW-12: RECORDED time off must NEVER lower Victor's grade. Full day = do not grade at all;
   // partial hours = carve the recorded off-minutes out of the on-duty window so inactivity during
   // his recorded time off is not counted against him. (Normal working-time scoring is unchanged.)
@@ -1936,7 +1945,7 @@ async function scoreDay(date, device){
     "If example gradings from the owner (Gavin) are provided below, your truth_score MUST predict the 1-5 grade GAVIN would give \u2014 learn his standard from those examples; his grading is the ground truth.";
   const todoBlock=(todoDoc&&todoDoc.trim())?("\nVICTOR'S CURRENT TO-DO LIST (living doc \u2014 admin + general tasks; maintenance expected, may be unlisted):\n"+String(todoDoc).slice(0,3000)+"\n"):"";
   let exBlock="";
-  if(gradeExamples&&gradeExamples.length){ exBlock="\nHOW GAVIN (owner) GRADED PAST DAYS FOR PRODUCTIVITY (1-5) \u2014 match his standard:\n"+gradeExamples.map(function(e){ const sn=e.snap||{}; return "- "+e.date+" \u2192 "+Math.round(e.grade)+"/5"+(e.note?(" ("+String(e.note).slice(0,140)+")"):"")+". Data: "+(sn.hours_summary||"")+"; "+(sn.gps_summary||"")+"; "+(sn.screen_summary||"")+"."; }).join("\n")+"\n"; }
+  if(gradeExamples&&gradeExamples.length){ exBlock="\nHOW GAVIN (owner) HAS GRADED PAST DAYS (1-5) WITH HIS OWN REASONS \u2014 this is your training data. Learn his standard AND his reasoning, then predict the 1-5 grade HE would give:\n"+gradeExamples.map(function(e){ const sn=e.snap||{}; return "- "+e.date+" \u2192 "+Math.round(e.grade)+"/5"+(e.note?(" \u2014 his reason: \""+String(e.note).slice(0,200)+"\""):"")+". Data: "+(sn.hours_summary||"")+"; "+(sn.gps_summary||"")+"; "+(sn.screen_summary||"")+(sn.cleaning_summary?("; cleaning: "+sn.cleaning_summary):"")+"."; }).join("\n")+"\n"; }
   const offBlock=(offMin>0)?("\nRECORDED TIME OFF (authoritative): Victor logged "+timeOff.hours+" hour(s) off on "+date+". Carve this out of all productivity expectations \u2014 evaluate ONLY his on-duty hours and do not count any inactivity during the recorded time off against him.\n"):"";
   const userMsg=dataBlock+offBlock+todoBlock+exBlock+"\nVICTOR'S SELF-REPORT:\n"+String(report).slice(0,4000);
   try{
@@ -2084,8 +2093,11 @@ module.exports=async(req,res)=>{
     if(action==="cleaning_get"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
       const etToday=etDate(new Date().toISOString());
-      const start=new Date(etToday+"T00:00:00Z"); start.setUTCDate(start.getUTCDate()-9); const from=start.toISOString().slice(0,10);
-      let tv={}; try{ tv=await getTurnovers(from,12,true); }catch(e){ return res.status(200).json({error:"booking feed unavailable",days:[]}); }
+      const _qFrom=String((req.query&&req.query.from)||"").trim(); const _qDays=Math.max(1,Math.min(120,parseInt((req.query&&req.query.days)||"0",10)||0));
+      let from, ndays;
+      if(/^\d{4}-\d{2}-\d{2}$/.test(_qFrom)){ from=_qFrom; ndays=_qDays||14; }
+      else { const start=new Date(etToday+"T00:00:00Z"); start.setUTCDate(start.getUTCDate()-30); from=start.toISOString().slice(0,10); ndays=_qDays||33; }
+      let tv={}; try{ tv=await resolveTurnovers(from,ndays); }catch(e){ return res.status(200).json({error:"booking feed unavailable",days:[]}); }
       const rows=Object.keys(tv).sort().map(function(ds){ const t=tv[ds]; return { date:ds, occupied:t.occupied.length, cleaningsNeeded:t.checkouts.length, checkoutUnits:t.checkouts, arrivals:t.arrivals.length, isToday:ds===etToday, future:ds>etToday }; });
       return res.status(200).json({ today:etToday, unitCount:UNITS.length, days:rows });
     }
@@ -2277,7 +2289,8 @@ module.exports=async(req,res)=>{
       const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device,date); const screen=await wwScreenActivity(date); const apps=await wwAppsWebsites(date);
       let report="", score=null, todo=null, grade=null, graded_count=0; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; score=await redis.get("parkside:score:"+date); grade=await redis.get("parkside:grade:"+date); const gz=await redis.zrange("parkside:grades_index",0,-1); graded_count=(gz||[]).length; } }catch(e){} try{ todo=await getTodo(); }catch(e){}
-      return res.status(200).json({ date, device, hours, zones, screen, apps, report, score, todo, grade, graded_count });
+      let cleaning=null; try{ const _tv=await resolveTurnovers(date,1); const _t=_tv[date]; if(_t) cleaning={ date, occupied:_t.occupied.length, cleaningsNeeded:_t.checkouts.length, checkoutUnits:_t.checkouts, arrivals:_t.arrivals.length }; }catch(e){}
+      return res.status(200).json({ date, device, hours, zones, screen, apps, report, score, todo, grade, graded_count, cleaning });
     }
     // Get/set Victor's self-report text for a date. (Gavin-gated)
     if(action==="scorecard_report"){

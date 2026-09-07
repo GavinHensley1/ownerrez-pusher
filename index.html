@@ -1466,7 +1466,7 @@ async function populateDevices(){
   }catch(e){}
 }
 async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const date=(document.getElementById('monDate')||{}).value||'';
-  try{ const r=await fetch(api('scorecard')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
+  try{ const r=await fetch(api('scorecard')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json(); GVDAYCLEAN=j.cleaning||null; renderDayCleaning();
     const h=j.hours||{}; document.getElementById('scHours').innerHTML = h.available ? ('<b>Hours worked (WebWork):</b> '+h.hours+'h &middot; '+h.active_pct+'% active ('+h.active_min+' of '+h.tracked_min+' min)') : ('<b>Hours worked:</b> <span class="muted">no WebWork data yet'+(h.error?(' ('+esc(h.error)+')'):'')+'</span>');
     const z=j.zones||{}; const bz=z.byZoneMin||{};
     document.getElementById('scZones').innerHTML = '<b>On-site:</b> '+(z.on_site_min||0)+' of '+(z.total_min||0)+' tracked min &nbsp;&middot;&nbsp; office '+(bz.office||0)+' &middot; tepees '+(bz.tepees||0)+' &middot; maintenance '+(bz.maintenance||0)+' &middot; resort '+(bz.resort||0)+' &middot; off '+(bz.off||0)+' (min)';
@@ -1486,7 +1486,7 @@ async function loadScorecard(){ if(!GPW) return; const dev=(document.getElementB
       var gr = (j.grade&&j.grade.grade!=null)?j.grade.grade:null;
       var grCol = gr==null?'#7f8fa6':(gr>=4?'#34d399':gr>=3?'#fbbf24':'#f87171');
       // item 8: engine's own computed grade (its productivity score; falls back to truth score)
-      var engRaw = (j.score&&j.score.truth_score!=null) ? j.score.truth_score : null;
+      var engRaw = (j.score&&j.score.truth_score!=null) ? j.score.truth_score : null; if(engRaw!=null && engRaw>5){ engRaw=Math.max(1,Math.min(5,Math.round(engRaw/20))); }
       var eng = (engRaw!=null&&isFinite(engRaw)) ? Math.round(engRaw) : null;
       var engCol = eng==null?'#7f8fa6':(eng>=4?'#34d399':eng>=3?'#fbbf24':'#f87171');
       setT('stHours',hoursV,'#e6ecf5'); setT('stLocHours',locHoursV,'#e6ecf5'); setT('stActive',actV,actCol);
@@ -2010,14 +2010,14 @@ async function loadFraud(){
   if(!GPW) return;
   try{ const r=await fetch(api('fraud_get'),{headers:{'x-gavin-password':GPW}}); if(!r.ok) return; FRAUD=await r.json(); renderFraud(); }catch(e){}
 }
-var GVCLEAN=null;
-function gvCleanDayObj(){ if(!GVCLEAN||!GVCLEAN.days) return null; var d=(document.getElementById('monDate')||{}).value||''; var days=GVCLEAN.days;
+var GVCLEAN=null; var GVDAYCLEAN=null;
+function gvCleanDayObj(){ if(GVDAYCLEAN) return GVDAYCLEAN; if(!GVCLEAN||!GVCLEAN.days) return null; var d=(document.getElementById('monDate')||{}).value||''; var days=GVCLEAN.days;
   for(var i=0;i<days.length;i++){ if(d? days[i].date===d : days[i].isToday) return days[i]; }
   if(!d){ var t=(new Date()).toISOString().slice(0,10); for(var k=0;k<days.length;k++){ if(days[k].date===t) return days[k]; } }
   return null; }
 function gvCleaningCountForSel(){ var o=gvCleanDayObj(); return (o&&o.cleaningsNeeded!=null)?(''+o.cleaningsNeeded):'\u2014'; }
 function renderDayCleaning(){ var el=document.getElementById('gvCleanDay'); if(!el) return; var o=gvCleanDayObj(); var uc=(GVCLEAN&&GVCLEAN.unitCount)||10;
-  if(!GVCLEAN){ el.innerHTML='<div class="muted" style="font-size:12px;margin-top:10px;color:#7f8fa6">Loading cleaning ground-truth\u2026</div>'; return; }
+  if(!GVCLEAN && !GVDAYCLEAN){ el.innerHTML='<div class="muted" style="font-size:12px;margin-top:10px;color:#7f8fa6">Loading cleaning ground-truth\u2026</div>'; return; }
   if(!o){ el.innerHTML='<div class="muted" style="font-size:12px;margin-top:10px;color:#7f8fa6">No cleaning ground-truth for this day.</div>'; return; }
   var box=function(lbl,val,col){ return '<div style="flex:1;padding:10px 12px;border:1px solid #223047;border-radius:10px;background:#0d1523"><div style="font-family:\'IBM Plex Mono\',monospace;font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:#64758d">'+lbl+'</div><div style="font-family:\'IBM Plex Mono\',monospace;font-size:17px;font-weight:600;margin-top:3px'+(col?(';color:'+col):'')+'">'+val+'</div></div>'; };
   var h='<div style="display:flex;gap:10px;margin:12px 0 12px">'+box('Occupied',(o.occupied!=null?o.occupied:0)+'/'+uc)+box('Cleanings due',(o.cleaningsNeeded!=null?o.cleaningsNeeded:0),'#fbbf24')+box('Arrivals',(o.arrivals!=null?o.arrivals:0))+'</div>';
