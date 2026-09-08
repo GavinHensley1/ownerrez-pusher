@@ -2591,12 +2591,14 @@ if(action==="email_recipients"){
           st.jobs.push(rec); if(st.jobs.length>200) st.jobs=st.jobs.slice(-200);
         } else if(b.updateJob&&typeof b.updateJob==="object"){
           const u=b.updateJob; const id=String(u.id||"");
-          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); x.updatedAt=now; } return x; });
+          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note","carveType","bit","leveling","speed"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); x.updatedAt=now; } return x; });
         } else if(b.delJob){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
           try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); } }catch(e){}
         } else if(b.config&&typeof b.config==="object"){
           const c=b.config; if(c.machineUrl!==undefined) st.config.machineUrl=String(c.machineUrl||"").slice(0,300);
+          if(c.reliefWidth!==undefined) st.config.reliefWidth=Math.max(20,Math.min(600,Number(c.reliefWidth)||100));
+          if(c.reliefDepth!==undefined) st.config.reliefDepth=Math.max(0.1,Math.min(10,Number(c.reliefDepth)||1.5));
         } else if(b.jobId){
           const jid=String(b.jobId); let job=null; for(let i=0;i<st.jobs.length;i++){ if(st.jobs[i]&&st.jobs[i].id===jid){ job=st.jobs[i]; break; } }
           if(!job) return res.status(404).json({error:"job not found"});
@@ -2604,11 +2606,13 @@ if(action==="email_recipients"){
             const d=String(b.creativeImage||""); if(d.length>800000) return res.status(413).json({error:"image too large"});
             try{ if(redis){ if(d) await redis.set("parkside:cnc:img:"+jid, d); else await redis.del("parkside:cnc:img:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
             job.hasCreative=!!d; job.updatedAt=now;
-          } else if(b.gcode!==undefined){
+          }
+          if(b.gcode!==undefined){
             const t=String(b.gcode||""); if(t.length>800000) return res.status(413).json({error:"gcode too large"});
             try{ if(redis){ if(t) await redis.set("parkside:cnc:gc:"+jid, t); else await redis.del("parkside:cnc:gc:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
             job.hasGcode=!!t; job.gcodeName=String(b.gcodeName||job.gcodeName||"job.nc").slice(0,120); job.updatedAt=now;
-          } else if(b.machineAction){
+          }
+          if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
             else if(act==="start"){ job.status="Carving"; job.startedAt=now; }
