@@ -422,6 +422,8 @@
     <div style="margin-top:14px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:12px">
       <div style="font-weight:600;margin-bottom:8px">Job setup</div>
       <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <label class="muted" style="font-size:12px">Size (width)<br>
+          <span style="display:inline-flex;gap:4px"><input id="cncSizeVal" type="number" step="0.1" value="100" style="width:78px" onchange="cncSaveSetup()"><select id="cncSizeUnit" onchange="cncSaveSetup()"><option>mm</option><option>in</option></select></span></label>
         <label class="muted" style="font-size:12px">Material<br>
           <select id="cncMat" onchange="cncSaveSetup()">
             <option>C752 nickel silver</option><option>Aluminum / soft metal</option><option>Hardwood</option><option>Softwood / pine</option><option>Acrylic</option><option>Other</option>
@@ -462,6 +464,7 @@
       <span id="cncRunStatus" class="muted"></span>
     </div>
     <div class="muted" style="font-size:11px;margin-top:8px">4 &middot; You review the design and press Start. Nothing runs on its own &mdash; make sure the material is clamped and the e-stop is reachable.</div>
+    <div id="cncAgentStatus" class="muted" style="font-size:12.5px;margin-top:8px"></div>
   </div>
 
   <div class="card">
@@ -1461,6 +1464,8 @@ function cncPopulateSetup(job){
   cncSetSel('cncBit', job.bit||'30° V-bit 0.1mm');
   cncSetSel('cncLevel', job.leveling||"I'll jog to the corner & zero (manual)");
   cncSetSel('cncSpeed', job.speed||'Conservative (recommended)');
+  var sv=document.getElementById('cncSizeVal'); if(sv) sv.value=job.sizeVal||'100';
+  cncSetSel('cncSizeUnit', job.sizeUnit||'mm');
   cncSetupHint();
 }
 function cncSetupHint(){
@@ -1472,17 +1477,22 @@ function cncSetupHint(){
   var feed=Math.round(p.feed*(cons?0.6:1)), step=+(p.step*(cons?0.7:1)).toFixed(3), depth=(CNC.config&&CNC.config.reliefDepth)||p.depth;
   var lvlMsg=/probe/i.test(lvl)? 'Zeroing: the toolpath will probe Z at the start (needs a Z-probe wired to the machine).'
     : 'Zeroing: before running, jog to the FRONT-LEFT TOP corner of your stock and set X0 Y0 Z0 in the controller — that corner is where the design starts.';
-  h.innerHTML='<b>'+cncEsc(mat)+'</b> &middot; '+(cons?'conservative':'normal')+': feed ~'+feed+' mm/min, '+step+' mm per pass, depth ~'+depth+' mm. '+lvlMsg;
+  var szv=(document.getElementById('cncSizeVal')||{}).value||'100', szu=(document.getElementById('cncSizeUnit')||{}).value||'mm';
+  h.innerHTML='<b>'+cncEsc(mat)+'</b> &middot; '+cncEsc(szv)+' '+cncEsc(szu)+' wide &middot; '+(cons?'conservative':'normal')+': feed ~'+feed+' mm/min, '+step+' mm/pass, depth ~'+depth+' mm. '+lvlMsg;
 }
 async function cncSaveSetup(){
   var job=cncCurrentJob(); if(!job){ job=await cncEnsureJob(); if(!job) return; }
+  var sv=parseFloat((document.getElementById('cncSizeVal')||{}).value)||100;
+  var su=(document.getElementById('cncSizeUnit')||{}).value||'mm';
+  var mm=(su==='in')? sv*25.4 : sv;
   cncSetupHint();
   var b={updateJob:{ id:job.id,
     material:(document.getElementById('cncMat')||{}).value,
     carveType:(document.getElementById('cncType')||{}).value,
     bit:(document.getElementById('cncBit')||{}).value,
     leveling:(document.getElementById('cncLevel')||{}).value,
-    speed:(document.getElementById('cncSpeed')||{}).value }};
+    speed:(document.getElementById('cncSpeed')||{}).value,
+    sizeVal:String(sv), sizeUnit:su, sizeMM:String(Math.round(mm*100)/100) }};
   var j=await cncPost(b); if(j&&j.cnc){ CNC=j.cnc; renderCncActiveSelect(); }
 }
 function cncSetActive(id){ CNC_CUR=id||null; cncRenderActive(); }
@@ -1497,6 +1507,19 @@ async function cncRenderActive(){
   else if(cp){ cp.innerHTML='<span class="muted">No image yet</span>'; }
   if(job.hasGcode){ var gc=await cncFetchFile(job.id,'gc'); if(gc) cncRenderToolpath(gc); else if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; }
   else { if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm) gm.textContent=''; }
+  cncRenderAgent(job); cncMaybePoll();
+}
+function cncRenderAgent(job){
+  var as=document.getElementById('cncAgentStatus'); if(!as) return;
+  if(job&&job.agentState){
+    var m={queued:'⏳ Queued — waiting for the on-site machine agent to pick it up',running:'▶ Machine running'+((job.progress!=null)?(' — '+Math.round(job.progress)+'%'):''),done:'✅ Machine finished the cut',error:'⚠ Machine error'}[job.agentState]||job.agentState;
+    as.innerHTML='Machine agent: '+m+(job.agentMsg?(' <span style="opacity:.7">— '+cncEsc(job.agentMsg)+'</span>'):'');
+  } else as.textContent='';
+}
+var CNC_POLL=null;
+function cncMaybePoll(){ var job=cncCurrentJob(); var active=job&&(job.agentState==='queued'||job.agentState==='running');
+  if(active&&!CNC_POLL){ CNC_POLL=setInterval(function(){ var m=document.getElementById('cncMain'); if(m&&m.style.display!=='none') loadCnc(); else { clearInterval(CNC_POLL); CNC_POLL=null; } },5000); }
+  else if(!active&&CNC_POLL){ clearInterval(CNC_POLL); CNC_POLL=null; }
 }
 function cncRenderToolpath(text){
   var prev=document.getElementById('cncGcodePrev'), meta=document.getElementById('cncGcodeMeta'); if(!prev) return;
@@ -1592,7 +1615,7 @@ async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add 
   if(st) st.textContent='Generating the design from your image…';
   var img=await cncFetchFile(job.id,'img'); if(!img){ if(st) st.textContent=''; alert('Could not read the creative.'); return; }
   var mat=job.material||'C752 nickel silver', preset=CNC_MATS[mat]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||'');
-  var params={ widthMM:(CNC.config&&CNC.config.reliefWidth)||100, maxDepth:(CNC.config&&CNC.config.reliefDepth)||preset.depth,
+  var params={ widthMM:(Number(job.sizeMM)||((CNC.config&&CNC.config.reliefWidth))||100), maxDepth:(CNC.config&&CNC.config.reliefDepth)||preset.depth,
     step:+(preset.step*(cons?0.7:1)).toFixed(3), feed:Math.round(preset.feed*(cons?0.6:1)), plunge:Math.round(preset.plunge*(cons?0.6:1)),
     rpm:preset.rpm, carveType:job.carveType||'3D relief', leveling:job.leveling||'' };
   cncGenerateRelief(img, params, async function(gcode){

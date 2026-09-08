@@ -2591,7 +2591,7 @@ if(action==="email_recipients"){
           st.jobs.push(rec); if(st.jobs.length>200) st.jobs=st.jobs.slice(-200);
         } else if(b.updateJob&&typeof b.updateJob==="object"){
           const u=b.updateJob; const id=String(u.id||"");
-          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note","carveType","bit","leveling","speed"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); x.updatedAt=now; } return x; });
+          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); x.updatedAt=now; } return x; });
         } else if(b.delJob){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
           try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); } }catch(e){}
@@ -2615,8 +2615,16 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(act==="start"){ job.status="Carving"; job.startedAt=now; }
+            else if(act==="start"){ job.status="Carving"; job.startedAt=now; job.agentState="queued"; job.agentMsg=""; job.progress=0; job.agentAt=now; }
             job.updatedAt=now;
+          }
+          if(b.agent&&typeof b.agent==="object"){
+            const ag=b.agent; const state=String(ag.state||"").slice(0,20);
+            if(state) job.agentState=state;
+            if(ag.progress!==undefined) job.progress=Math.max(0,Math.min(100,Number(ag.progress)||0));
+            if(ag.message!==undefined) job.agentMsg=String(ag.message||"").slice(0,300);
+            job.agentAt=now; job.updatedAt=now;
+            if(state==="done"){ job.status="Finishing"; }
           }
         }
         try{ if(redis) await redis.set("parkside:cnc", JSON.stringify(st)); }catch(e){ return res.status(500).json({error:"db error"}); }
