@@ -471,18 +471,6 @@
     <div id="cncJobs" style="margin-top:14px">Loading&hellip;</div>
   </div>
 
-  <div class="card">
-    <h2 style="margin:.1em 0;cursor:pointer" onclick="var d=document.getElementById('cncRef');d.style.display=(d.style.display==='none'?'block':'none')">Reference &amp; specs &#9662;</h2>
-    <div id="cncRef" style="display:none">
-      <div class="muted" style="font-size:13px;line-height:1.55">
-        <p><b>Machine &mdash; Genmitsu 4040-PRO (WiFi-ready, 4-axis).</b> Work area ~17"&times;16"&times;3.1" (434&times;403.5mm); footprint ~28"&times;28"; GRBL control (Carveco, Fusion 360, CNCjs); WiFi via the GGW-UART module; ~15-min assembly, no coding.</p>
-        <p><b>Buckle material.</b> C752 / Alloy 752 nickel silver, 1/8" thick, 5"&times;10" sheet. Light passes 0.05&ndash;0.10mm deep, 30&deg; 0.1mm carbide V-bit. Both buckles fit a 4"&times;6" area.</p>
-        <p><b>Confirmed cart (~$729).</b> Machine B0DF2LN8JD &middot; WiFi module B0D1BZW5LY &middot; nickel-silver sheet B0FGVXD4XS &middot; engraving bits B08R3B9MX7 &middot; enclosure B0CMXGG8XX &middot; shop-vac B0BCFZ2ZXF.</p>
-        <p><b>Software.</b> ChatGPT Plus ($20/mo) &rarr; Carveco Maker ($15/mo) &rarr; CNCjs (free, browser) &rarr; Genmitsu WiFi app.</p>
-        <p><b>Scale-up.</b> Proof of concept = the belt buckle. Then 3D bear wall panels for cabins ($10&ndash;20K/cabin, 80%+ margin). Production machine later: ShopBot PRS5 Alpha ATC (~$37,750, 4'&times;8', 9-tool ATC, vacuum hold-down).</p>
-      </div>
-    </div>
-  </div>
 </div>
 
 <!-- item BUG-1: shared staff Report-a-Bug tab (Victor + Gavin). One card: textarea + Submit, then a newest-first list with Delete. -->
@@ -1458,14 +1446,28 @@ function cncRenderToolpath(text){
     +(cutP?'<path d="'+cutP+'" fill="none" stroke="var(--accent)" stroke-width="1"/>':'')+'</svg>';
   if(meta) meta.textContent=nc+' cut moves · '+nr+' rapids · '+w.toFixed(1)+'×'+h.toFixed(1)+' mm';
 }
+function cncCompressImage(file, cb){
+  try{ var img=new Image(); var url=URL.createObjectURL(file);
+    img.onload=function(){ var maxD=1400, w=img.width||1, h=img.height||1, sc=Math.min(1,maxD/Math.max(w,h));
+      var cw=Math.max(1,Math.round(w*sc)), ch=Math.max(1,Math.round(h*sc));
+      var c=document.createElement('canvas'); c.width=cw; c.height=ch; var ctx=c.getContext('2d');
+      ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,cw,ch); ctx.drawImage(img,0,0,cw,ch);
+      var q=0.85, out=c.toDataURL('image/jpeg',q);
+      while(out.length>620000 && q>0.35){ q-=0.1; out=c.toDataURL('image/jpeg',q); }
+      URL.revokeObjectURL(url); cb(out); };
+    img.onerror=function(){ URL.revokeObjectURL(url); cb(null); };
+    img.src=url;
+  }catch(e){ cb(null); }
+}
 async function cncUploadCreative(ev){ var f=ev.target.files&&ev.target.files[0]; if(!f) return;
   var job=await cncEnsureJob(); if(!job){ ev.target.value=''; return; }
-  if(f.size>560000){ alert('Image is ~'+Math.round(f.size/1024)+'KB — keep it under ~500KB (export a smaller JPG/PNG).'); ev.target.value=''; return; }
-  var st=document.getElementById('cncRunStatus'), rd=new FileReader();
-  rd.onload=async function(){ var url=String(rd.result); if(url.length>770000){ alert('Image too large to store.'); return; }
-    if(st) st.textContent='Saving image…'; var j=await cncPost({jobId:job.id, creativeImage:url});
-    if(j&&j.cnc){ CNC=j.cnc; var cp=document.getElementById('cncCreativePrev'); if(cp) cp.innerHTML='<img src="'+url+'" style="max-width:100%;max-height:220px;object-fit:contain">'; if(st) st.textContent='Image saved.'; renderCncActiveSelect(); setTimeout(function(){if(st)st.textContent='';},1400);} else if(st) st.textContent='Error saving.'; };
-  rd.readAsDataURL(f);
+  var st=document.getElementById('cncRunStatus'); if(st) st.textContent='Processing image\u2026';
+  cncCompressImage(f, async function(url){
+    if(!url){ if(st) st.textContent=''; alert('Could not read that image \u2014 try a PNG or JPG.'); return; }
+    if(st) st.textContent='Saving image\u2026';
+    var j=await cncPost({jobId:job.id, creativeImage:url});
+    if(j&&j.cnc){ CNC=j.cnc; var cp=document.getElementById('cncCreativePrev'); if(cp) cp.innerHTML='<img src="'+url+'" style="max-width:100%;max-height:220px;object-fit:contain">'; if(st) st.textContent='Image saved.'; renderCncActiveSelect(); setTimeout(function(){if(st)st.textContent='';},1400);} else { if(st) st.textContent='Error saving.'; }
+  });
 }
 async function cncUploadGcode(ev){ var f=ev.target.files&&ev.target.files[0]; if(!f) return;
   var job=await cncEnsureJob(); if(!job){ ev.target.value=''; return; }
