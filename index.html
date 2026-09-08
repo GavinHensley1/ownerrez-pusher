@@ -164,6 +164,7 @@
     <button id="tabBonus" class="seg on" onclick="switchView('bonus')">My Work</button>
     <button id="tabPricing" class="seg" onclick="switchView('pricing')">Pricing</button>
     <button id="tabMsg" class="seg" onclick="switchView('messaging')">Messaging</button>
+    <button id="tabCnc" class="seg" onclick="switchView('cnc')">CNC</button>
     <button id="tabBug" class="seg" onclick="switchView('bug')">Report a Bug</button>
   </div>
   <span class="muted" id="horizon"></span>
@@ -396,6 +397,92 @@
   </div>    </div>
   </div>
 
+</div>
+
+<!-- CNC Studio — Gavin's carving control surface. Upload creative → Load → review toolpath → Start. Persists to parkside:cnc. -->
+<div class="wrap" id="cncMain" style="display:none">
+  <div class="card">
+    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">CNC Studio</div>
+      <div style="font-size:11.5px;color:#64758d">upload &rarr; load &rarr; review &rarr; start &mdash; from anywhere</div>
+    </div>
+    <h2 style="margin:.2em 0">&#128503; Carving Control</h2>
+    <div class="legend">Genmitsu 4040-PRO (WiFi). Upload your creative and the Carveco file, look at the toolpath the machine will cut, then press Start. A person always reviews and starts &mdash; nothing runs on its own.</div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:.1em 0">&#9654; Run a carve</h2>
+    <div class="legend">Upload your creative, load the Carveco file, look at the toolpath, then Start.</div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <label class="muted" style="font-size:12px">Active job<br>
+        <select id="cncActive" onchange="cncSetActive(this.value)" style="min-width:230px"></select></label>
+      <button onclick="cncNewJob()">&#43; New job</button>
+    </div>
+    <div style="display:grid;gap:12px;margin-top:14px">
+      <div style="background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:12px">
+        <div style="font-weight:600;margin-bottom:6px">1 &middot; Upload creative <span class="muted" style="font-weight:400">(your design image)</span></div>
+        <input type="file" id="cncCreative" accept="image/*" onchange="cncUploadCreative(event)">
+      </div>
+      <div style="background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:12px">
+        <div style="font-weight:600;margin-bottom:6px">2 &middot; Load the Carveco file <span class="muted" style="font-weight:400">(.nc toolpath)</span></div>
+        <input type="file" id="cncGcode" accept=".nc,.gcode,.tap,.txt,.cnc" onchange="cncUploadGcode(event)">
+        <button onclick="cncLoad()" style="margin-left:8px">Load to machine</button>
+      </div>
+    </div>
+    <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div><div class="muted" style="font-size:12px;margin-bottom:4px">Creative</div>
+        <div id="cncCreativePrev" style="min-height:170px;border:1px solid rgba(255,255,255,.08);border-radius:10px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.2);overflow:hidden"><span class="muted">No image yet</span></div></div>
+      <div><div class="muted" style="font-size:12px;margin-bottom:4px">3 &middot; Carveco toolpath (what will cut)</div>
+        <div id="cncGcodePrev" style="min-height:170px;border:1px solid rgba(255,255,255,.08);border-radius:10px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.2)"><span class="muted">Load a .nc file to preview</span></div>
+        <div class="muted" id="cncGcodeMeta" style="font-size:11px;margin-top:4px"></div></div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <button id="cncStartBtn" onclick="cncStart()" style="font-size:16px;padding:12px 22px;font-weight:700">&#9654; Start carve</button>
+      <span id="cncRunStatus" class="muted"></span>
+    </div>
+    <div class="muted" style="font-size:11px;margin-top:8px">4 &middot; You review the toolpath and press Start. Nothing runs on its own &mdash; make sure the material is clamped and the e-stop is reachable.</div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:.1em 0">Design tools</h2>
+    <div class="legend">Make the design, then the Carveco toolpath &mdash; then upload them above.</div>
+    <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
+      <button onclick="window.open('https://chat.openai.com','_blank')">Open ChatGPT &#8599;</button>
+      <button onclick="window.open('https://carveco.com','_blank')">Open Carveco Maker &#8599;</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:.1em 0;cursor:pointer" onclick="var d=document.getElementById('cncConn');d.style.display=(d.style.display==='none'?'block':'none')">Machine connection &#9662;</h2>
+    <div id="cncConn" style="display:none">
+      <div class="legend">Where Load/Start send the job. Point this at the on-site connector once the machine is on Wi-Fi (the Genmitsu WiFi link, or CNCjs at http://localhost:8000). Until it's set, Load/Start just record the job's stage.</div>
+      <div style="margin-top:10px">
+        <label class="muted" style="font-size:12px">Machine address<br><input id="cncUrl" style="width:340px;max-width:100%" placeholder="http://localhost:8000"></label>
+        <button onclick="saveCncConfig()" style="margin-left:8px">Save</button>
+        <span id="cncCfgStatus" class="muted" style="font-size:12px"></span>
+      </div>
+      <div style="margin-top:8px"><button onclick="openCncjs()">Open CNCjs controller &#8599;</button> <span class="muted" id="cncUrlLabel" style="font-size:12px"></span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:.1em 0">Job tracker</h2>
+    <div class="legend">Every carving job and its stage: Design &rarr; Relief/G-code &rarr; Carving &rarr; Finishing &rarr; Done. Saved for everyone.</div>
+    <div id="cncJobs" style="margin-top:14px">Loading&hellip;</div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:.1em 0;cursor:pointer" onclick="var d=document.getElementById('cncRef');d.style.display=(d.style.display==='none'?'block':'none')">Reference &amp; specs &#9662;</h2>
+    <div id="cncRef" style="display:none">
+      <div class="muted" style="font-size:13px;line-height:1.55">
+        <p><b>Machine &mdash; Genmitsu 4040-PRO (WiFi-ready, 4-axis).</b> Work area ~17"&times;16"&times;3.1" (434&times;403.5mm); footprint ~28"&times;28"; GRBL control (Carveco, Fusion 360, CNCjs); WiFi via the GGW-UART module; ~15-min assembly, no coding.</p>
+        <p><b>Buckle material.</b> C752 / Alloy 752 nickel silver, 1/8" thick, 5"&times;10" sheet. Light passes 0.05&ndash;0.10mm deep, 30&deg; 0.1mm carbide V-bit. Both buckles fit a 4"&times;6" area.</p>
+        <p><b>Confirmed cart (~$729).</b> Machine B0DF2LN8JD &middot; WiFi module B0D1BZW5LY &middot; nickel-silver sheet B0FGVXD4XS &middot; engraving bits B08R3B9MX7 &middot; enclosure B0CMXGG8XX &middot; shop-vac B0BCFZ2ZXF.</p>
+        <p><b>Software.</b> ChatGPT Plus ($20/mo) &rarr; Carveco Maker ($15/mo) &rarr; CNCjs (free, browser) &rarr; Genmitsu WiFi app.</p>
+        <p><b>Scale-up.</b> Proof of concept = the belt buckle. Then 3D bear wall panels for cabins ($10&ndash;20K/cabin, 80%+ margin). Production machine later: ShopBot PRS5 Alpha ATC (~$37,750, 4'&times;8', 9-tool ATC, vacuum hold-down).</p>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- item BUG-1: shared staff Report-a-Bug tab (Victor + Gavin). One card: textarea + Submit, then a newest-first list with Delete. -->
@@ -1287,25 +1374,147 @@ async function loadLearning(){
 }
 let MSG_BUILT=false; let KB={format:"",items:[]}; let AUTO_ON=false, PF=[];
 function switchView(v){
-  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus', isBug=v==='bug';
+  const isP=v==='pricing', isM=v==='messaging', isMon=v==='monitoring', isB=v==='bonus', isBug=v==='bug', isCnc=v==='cnc';
   document.getElementById('main').style.display=isP?'block':'none';
   document.getElementById('msgMain').style.display=isM?'block':'none';
   document.getElementById('monMain').style.display=isMon?'block':'none';
   var bg=document.getElementById('bugMain'); if(bg) bg.style.display=isBug?'block':'none';
+  var cg=document.getElementById('cncMain'); if(cg) cg.style.display=isCnc?'block':'none';
   const bm=document.getElementById('bonusMain'); if(bm) bm.style.display=isB?'grid':'none';
   document.getElementById('tabPricing').className='seg'+(isP?' on':'');
   document.getElementById('tabMsg').className='seg'+(isM?' on':'');
   const tm=document.getElementById('tabMon'); if(tm) tm.className='seg'+(isMon?' on':'');
   var tbg=document.getElementById('tabBug'); if(tbg) tbg.className='seg'+(isBug?' on':'');
+  var tcg=document.getElementById('tabCnc'); if(tcg) tcg.className='seg'+(isCnc?' on':'');
   const tb=document.getElementById('tabBonus'); if(tb) tb.className='seg'+(isB?' on':'');
   if(isB) loadBonus();
   if(isBug) loadBugs();
+  if(isCnc) loadCnc();
   document.getElementById('horizon').style.display=isP?'':'none';
   document.getElementById('syncWrap').style.display=isP?'':'none';
   if(isP) setSyncUI();
   if(isM){ if(!MSG_BUILT){ renderMessaging(); MSG_BUILT=true; } loadApprovals(); loadInquiries(); loadNotifyStatus(); loadDecisions(); loadAutoState(); loadPendingFacts(); makeCollapsible('#msgMain'); }
   if(isMon && GPW && MON_MAP){ setTimeout(function(){ MON_MAP.invalidateSize(); loadMonitor(); },60); }
 }
+// ===== CNC Studio (shared staff tab) — upload creative → load → review toolpath → start. Persists to parkside:cnc. =====
+var CNC={jobs:[],config:{}}; var CNC_CUR=null;
+function cncEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+function openCncjs(){ var u=(CNC.config&&CNC.config.machineUrl)||'http://localhost:8000'; window.open(u,'_blank'); }
+function cncCurrentJob(){ return (CNC.jobs||[]).filter(function(j){return j&&j.id===CNC_CUR;})[0]||null; }
+async function cncPost(body){ var r=await fetch(api('cnc'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify(body)}); return r.json(); }
+async function cncFetchFile(jobId,which){ try{ var r=await fetch(api('cnc')+'&file='+which+'&jobId='+encodeURIComponent(jobId)+'&cb='+Date.now(),{headers:{'x-app-password':PW}}); var j=await r.json(); return (j&&j.data)||''; }catch(e){ return ''; } }
+async function loadCnc(){
+  var el=document.getElementById('cncJobs'); if(el) el.textContent='Loading…';
+  try{ var r=await fetch(api('cnc')+'&cb='+Date.now(),{headers:{'x-app-password':PW}}); var j=await r.json();
+    CNC=(j&&j.cnc)||{jobs:[],config:{}}; if(!CNC.jobs) CNC.jobs=[]; if(!CNC.config) CNC.config={};
+    var u=CNC.config.machineUrl||'http://localhost:8000';
+    var ui=document.getElementById('cncUrl'); if(ui) ui.value=CNC.config.machineUrl||'';
+    var lbl=document.getElementById('cncUrlLabel'); if(lbl) lbl.textContent=CNC.config.machineUrl?('→ '+CNC.config.machineUrl):'(no machine address set)';
+    if(!CNC_CUR && CNC.jobs.length) CNC_CUR=CNC.jobs[CNC.jobs.length-1].id;
+    renderCncJobs(); await cncRenderActive();
+  }catch(e){ if(el) el.textContent='Could not load.'; }
+}
+function renderCncActiveSelect(){
+  var sel=document.getElementById('cncActive'); if(!sel) return;
+  var jobs=(CNC.jobs||[]).slice().reverse(); sel.innerHTML='';
+  if(!jobs.length){ var o=document.createElement('option'); o.value=''; o.textContent='— no jobs yet —'; sel.appendChild(o); return; }
+  jobs.forEach(function(j){ var o=document.createElement('option'); o.value=j.id; o.textContent=(j.project||'Job')+(j.design?(' — '+j.design):'')+' ['+(j.status||'Design')+']'; sel.appendChild(o); });
+  if(CNC_CUR && jobs.some(function(j){return j.id===CNC_CUR;})) sel.value=CNC_CUR; else { CNC_CUR=jobs[0].id; sel.value=CNC_CUR; }
+}
+function cncSetActive(id){ CNC_CUR=id||null; cncRenderActive(); }
+async function cncNewJob(){ var p=prompt('New job — project name?','Belt Buckle'); if(p===null) return; var j=await cncPost({addJob:{project:(p||'Job')}}); if(j&&j.cnc){ CNC=j.cnc; CNC_CUR=CNC.jobs[CNC.jobs.length-1].id; renderCncJobs(); await cncRenderActive(); } }
+async function cncEnsureJob(){ var j=cncCurrentJob(); if(j) return j; var r=await cncPost({addJob:{project:'Belt Buckle'}}); if(r&&r.cnc){ CNC=r.cnc; CNC_CUR=CNC.jobs[CNC.jobs.length-1].id; renderCncJobs(); return cncCurrentJob(); } return null; }
+async function cncRenderActive(){
+  renderCncActiveSelect();
+  var job=cncCurrentJob();
+  var cp=document.getElementById('cncCreativePrev'), gp=document.getElementById('cncGcodePrev'), gm=document.getElementById('cncGcodeMeta');
+  if(!job){ if(cp)cp.innerHTML='<span class="muted">No image yet</span>'; if(gp)gp.innerHTML='<span class="muted">Load a .nc file to preview</span>'; if(gm)gm.textContent=''; return; }
+  if(job.hasCreative){ var img=await cncFetchFile(job.id,'img'); if(cp) cp.innerHTML=img?('<img src="'+img+'" style="max-width:100%;max-height:220px;object-fit:contain">'):'<span class="muted">No image yet</span>'; }
+  else if(cp){ cp.innerHTML='<span class="muted">No image yet</span>'; }
+  if(job.hasGcode){ var gc=await cncFetchFile(job.id,'gc'); if(gc) cncRenderToolpath(gc); else if(gp) gp.innerHTML='<span class="muted">Load a .nc file to preview</span>'; }
+  else { if(gp) gp.innerHTML='<span class="muted">Load a .nc file to preview</span>'; if(gm) gm.textContent=''; }
+}
+function cncRenderToolpath(text){
+  var prev=document.getElementById('cncGcodePrev'), meta=document.getElementById('cncGcodeMeta');
+  if(!prev) return;
+  if(!text){ prev.innerHTML='<span class="muted">Load a .nc file to preview</span>'; if(meta) meta.textContent=''; return; }
+  var lines=text.split(/\r?\n/), x=0,y=0,g=0, segs=[], minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9, nc=0,nr=0;
+  function upd(px,py){ if(px<minx)minx=px; if(px>maxx)maxx=px; if(py<miny)miny=py; if(py>maxy)maxy=py; }
+  for(var i=0;i<lines.length;i++){
+    var ln=lines[i].replace(/;.*/,'').replace(/\(.*?\)/g,'').trim(); if(!ln) continue;
+    var mG=ln.match(/\bG0*([0-3])\b/i); if(mG) g=parseInt(mG[1],10);
+    var mX=ln.match(/X(-?\d*\.?\d+)/i), mY=ln.match(/Y(-?\d*\.?\d+)/i);
+    if(mX||mY){ var nx=mX?parseFloat(mX[1]):x, ny=mY?parseFloat(mY[1]):y, cut=(g===1||g===2||g===3);
+      segs.push([x,y,nx,ny,cut]); if(cut)nc++;else nr++; upd(x,y); upd(nx,ny); x=nx; y=ny;
+      if(segs.length>80000) break; }
+  }
+  if(!isFinite(minx)){ prev.innerHTML='<span class="muted">No X/Y moves found in file</span>'; if(meta) meta.textContent=''; return; }
+  var w=(maxx-minx)||1, h=(maxy-miny)||1, W=340,H=210,pad=10, sc=Math.min((W-2*pad)/w,(H-2*pad)/h), ox=pad-minx*sc, oy=pad-miny*sc;
+  function P(px,py){ return (px*sc+ox).toFixed(1)+','+(H-(py*sc+oy)).toFixed(1); }
+  var cutP='',rapP='';
+  segs.forEach(function(s){ var d='M'+P(s[0],s[1])+'L'+P(s[2],s[3]); if(s[4]) cutP+=d; else rapP+=d; });
+  prev.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" width="100%" style="max-height:220px">'
+    +(rapP?'<path d="'+rapP+'" fill="none" stroke="rgba(255,255,255,.18)" stroke-width="0.6" stroke-dasharray="2,2"/>':'')
+    +(cutP?'<path d="'+cutP+'" fill="none" stroke="var(--accent)" stroke-width="1"/>':'')+'</svg>';
+  if(meta) meta.textContent=nc+' cut moves · '+nr+' rapids · '+w.toFixed(1)+'×'+h.toFixed(1)+' mm';
+}
+async function cncUploadCreative(ev){ var f=ev.target.files&&ev.target.files[0]; if(!f) return;
+  var job=await cncEnsureJob(); if(!job){ ev.target.value=''; return; }
+  if(f.size>560000){ alert('Image is ~'+Math.round(f.size/1024)+'KB — keep it under ~500KB (export a smaller JPG/PNG).'); ev.target.value=''; return; }
+  var st=document.getElementById('cncRunStatus'), rd=new FileReader();
+  rd.onload=async function(){ var url=String(rd.result); if(url.length>770000){ alert('Image too large to store.'); return; }
+    if(st) st.textContent='Saving image…'; var j=await cncPost({jobId:job.id, creativeImage:url});
+    if(j&&j.cnc){ CNC=j.cnc; var cp=document.getElementById('cncCreativePrev'); if(cp) cp.innerHTML='<img src="'+url+'" style="max-width:100%;max-height:220px;object-fit:contain">'; if(st) st.textContent='Image saved.'; renderCncActiveSelect(); setTimeout(function(){if(st)st.textContent='';},1400);} else if(st) st.textContent='Error saving.'; };
+  rd.readAsDataURL(f);
+}
+async function cncUploadGcode(ev){ var f=ev.target.files&&ev.target.files[0]; if(!f) return;
+  var job=await cncEnsureJob(); if(!job){ ev.target.value=''; return; }
+  if(f.size>720000){ alert('G-code is ~'+Math.round(f.size/1024)+'KB — too big to hold in the project. Big panel files load at the machine in CNCjs; the buckle file will be small.'); ev.target.value=''; return; }
+  var st=document.getElementById('cncRunStatus'), rd=new FileReader();
+  rd.onload=async function(){ var txt=String(rd.result);
+    if(st) st.textContent='Saving G-code…'; var j=await cncPost({jobId:job.id, gcode:txt, gcodeName:f.name});
+    if(j&&j.cnc){ CNC=j.cnc; cncRenderToolpath(txt); if(st) st.textContent='G-code loaded.'; renderCncActiveSelect(); renderCncJobs(); setTimeout(function(){if(st)st.textContent='';},1400);} else if(st) st.textContent='Error saving.'; };
+  rd.readAsText(f);
+}
+async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add a job first.'); return; }
+  if(!job.hasGcode){ alert('Upload the Carveco .nc file first (step 2).'); return; }
+  var st=document.getElementById('cncRunStatus'); if(st) st.textContent='Loading…';
+  var j=await cncPost({jobId:job.id, machineAction:'load'});
+  if(j&&j.cnc){ CNC=j.cnc; renderCncJobs(); await cncRenderActive();
+    if(st) st.textContent=(CNC.config&&CNC.config.machineUrl)?'Loaded. Review the toolpath, then Start.':'Marked Loaded. (Set a machine address under “Machine connection” to send jobs for real.)'; }
+}
+async function cncStart(){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
+  if(!job.hasGcode){ alert('Load the Carveco file first.'); return; }
+  if(!confirm('Start the carve for “'+(job.project||'job')+'”?\nMake sure the material is clamped and someone can reach the e-stop.')) return;
+  var st=document.getElementById('cncRunStatus'); if(st) st.textContent='Starting…';
+  var j=await cncPost({jobId:job.id, machineAction:'start'});
+  if(j&&j.cnc){ CNC=j.cnc; renderCncJobs(); await cncRenderActive();
+    if(st) st.textContent=(CNC.config&&CNC.config.machineUrl)?'▶ Carve started.':'Marked Carving. (No machine address set — connect the machine to run for real.)'; }
+}
+var CNC_STAGES=["Design","Relief","Carving","Finishing","Done"];
+function renderCncJobs(){
+  var el=document.getElementById('cncJobs'); if(!el) return;
+  var list=(CNC.jobs||[]).slice().reverse();
+  if(!list.length){ el.innerHTML='<span class="muted">No jobs yet. Use “＋ New job” above.</span>'; return; }
+  var h='';
+  list.forEach(function(j){
+    var stg=j.status||'Design', idx=CNC_STAGES.indexOf(stg); if(idx<0) idx=0;
+    var chips=CNC_STAGES.map(function(s,i){ var on=i<=idx; return '<span onclick="setCncStage(\''+j.id+'\',\''+s+'\')" title="Set stage" style="cursor:pointer;font-size:11px;padding:3px 8px;border-radius:999px;margin-right:4px;border:1px solid '+(on?'var(--accent)':'rgba(255,255,255,.15)')+';color:'+(on?'#0b1220':'#8aa2b8')+';background:'+(on?'var(--accent)':'transparent')+'">'+s+'</span>'; }).join('');
+    var files=(j.hasCreative?'🖼️ ':'')+(j.hasGcode?('📐 '+cncEsc(j.gcodeName||'.nc')):'');
+    h+='<div style="border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:12px;margin-bottom:10px">'
+      +'<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap"><div style="font-weight:600">'+cncEsc(j.project||'Job')+(j.design?' &mdash; <span class="muted" style="font-weight:400">'+cncEsc(j.design)+'</span>':'')+'</div>'
+      +'<div style="display:flex;gap:6px"><button onclick="cncSetActive(\''+j.id+'\')" style="background:transparent;border:1px solid rgba(255,255,255,.2);color:#cdd8e6;padding:2px 8px;font-size:12px">Open</button>'
+      +'<button onclick="delCncJob(\''+j.id+'\')" style="background:transparent;border:1px solid rgba(255,90,90,.4);color:#ff8a8a;padding:2px 8px;font-size:12px">Delete</button></div></div>'
+      +(j.material?'<div class="muted" style="font-size:12px;margin-top:2px">Material: '+cncEsc(j.material)+'</div>':'')
+      +(files?'<div class="muted" style="font-size:12px;margin-top:2px">'+files+'</div>':'')
+      +'<div style="margin-top:8px">'+chips+'</div>'
+      +'<div class="muted" style="font-size:11px;margin-top:6px">Updated '+new Date(j.updatedAt||j.at).toLocaleString()+'</div></div>';
+  });
+  el.innerHTML=h;
+}
+async function setCncStage(id,stage){ var j=await cncPost({updateJob:{id:id,status:stage}}); if(j&&j.cnc){ CNC=j.cnc; renderCncJobs(); renderCncActiveSelect(); } }
+async function delCncJob(id){ if(!confirm('Delete this job and its files?')) return; var j=await cncPost({delJob:id}); if(j&&j.cnc){ CNC=j.cnc; if(CNC_CUR===id) CNC_CUR=(CNC.jobs.length?CNC.jobs[CNC.jobs.length-1].id:null); renderCncJobs(); await cncRenderActive(); } }
+async function saveCncConfig(){ var u=document.getElementById('cncUrl').value.trim(); var s=document.getElementById('cncCfgStatus'); if(s) s.textContent='Saving…'; var j=await cncPost({config:{machineUrl:u}}); if(j&&j.cnc){ CNC=j.cnc; if(s) s.textContent='Saved.'; var lbl=document.getElementById('cncUrlLabel'); if(lbl) lbl.textContent=u?('→ '+u):'(no machine address set)'; setTimeout(function(){if(s)s.textContent='';},1400);} else if(s) s.textContent='Error.'; }
 // ===== Report a Bug (shared staff tab) — persists to parkside:bugs via the `bugs` action (x-app-password) =====
 async function loadBugs(){ var el=document.getElementById('bugList'); if(!el) return; el.textContent='Loading\u2026';
   try{ var r=await fetch(api('bugs')+'&cb='+Date.now(),{headers:{'x-app-password':PW}}); var j=await r.json();

@@ -2563,6 +2563,63 @@ if(action==="email_recipients"){
       }
       return res.status(200).json({bugs:list});
     }
+    // CNC Studio — SHARED staff tab. GET=state (?file=img|gc&jobId= returns a stored file).
+    // POST addJob/updateJob/delJob/config, or {jobId, creativeImage|gcode|machineAction}.
+    // Metadata at parkside:cnc {jobs:[],config:{}}; heavy files at parkside:cnc:img:<id> / parkside:cnc:gc:<id>.
+    if(action==="cnc"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
+      const q=req.query||{};
+      if(req.method!=="POST" && q.file){
+        const jid=String(q.jobId||""); const key=(q.file==="gc")?("parkside:cnc:gc:"+jid):("parkside:cnc:img:"+jid);
+        let val=""; try{ if(redis){ const v=await redis.get(key); val=(v==null)?"":String(v); } }catch(e){ val=""; }
+        return res.status(200).json({file:String(q.file), jobId:jid, data:val});
+      }
+      let st={jobs:[],config:{}};
+      try{ if(redis){ const raw=await redis.get("parkside:cnc"); const o=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); if(o&&typeof o==="object") st=o; } }catch(e){ st={jobs:[],config:{}}; }
+      if(!st||typeof st!=="object") st={jobs:[],config:{}};
+      if(!Array.isArray(st.jobs)) st.jobs=[];
+      if(!st.config||typeof st.config!=="object") st.config={};
+      const now=new Date().toISOString();
+      if(req.method==="POST"){
+        let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+        if(b.addJob&&typeof b.addJob==="object"){
+          const a=b.addJob;
+          const rec={ id:"cnc_"+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36),
+            project:String(a.project||"Job").slice(0,80), material:String(a.material||"").slice(0,120),
+            design:String(a.design||"").slice(0,200), status:"Design", note:String(a.note||"").slice(0,500),
+            hasCreative:false, hasGcode:false, gcodeName:"", at:now, updatedAt:now };
+          st.jobs.push(rec); if(st.jobs.length>200) st.jobs=st.jobs.slice(-200);
+        } else if(b.updateJob&&typeof b.updateJob==="object"){
+          const u=b.updateJob; const id=String(u.id||"");
+          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); x.updatedAt=now; } return x; });
+        } else if(b.delJob){
+          const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
+          try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); } }catch(e){}
+        } else if(b.config&&typeof b.config==="object"){
+          const c=b.config; if(c.machineUrl!==undefined) st.config.machineUrl=String(c.machineUrl||"").slice(0,300);
+        } else if(b.jobId){
+          const jid=String(b.jobId); let job=null; for(let i=0;i<st.jobs.length;i++){ if(st.jobs[i]&&st.jobs[i].id===jid){ job=st.jobs[i]; break; } }
+          if(!job) return res.status(404).json({error:"job not found"});
+          if(b.creativeImage!==undefined){
+            const d=String(b.creativeImage||""); if(d.length>800000) return res.status(413).json({error:"image too large"});
+            try{ if(redis){ if(d) await redis.set("parkside:cnc:img:"+jid, d); else await redis.del("parkside:cnc:img:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
+            job.hasCreative=!!d; job.updatedAt=now;
+          } else if(b.gcode!==undefined){
+            const t=String(b.gcode||""); if(t.length>800000) return res.status(413).json({error:"gcode too large"});
+            try{ if(redis){ if(t) await redis.set("parkside:cnc:gc:"+jid, t); else await redis.del("parkside:cnc:gc:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
+            job.hasGcode=!!t; job.gcodeName=String(b.gcodeName||job.gcodeName||"job.nc").slice(0,120); job.updatedAt=now;
+          } else if(b.machineAction){
+            const act=String(b.machineAction);
+            if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
+            else if(act==="start"){ job.status="Carving"; job.startedAt=now; }
+            job.updatedAt=now;
+          }
+        }
+        try{ if(redis) await redis.set("parkside:cnc", JSON.stringify(st)); }catch(e){ return res.status(500).json({error:"db error"}); }
+        return res.status(200).json({ok:true, cnc:st});
+      }
+      return res.status(200).json({cnc:st});
+    }
     // Monthly report (Gavin/cron): GET returns JSON; ?send=1 emails Gavin+Victor. ?month=YYYY-MM (default current).
     if(action==="monthly_report"){
       const okAuth=((req.headers["x-gavin-password"]||"")===(process.env.GAVIN_PASSWORD||"__x")) || ((req.headers["authorization"]||"")==="Bearer "+(process.env.CRON_SECRET||"__y")) || ((req.query&&req.query.token)===(process.env.CRON_SECRET||"__z"));
