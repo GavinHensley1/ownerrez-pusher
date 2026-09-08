@@ -486,7 +486,7 @@
         <span id="cncTokState" class="muted" style="font-size:12px"></span>
       </div>
       <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
-        <label class="muted" style="font-size:12px">Depth model<br><input id="cncDepthModel" placeholder="cjwbw/depth-anything" style="width:240px;max-width:100%"></label>
+        <label class="muted" style="font-size:12px">Depth model<br><input id="cncDepthModel" placeholder="chenxwh/depth-anything-v2" style="width:240px;max-width:100%"></label>
         <button onclick="cncSaveDepthModel()">Save model</button>
         <button onclick="window.open('https://replicate.com/account/api-tokens','_blank')">Get a token &#8599;</button>
       </div>
@@ -1626,7 +1626,7 @@ function cncGenerateRelief(dataURL, p, cb){
     safeZ=2, cols=cncClamp(p.cols||110,24,140), three=!/2D/i.test(p.carveType||'3D'), probe=/probe/i.test(p.leveling||'');
     var img=new Image();
     img.onload=function(){ try{
-      var ar=(img.height||1)/(img.width||1), passes=Math.max(1,Math.ceil(maxDepth/step));
+      var ar=(img.height||1)/(img.width||1), passes=Math.max(1,Math.ceil(maxDepth/step)); if(passes>14){ step=+(maxDepth/14).toFixed(3); passes=14; }
       while(cols>28 && passes*cols*Math.round(cols*ar) > 22000){ cols=Math.round(cols*0.9); }
       var rows=Math.max(8,Math.round(cols*ar));
       var c=document.createElement('canvas'); c.width=cols; c.height=rows; var ctx=c.getContext('2d');

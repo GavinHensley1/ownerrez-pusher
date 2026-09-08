@@ -2613,7 +2613,7 @@ if(action==="email_recipients"){
           let sec={}; try{ if(redis){ const raw=await redis.get("parkside:cnc:secrets"); sec=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):{});} }catch(e){ sec={}; }
           const token=process.env.REPLICATE_API_TOKEN||sec.depthToken||"";
           if(!token) return res.status(200).json({error:"no_token", cnc:st});
-          const model=(st.config&&st.config.depthModel)||"cjwbw/depth-anything";
+          const model=(st.config&&st.config.depthModel)||"chenxwh/depth-anything-v2";
           let pj=null;
           try{
             if(b.genDepthStatus && job.depthPredId){
@@ -2630,7 +2630,7 @@ if(action==="email_recipients"){
           if(!pj||!pj.status){ return res.status(200).json({error:(pj&&pj.error)?String(pj.error).slice(0,160):"bad_response", cnc:st}); }
           if(pj.status==="succeeded"){
             let out=pj.output; if(Array.isArray(out)) out=out[out.length-1];
-            let src=(typeof out==="string")?out:((out&&(out.image||out.depth||out.grey||out.grayscale))||"");
+            let src=(typeof out==="string")?out:((out&&(out.grey_depth||out.image||out.depth||out.grey||out.grayscale||out.color_depth))||"");
             if(!src) return res.status(200).json({error:"no_depth_output", cnc:st});
             let depthData="";
             try{ const dr=await fetch(src); const ab=await dr.arrayBuffer(); const ct=dr.headers.get("content-type")||"image/png"; depthData="data:"+ct+";base64,"+Buffer.from(ab).toString("base64"); }
@@ -2653,7 +2653,7 @@ if(action==="email_recipients"){
           if(b.creativeImage!==undefined){
             const d=String(b.creativeImage||""); if(d.length>800000) return res.status(413).json({error:"image too large"});
             try{ if(redis){ if(d) await redis.set("parkside:cnc:img:"+jid, d); else await redis.del("parkside:cnc:img:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
-            job.hasCreative=!!d; job.hasDepth=false; try{ if(redis) await redis.del("parkside:cnc:depth:"+jid); }catch(e){} job.updatedAt=now;
+            job.hasCreative=!!d; job.hasGcode=false; job.hasDepth=false; try{ if(redis){ await redis.del("parkside:cnc:depth:"+jid); await redis.del("parkside:cnc:gc:"+jid); } }catch(e){} job.updatedAt=now;
           }
           if(b.gcode!==undefined){
             const t=String(b.gcode||""); if(t.length>800000) return res.status(413).json({error:"gcode too large"});
