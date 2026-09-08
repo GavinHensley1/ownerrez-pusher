@@ -2615,7 +2615,25 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(act==="start"){ job.status="Carving"; job.startedAt=now; job.agentState="queued"; job.agentMsg=""; job.progress=0; job.agentAt=now; }
+            else if(act==="start"){
+              job.status="Carving"; job.startedAt=now; job.progress=0; job.agentAt=now;
+              const murl=(st.config&&st.config.machineUrl)||"";
+              if(!murl){ job.agentState="queued"; job.agentMsg="No machine address set (open Machine connection and add the machine's URL)"; }
+              else {
+                let gc=""; try{ if(redis){ const v=await redis.get("parkside:cnc:gc:"+jid); gc=(v==null)?"":String(v); } }catch(e){}
+                if(!gc){ job.agentState="error"; job.agentMsg="No G-code on this job — hit Load first"; }
+                else {
+                  try{
+                    const ctrl=new AbortController(); const _t=setTimeout(function(){ctrl.abort();},9000);
+                    const rr=await fetch(murl,{method:"POST",headers:{"Content-Type":"text/plain"},body:gc,signal:ctrl.signal});
+                    clearTimeout(_t);
+                    let txt=""; try{ txt=(await rr.text()).slice(0,160); }catch(e){}
+                    job.agentState = rr.ok ? "running" : "error";
+                    job.agentMsg = "machine responded HTTP "+rr.status+(txt?(" — "+txt):"");
+                  }catch(e){ job.agentState="error"; job.agentMsg="Could not reach the machine at that URL ("+String(e&&e.message||e).slice(0,120)+")"; }
+                }
+              }
+            }
             job.updatedAt=now;
           }
           if(b.agent&&typeof b.agent==="object"){

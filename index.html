@@ -1505,7 +1505,7 @@ async function cncRenderActive(){
   if(!job){ if(cp)cp.innerHTML='<span class="muted">No image yet</span>'; if(gp)gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm)gm.textContent=''; return; }
   if(job.hasCreative){ var img=await cncFetchFile(job.id,'img'); if(cp) cp.innerHTML=img?('<img src="'+img+'" style="max-width:100%;max-height:220px;object-fit:contain">'):'<span class="muted">No image yet</span>'; }
   else if(cp){ cp.innerHTML='<span class="muted">No image yet</span>'; }
-  if(job.hasGcode){ var gc=await cncFetchFile(job.id,'gc'); if(gc) cncRenderToolpath(gc); else if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; }
+  if(job.hasGcode){ if(job.hasCreative){ var im2=await cncFetchFile(job.id,'img'); if(im2) cncRenderRelief(im2,(Number(job.sizeMM)||100)+' mm wide \u00b7 relief preview'); else if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; } else { var gc=await cncFetchFile(job.id,'gc'); if(gc) cncRenderToolpath(gc); else if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; } }
   else { if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm) gm.textContent=''; }
   cncRenderAgent(job); cncMaybePoll();
 }
@@ -1520,6 +1520,34 @@ var CNC_POLL=null;
 function cncMaybePoll(){ var job=cncCurrentJob(); var active=job&&(job.agentState==='queued'||job.agentState==='running');
   if(active&&!CNC_POLL){ CNC_POLL=setInterval(function(){ var m=document.getElementById('cncMain'); if(m&&m.style.display!=='none') loadCnc(); else { clearInterval(CNC_POLL); CNC_POLL=null; } },5000); }
   else if(!active&&CNC_POLL){ clearInterval(CNC_POLL); CNC_POLL=null; }
+}
+function cncRenderRelief(dataURL, sizeLabel){
+  var prev=document.getElementById('cncGcodePrev'), meta=document.getElementById('cncGcodeMeta'); if(!prev) return;
+  if(!dataURL){ prev.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(meta) meta.textContent=''; return; }
+  var img=new Image();
+  img.onload=function(){ try{
+    var W=340, ar=(img.height||1)/(img.width||1); if(!isFinite(ar)||ar<=0) ar=0.75; var H=Math.max(20,Math.round(W*ar));
+    var c=document.createElement('canvas'); c.width=W; c.height=H; var ctx=c.getContext('2d');
+    ctx.drawImage(img,0,0,W,H); var px=ctx.getImageData(0,0,W,H).data;
+    var hm=new Float32Array(W*H), mn=1e9, mx=-1e9, i;
+    for(i=0;i<W*H;i++){ var v=0.299*px[i*4]+0.587*px[i*4+1]+0.114*px[i*4+2]; hm[i]=v; if(v<mn)mn=v; if(v>mx)mx=v; }
+    var hb=new Float32Array(W*H), x,y,dx,dy;
+    for(y=0;y<H;y++)for(x=0;x<W;x++){ var s=0,n=0; for(dy=-1;dy<=1;dy++)for(dx=-1;dx<=1;dx++){ var xx=x+dx,yy=y+dy; if(xx<0||yy<0||xx>=W||yy>=H) continue; s+=hm[yy*W+xx]; n++; } hb[y*W+x]=s/n; }
+    var rng=(mx-mn)||1, out=ctx.createImageData(W,H), o=out.data;
+    for(y=0;y<H;y++)for(x=0;x<W;x++){ var idx=y*W+x;
+      var xl=x>0?idx-1:idx, xr=x<W-1?idx+1:idx, yu=y>0?idx-W:idx, yd=y<H-1?idx+W:idx;
+      var gx=hb[xr]-hb[xl], gy=hb[yd]-hb[yu];
+      var nx=-gx, ny=-gy, nz=42, len=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;
+      var dot=(nx/len)*(-0.45)+(ny/len)*(-0.6)+(nz/len)*0.66; if(dot<0) dot=0;
+      var base=(hb[idx]-mn)/rng, sh=Math.round(38 + dot*175 + base*30); if(sh>255)sh=255; if(sh<0)sh=0;
+      o[idx*4]=sh; o[idx*4+1]=sh; o[idx*4+2]=sh; o[idx*4+3]=255;
+    }
+    ctx.putImageData(out,0,0);
+    prev.innerHTML='<img src="'+c.toDataURL("image/png")+'" style="max-width:100%;max-height:240px;object-fit:contain;border-radius:6px">';
+    if(meta) meta.textContent=sizeLabel||'relief preview';
+  }catch(e){ prev.innerHTML='<span class="muted">Preview error</span>'; } };
+  img.onerror=function(){ prev.innerHTML='<span class="muted">Could not render preview</span>'; };
+  img.src=dataURL;
 }
 function cncRenderToolpath(text){
   var prev=document.getElementById('cncGcodePrev'), meta=document.getElementById('cncGcodeMeta'); if(!prev) return;
@@ -1624,7 +1652,7 @@ async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add 
     if(st) st.textContent='Loading the design…';
     var nm='auto-'+((job.carveType||'3d').toLowerCase().indexOf('2d')>=0?'2d':'3d')+'.nc';
     var j=await cncPost({jobId:job.id, gcode:gcode, gcodeName:nm, machineAction:'load'});
-    if(j&&j.cnc){ CNC=j.cnc; cncRenderToolpath(gcode); renderCncJobs(); renderCncActiveSelect(); if(st) st.textContent=cncLoadMsg(); }
+    if(j&&j.cnc){ CNC=j.cnc; cncRenderRelief(img,(Number(job.sizeMM)||100)+' mm wide \u00b7 relief preview'); renderCncJobs(); renderCncActiveSelect(); if(st) st.textContent=cncLoadMsg(); }
   });
 }
 async function cncStart(){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
