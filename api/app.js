@@ -2570,7 +2570,7 @@ if(action==="email_recipients"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const q=req.query||{};
       if(req.method!=="POST" && q.file){
-        const jid=String(q.jobId||""); const key=(q.file==="gc")?("parkside:cnc:gc:"+jid):("parkside:cnc:img:"+jid);
+        const jid=String(q.jobId||""); const key=(q.file==="gc")?("parkside:cnc:gc:"+jid):((q.file==="depth")?("parkside:cnc:depth:"+jid):("parkside:cnc:img:"+jid));
         let val=""; try{ if(redis){ const v=await redis.get(key); val=(v==null)?"":String(v); } }catch(e){ val=""; }
         return res.status(200).json({file:String(q.file), jobId:jid, data:val});
       }
@@ -2594,18 +2594,66 @@ if(action==="email_recipients"){
           st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); x.updatedAt=now; } return x; });
         } else if(b.delJob){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
-          try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); } }catch(e){}
+          try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); await redis.del("parkside:cnc:depth:"+id); } }catch(e){}
         } else if(b.config&&typeof b.config==="object"){
           const c=b.config; if(c.machineUrl!==undefined) st.config.machineUrl=String(c.machineUrl||"").slice(0,300);
           if(c.reliefWidth!==undefined) st.config.reliefWidth=Math.max(20,Math.min(600,Number(c.reliefWidth)||100));
           if(c.reliefDepth!==undefined) st.config.reliefDepth=Math.max(0.1,Math.min(10,Number(c.reliefDepth)||1.5));
+          if(c.depthModel!==undefined) st.config.depthModel=String(c.depthModel||"").slice(0,120);
+        } else if(b.secret&&typeof b.secret==="object"){
+          let sec={}; try{ if(redis){ const raw=await redis.get("parkside:cnc:secrets"); sec=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):{});} }catch(e){ sec={}; }
+          if(b.secret.depthToken!==undefined){ const t=String(b.secret.depthToken||""); if(t) sec.depthToken=t; else delete sec.depthToken; }
+          try{ if(redis) await redis.set("parkside:cnc:secrets", JSON.stringify(sec)); }catch(e){ return res.status(500).json({error:"db error"}); }
+          st.config.hasDepthToken=!!sec.depthToken;
+          try{ if(redis) await redis.set("parkside:cnc", JSON.stringify(st)); }catch(e){}
+          return res.status(200).json({ok:true, cnc:st});
+        } else if(b.genDepth||b.genDepthStatus){
+          const jid=String(b.jobId||""); let job=null; for(let i=0;i<st.jobs.length;i++){ if(st.jobs[i]&&st.jobs[i].id===jid){ job=st.jobs[i]; break; } }
+          if(!job) return res.status(404).json({error:"job not found"});
+          let sec={}; try{ if(redis){ const raw=await redis.get("parkside:cnc:secrets"); sec=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):{});} }catch(e){ sec={}; }
+          const token=process.env.REPLICATE_API_TOKEN||sec.depthToken||"";
+          if(!token) return res.status(200).json({error:"no_token", cnc:st});
+          const model=(st.config&&st.config.depthModel)||"cjwbw/depth-anything";
+          let pj=null;
+          try{
+            if(b.genDepthStatus && job.depthPredId){
+              const pr=await fetch("https://api.replicate.com/v1/predictions/"+encodeURIComponent(job.depthPredId),{headers:{Authorization:"Bearer "+token}});
+              pj=await pr.json();
+            } else {
+              let cimg=""; try{ if(redis){ const v=await redis.get("parkside:cnc:img:"+jid); cimg=(v==null)?"":String(v);} }catch(e){}
+              if(!cimg) return res.status(200).json({error:"no_creative", cnc:st});
+              const cr=await fetch("https://api.replicate.com/v1/models/"+model+"/predictions",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json","Prefer":"wait=30"},body:JSON.stringify({input:{image:cimg}})});
+              if(cr.status===404) return res.status(200).json({error:"model_not_found", cnc:st});
+              pj=await cr.json();
+            }
+          }catch(e){ return res.status(200).json({error:"depth_call_failed: "+String(e&&e.message||e).slice(0,140), cnc:st}); }
+          if(!pj||!pj.status){ return res.status(200).json({error:(pj&&pj.error)?String(pj.error).slice(0,160):"bad_response", cnc:st}); }
+          if(pj.status==="succeeded"){
+            let out=pj.output; if(Array.isArray(out)) out=out[out.length-1];
+            let src=(typeof out==="string")?out:((out&&(out.image||out.depth||out.grey||out.grayscale))||"");
+            if(!src) return res.status(200).json({error:"no_depth_output", cnc:st});
+            let depthData="";
+            try{ const dr=await fetch(src); const ab=await dr.arrayBuffer(); const ct=dr.headers.get("content-type")||"image/png"; depthData="data:"+ct+";base64,"+Buffer.from(ab).toString("base64"); }
+            catch(e){ return res.status(200).json({error:"depth_fetch_failed", cnc:st}); }
+            if(depthData.length>1400000) return res.status(200).json({error:"depth_too_large", cnc:st});
+            try{ if(redis) await redis.set("parkside:cnc:depth:"+jid, depthData); }catch(e){ return res.status(500).json({error:"db error"}); }
+            job.hasDepth=true; job.depthPredId=""; job.updatedAt=now;
+            try{ if(redis) await redis.set("parkside:cnc", JSON.stringify(st)); }catch(e){}
+            return res.status(200).json({ok:true, depthReady:true, cnc:st});
+          } else if(pj.status==="failed"||pj.status==="canceled"){
+            job.depthPredId=""; try{ if(redis) await redis.set("parkside:cnc", JSON.stringify(st)); }catch(e){}
+            return res.status(200).json({error:"depth_failed: "+String(pj.error||"").slice(0,140), cnc:st});
+          } else {
+            job.depthPredId=String(pj.id||job.depthPredId||""); try{ if(redis) await redis.set("parkside:cnc", JSON.stringify(st)); }catch(e){}
+            return res.status(200).json({pending:true, cnc:st});
+          }
         } else if(b.jobId){
           const jid=String(b.jobId); let job=null; for(let i=0;i<st.jobs.length;i++){ if(st.jobs[i]&&st.jobs[i].id===jid){ job=st.jobs[i]; break; } }
           if(!job) return res.status(404).json({error:"job not found"});
           if(b.creativeImage!==undefined){
             const d=String(b.creativeImage||""); if(d.length>800000) return res.status(413).json({error:"image too large"});
             try{ if(redis){ if(d) await redis.set("parkside:cnc:img:"+jid, d); else await redis.del("parkside:cnc:img:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
-            job.hasCreative=!!d; job.updatedAt=now;
+            job.hasCreative=!!d; job.hasDepth=false; try{ if(redis) await redis.del("parkside:cnc:depth:"+jid); }catch(e){} job.updatedAt=now;
           }
           if(b.gcode!==undefined){
             const t=String(b.gcode||""); if(t.length>800000) return res.status(413).json({error:"gcode too large"});

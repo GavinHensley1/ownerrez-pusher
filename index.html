@@ -477,6 +477,22 @@
   </div>
 
   <div class="card">
+    <h2 style="margin:.1em 0;cursor:pointer" onclick="var d=document.getElementById('cncAI');d.style.display=(d.style.display==='none'?'block':'none')">3D design AI &#9662;</h2>
+    <div id="cncAI" style="display:none">
+      <div class="legend">Connect a depth-AI so the app turns your photo into a real 3D relief (it figures out how deep each part sticks out). Uses Replicate (~a cent per image). Paste your token once &mdash; it's stored securely and never shown.</div>
+      <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <label class="muted" style="font-size:12px">Replicate API token<br><input id="cncDepthTok" type="password" autocomplete="new-password" placeholder="paste token" style="width:280px;max-width:100%"></label>
+        <button onclick="cncSaveDepthToken()">Save token</button>
+        <span id="cncTokState" class="muted" style="font-size:12px"></span>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <label class="muted" style="font-size:12px">Depth model<br><input id="cncDepthModel" placeholder="cjwbw/depth-anything" style="width:240px;max-width:100%"></label>
+        <button onclick="cncSaveDepthModel()">Save model</button>
+        <button onclick="window.open('https://replicate.com/account/api-tokens','_blank')">Get a token &#8599;</button>
+      </div>
+    </div>
+  </div>
+  <div class="card">
     <h2 style="margin:.1em 0;cursor:pointer" onclick="var d=document.getElementById('cncAdv');d.style.display=(d.style.display==='none'?'block':'none')">Advanced &#9662;</h2>
     <div id="cncAdv" style="display:none">
       <div class="legend">Optional. Upload your own Carveco/GRBL .nc to use instead of the built-in auto-relief, or tune the auto-relief size &amp; depth (leave blank to use the conservative material default).</div>
@@ -1445,6 +1461,8 @@ async function loadCnc(){
     var lbl=document.getElementById('cncUrlLabel'); if(lbl) lbl.textContent=CNC.config.machineUrl?('→ '+CNC.config.machineUrl):'(no machine address set)';
     var rw=document.getElementById('cncRW'); if(rw&&CNC.config.reliefWidth) rw.value=CNC.config.reliefWidth;
     var rd=document.getElementById('cncRD'); if(rd&&CNC.config.reliefDepth) rd.value=CNC.config.reliefDepth;
+    var dm=document.getElementById('cncDepthModel'); if(dm) dm.value=CNC.config.depthModel||'';
+    var ts=document.getElementById('cncTokState'); if(ts) ts.textContent=CNC.config.hasDepthToken?'✓ token saved':'no token yet';
     if(!CNC_CUR && CNC.jobs.length) CNC_CUR=CNC.jobs[CNC.jobs.length-1].id;
     renderCncJobs(); await cncRenderActive();
   }catch(e){ if(el) el.textContent='Could not load.'; }
@@ -1505,7 +1523,7 @@ async function cncRenderActive(){
   if(!job){ if(cp)cp.innerHTML='<span class="muted">No image yet</span>'; if(gp)gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm)gm.textContent=''; return; }
   if(job.hasCreative){ var img=await cncFetchFile(job.id,'img'); if(cp) cp.innerHTML=img?('<img src="'+img+'" style="max-width:100%;max-height:220px;object-fit:contain">'):'<span class="muted">No image yet</span>'; }
   else if(cp){ cp.innerHTML='<span class="muted">No image yet</span>'; }
-  if(job.hasGcode){ if(job.hasCreative){ var im2=await cncFetchFile(job.id,'img'); if(im2) cncRenderRelief(im2,(Number(job.sizeMM)||100)+' mm wide \u00b7 relief preview'); else if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; } else { var gc=await cncFetchFile(job.id,'gc'); if(gc) cncRenderToolpath(gc); else if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; } }
+  if(job.hasGcode){ var src=null; if(job.hasDepth){ src=await cncFetchFile(job.id,'depth'); } else if(job.hasCreative){ src=await cncFetchFile(job.id,'img'); } if(src){ cncRenderRelief(src,(Number(job.sizeMM)||100)+' mm wide'); } else { var gc=await cncFetchFile(job.id,'gc'); if(gc) cncRenderToolpath(gc); else if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; } }
   else { if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm) gm.textContent=''; }
   cncRenderAgent(job); cncMaybePoll();
 }
@@ -1636,24 +1654,33 @@ function cncGenerateRelief(dataURL, p, cb){
   }catch(e){ cb(null); }
 }
 function cncLoadMsg(){ return (CNC.config&&CNC.config.machineUrl)?'Loaded — review the design, then Start.':'Loaded. (Set a machine address under “Machine connection” to send it to the machine for real.)'; }
-async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add a job first.'); return; }
-  var st=document.getElementById('cncRunStatus');
-  if(job.hasGcode){ if(st) st.textContent='Loading…'; var j0=await cncPost({jobId:job.id, machineAction:'load'}); if(j0&&j0.cnc){ CNC=j0.cnc; renderCncJobs(); await cncRenderActive(); if(st) st.textContent=cncLoadMsg(); } return; }
-  if(!job.hasCreative){ alert('Upload a creative image first (step 1).'); return; }
-  if(st) st.textContent='Generating the design from your image…';
-  var img=await cncFetchFile(job.id,'img'); if(!img){ if(st) st.textContent=''; alert('Could not read the creative.'); return; }
+async function cncGenFromImage(job, srcDataURL){
   var mat=job.material||'C752 nickel silver', preset=CNC_MATS[mat]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||'');
-  var params={ widthMM:(Number(job.sizeMM)||((CNC.config&&CNC.config.reliefWidth))||100), maxDepth:(CNC.config&&CNC.config.reliefDepth)||preset.depth,
+  var params={ widthMM:(Number(job.sizeMM)||100), maxDepth:(CNC.config&&CNC.config.reliefDepth)||preset.depth,
     step:+(preset.step*(cons?0.7:1)).toFixed(3), feed:Math.round(preset.feed*(cons?0.6:1)), plunge:Math.round(preset.plunge*(cons?0.6:1)),
     rpm:preset.rpm, carveType:job.carveType||'3D relief', leveling:job.leveling||'' };
-  cncGenerateRelief(img, params, async function(gcode){
-    if(!gcode){ if(st) st.textContent=''; alert('Could not generate a design from that image.'); return; }
-    if(gcode.length>790000){ if(st) st.textContent=''; alert('That made too large a toolpath — lower the relief width or depth under Advanced.'); return; }
-    if(st) st.textContent='Loading the design…';
-    var nm='auto-'+((job.carveType||'3d').toLowerCase().indexOf('2d')>=0?'2d':'3d')+'.nc';
-    var j=await cncPost({jobId:job.id, gcode:gcode, gcodeName:nm, machineAction:'load'});
-    if(j&&j.cnc){ CNC=j.cnc; cncRenderRelief(img,(Number(job.sizeMM)||100)+' mm wide \u00b7 relief preview'); renderCncJobs(); renderCncActiveSelect(); if(st) st.textContent=cncLoadMsg(); }
-  });
+  return new Promise(function(resolve){ cncGenerateRelief(srcDataURL, params, resolve); });
+}
+async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add a job first.'); return; }
+  var st=document.getElementById('cncRunStatus');
+  if(job.hasGcode && !job.hasCreative){ if(st) st.textContent='Loading...'; var j0=await cncPost({jobId:job.id, machineAction:'load'}); if(j0&&j0.cnc){ CNC=j0.cnc; renderCncJobs(); await cncRenderActive(); if(st) st.textContent=cncLoadMsg(); } return; }
+  if(!job.hasCreative){ alert('Upload a creative image first (step 1).'); return; }
+  var srcURL=null, usedDepth=false;
+  if(CNC.config&&CNC.config.hasDepthToken){
+    if(st) st.textContent='AI is analyzing the 3D depth of your image...';
+    var dj=await cncPost({jobId:job.id, genDepth:true}); var tries=0;
+    while(dj&&dj.pending&&tries<40){ await new Promise(function(r){setTimeout(r,3000);}); dj=await cncPost({jobId:job.id, genDepthStatus:true}); tries++; if(st) st.textContent='AI is analyzing the 3D depth... ('+(tries*3)+'s)'; }
+    if(dj&&dj.cnc) CNC=dj.cnc;
+    if(dj&&dj.depthReady){ srcURL=await cncFetchFile(job.id,'depth'); usedDepth=true; }
+    else if(dj&&dj.error&&dj.error!=='no_token'){ if(st) st.textContent=''; alert('Depth AI: '+dj.error+(dj.error==='model_not_found'?' - set the correct Replicate model in the 3D design AI panel.':'')); return; }
+  }
+  if(!srcURL){ srcURL=await cncFetchFile(job.id,'img'); if(!srcURL){ if(st) st.textContent=''; alert('Could not read the creative.'); return; } }
+  if(st) st.textContent=usedDepth?'Building the 3D relief from the AI depth...':'Building a basic relief (add a depth-AI token in 3D design AI for true 3D)...';
+  var gcode=await cncGenFromImage(job, srcURL);
+  if(!gcode){ if(st) st.textContent=''; alert('Could not generate the design.'); return; }
+  if(gcode.length>790000){ if(st) st.textContent=''; alert('Too large - lower the Size or the depth under Advanced.'); return; }
+  var j=await cncPost({jobId:job.id, gcode:gcode, gcodeName:'auto-'+(usedDepth?'depth':'basic')+'.nc', machineAction:'load'});
+  if(j&&j.cnc){ CNC=j.cnc; cncRenderRelief(srcURL,(Number(job.sizeMM)||100)+' mm wide - '+(usedDepth?'AI 3D relief':'basic relief')); renderCncJobs(); renderCncActiveSelect(); if(st) st.textContent=cncLoadMsg(); }
 }
 async function cncStart(){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
   if(!job.hasGcode){ alert('Hit Load to machine first — the design has to be generated before you can Start.'); return; }
@@ -1662,6 +1689,8 @@ async function cncStart(){ var job=cncCurrentJob(); if(!job){ alert('Pick a job 
   var j=await cncPost({jobId:job.id, machineAction:'start'});
   if(j&&j.cnc){ CNC=j.cnc; renderCncJobs(); await cncRenderActive(); if(st) st.textContent=(CNC.config&&CNC.config.machineUrl)?'▶ Carve started.':'Marked Carving. (No machine address set — connect the machine to run for real.)'; }
 }
+async function cncSaveDepthToken(){ var v=(document.getElementById('cncDepthTok')||{}).value||''; var s=document.getElementById('cncTokState'); if(s) s.textContent='Saving...'; var j=await cncPost({secret:{depthToken:v}}); if(j&&j.cnc){ CNC=j.cnc; var el=document.getElementById('cncDepthTok'); if(el) el.value=''; if(s) s.textContent=CNC.config.hasDepthToken?'✓ token saved':'no token yet'; } else if(s) s.textContent='Error.'; }
+async function cncSaveDepthModel(){ var v=(document.getElementById('cncDepthModel')||{}).value||''; var j=await cncPost({config:{depthModel:v}}); if(j&&j.cnc) CNC=j.cnc; }
 async function saveReliefCfg(){ var w=document.getElementById('cncRW').value, d=document.getElementById('cncRD').value, s=document.getElementById('cncRelStatus'); if(s) s.textContent='Saving…';
   var cfg={}; if(w!=='') cfg.reliefWidth=Number(w)||100; if(d!=='') cfg.reliefDepth=Number(d)||1.5;
   var j=await cncPost({config:cfg}); if(j&&j.cnc){ CNC=j.cnc; if(s) s.textContent='Saved.'; cncSetupHint(); setTimeout(function(){if(s)s.textContent='';},1400);} else if(s) s.textContent='Error.'; }
