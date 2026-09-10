@@ -2591,7 +2591,7 @@ if(action==="email_recipients"){
           st.jobs.push(rec); if(st.jobs.length>200) st.jobs=st.jobs.slice(-200);
         } else if(b.updateJob&&typeof b.updateJob==="object"){
           const u=b.updateJob; const id=String(u.id||"");
-          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); x.updatedAt=now; } return x; });
+          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); x.updatedAt=now; } return x; });
         } else if(b.delJob){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
           try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); await redis.del("parkside:cnc:depth:"+id); } }catch(e){}

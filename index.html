@@ -454,6 +454,22 @@
         <label class="muted" style="font-size:12px">Speed<br>
           <select id="cncSpeed" onchange="cncSaveSetup()"><option>Conservative (recommended)</option><option>Normal</option></select></label>
       </div>
+      <div style="font-size:11px;color:#93a2b8;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin:12px 0 6px">Cut out (optional)</div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        <label class="muted" style="font-size:12px">Cut the piece out?<br>
+          <select id="cncCutout" onchange="cncSaveSetup()">
+            <option value="none">No &mdash; just carve the relief</option>
+            <option value="profile">Yes &mdash; cut it free of the stock</option>
+            <option value="tabs">Yes &mdash; cut out but leave tabs to snap</option>
+          </select></label>
+        <label class="muted" style="font-size:12px">Material thickness (mm)<br>
+          <input id="cncThick" type="number" step="0.5" placeholder="e.g. 19" style="width:130px" onchange="cncSaveSetup()"></label>
+        <label class="muted" style="font-size:12px">Tabs (count)<br>
+          <input id="cncTabs" type="number" step="1" placeholder="6" style="width:80px" onchange="cncSaveSetup()"></label>
+        <label class="muted" style="font-size:12px">Tab height (mm)<br>
+          <input id="cncTabH" type="number" step="0.1" placeholder="1.5" style="width:100px" onchange="cncSaveSetup()"></label>
+      </div>
+      <div class="muted" id="cncCutoutHint" style="font-size:11px;margin-top:6px"></div>
       <div class="muted" id="cncSetupHint" style="font-size:11px;margin-top:8px"></div>
     </div>
 
@@ -1517,6 +1533,11 @@ function cncPopulateSetup(job){
   var iv=document.getElementById('cncInvert'); if(iv) iv.checked=(job.invertDepth==='true'||job.invertDepth===true);
   var fb=document.getElementById('cncFlatten'); if(fb) fb.checked=(job.flattenBg==='true'||job.flattenBg===true);
   cncSetSel('cncRelSrc', job.reliefSource||'image');
+  cncSetSel('cncCutout', job.cutout||'none');
+  var th=document.getElementById('cncThick'); if(th) th.value=(job.matThick&&job.matThick!=='0')?job.matThick:'';
+  var tb=document.getElementById('cncTabs'); if(tb) tb.value=(job.tabs&&job.tabs!=='0')?job.tabs:'';
+  var tbh=document.getElementById('cncTabH'); if(tbh) tbh.value=(job.tabHeight&&job.tabHeight!=='0')?job.tabHeight:'';
+  cncCutoutHint();
   cncSetupHint();
 }
 function cncSetupHint(){
@@ -1536,7 +1557,7 @@ async function cncSaveSetup(){
   var sv=parseFloat((document.getElementById('cncSizeVal')||{}).value)||100;
   var su=(document.getElementById('cncSizeUnit')||{}).value||'mm';
   var mm=(su==='in')? sv*25.4 : sv;
-  cncSetupHint();
+  cncSetupHint(); cncCutoutHint();
   var b={updateJob:{ id:job.id,
     material:(document.getElementById('cncMat')||{}).value,
     carveType:(document.getElementById('cncType')||{}).value,
@@ -1548,7 +1569,11 @@ async function cncSaveSetup(){
     reliefDepth:String(parseFloat((document.getElementById('cncReliefD')||{}).value)||''),
     invertDepth:String(!!(document.getElementById('cncInvert')||{}).checked),
     flattenBg:String(!!(document.getElementById('cncFlatten')||{}).checked),
-    reliefSource:((document.getElementById('cncRelSrc')||{}).value||'image') }};
+    reliefSource:((document.getElementById('cncRelSrc')||{}).value||'image'),
+    cutout:((document.getElementById('cncCutout')||{}).value||'none'),
+    matThick:String(parseFloat((document.getElementById('cncThick')||{}).value)||''),
+    tabs:String(parseInt((document.getElementById('cncTabs')||{}).value,10)||''),
+    tabHeight:String(parseFloat((document.getElementById('cncTabH')||{}).value)||'') }};
   var j=await cncPost(b); if(j&&j.cnc){ CNC=j.cnc; renderCncActiveSelect(); cncRenderPanelPlan(); }
 }
 function cncSetActive(id){ CNC_CUR=id||null; cncRenderActive(); }
@@ -1688,6 +1713,7 @@ function cncGenerateRelief(dataURL, p, cb){
           for(var k=0;k<seq.length;k++){ var cx2=seq[k]; var z=Math.max(targ(cx2,ry), level); g.push('G1 X'+(cx2*dx).toFixed(3)+' Z'+z.toFixed(3)+' F'+feed); }
         }
       }
+      cncAppendCutout(g, widthMM, heightMM, {matThick:p.matThick, cutout:p.carveType?p.cutout:p.cutout, tabs:p.tabs, tabHeight:p.tabHeight, bitR:p.bitR||1.5875, feed:feed, plunge:plunge, safeZ:safeZ, passDepth:1.2});
       g.push('G0 Z'+safeZ,'M5','G0 X0 Y0','M2'); cb(g.join('\n'));
     }catch(e){ cb(null); } };
     img.onerror=function(){ cb(null); }; img.src=dataURL;
@@ -1741,6 +1767,36 @@ function cncGlobalRange(img){ try{ var W=200, ar=(img.height||1)/(img.width||1),
   var d=x.getImageData(0,0,W,H).data, mn=1e9,mx=-1e9; for(var i=0;i<W*H;i++){ var v=0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2]; if(v<mn)mn=v; if(v>mx)mx=v; }
   return {mn:mn,mx:mx}; }catch(e){ return {mn:0,mx:255}; } }
 function cncBitStepover(job){ var b=String(job&&job.bit||'').toLowerCase(); if(b.indexOf('ball')>=0) return 0.4; if(b.indexOf('flat')>=0||b.indexOf('end mill')>=0) return 1.0; return 0.5; }
+function cncBitRadius(job){ var b=String(job&&job.bit||'').toLowerCase(); var m=b.match(/([\d.]+)\s*mm/); if(m){ return (parseFloat(m[1])||3.175)/2; } if(b.indexOf('v-bit')>=0||b.indexOf('vbit')>=0) return 0.5; return 1.5875; }
+function cncCutoutHint(){ var h=document.getElementById('cncCutoutHint'); if(!h) return;
+  var mode=(document.getElementById('cncCutout')||{}).value||'none';
+  var th=parseFloat((document.getElementById('cncThick')||{}).value)||0;
+  if(mode==='none'){ h.textContent=''; return; }
+  if(!th){ h.innerHTML='&#9888; Enter the material thickness so the cut goes all the way through.'; return; }
+  if(mode==='tabs'){ var n=parseInt((document.getElementById('cncTabs')||{}).value,10)||6, tabh=parseFloat((document.getElementById('cncTabH')||{}).value)||1.5; h.textContent='After carving, the outline is cut through '+th+' mm leaving '+n+' tabs '+tabh+' mm tall holding the piece to the stock \u2014 snap or trim them off when done.'; }
+  else { h.textContent='After carving, the outline is cut through '+th+' mm so the piece drops free. Clamp the stock well (no tabs).'; }
+}
+function cncAppendCutout(g, W, H, o){
+  if(!o||!o.cutout||o.cutout==='none') return;
+  var thick=cncClamp(o.matThick||0,0.5,120); if(!(thick>0)) return;
+  var bitR=o.bitR||1.5875, feed=o.feed||300, plunge=o.plunge||100, safeZ=o.safeZ||3, passDepth=cncClamp(o.passDepth||1.2,0.3,4);
+  var withTabs=(o.cutout==='tabs'), nTabs=withTabs?Math.max(2,Math.min(24,o.tabs||6)):0, tabH=withTabs?cncClamp(o.tabHeight||1.5,0.3,6):0, tabW=7;
+  var full=-(thick+0.6), x0=-bitR, y0=-bitR, x1=W+bitR, y1=H+bitR;
+  var pts=[[x0,y0],[x1,y0],[x1,y1],[x0,y1],[x0,y0]], segs=[], total=0, i;
+  for(i=0;i<pts.length-1;i++){ var ax=pts[i][0],ay=pts[i][1],bx=pts[i+1][0],by=pts[i+1][1], len=Math.sqrt((bx-ax)*(bx-ax)+(by-ay)*(by-ay)); segs.push({ax:ax,ay:ay,bx:bx,by:by,len:len,start:total}); total+=len; }
+  var centers=[]; for(var t=0;t<nTabs;t++) centers.push((t+0.5)/nTabs*total);
+  function inTab(d){ for(var k=0;k<centers.length;k++){ var dd=Math.abs(d-centers[k]); dd=Math.min(dd,total-dd); if(dd<tabW/2) return true; } return false; }
+  g.push('; --- Profile cut-out'+(withTabs?(' with '+nTabs+' tabs '+tabH+'mm'):'')+' through '+thick+'mm stock ---');
+  g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+x0.toFixed(3)+' Y'+y0.toFixed(3));
+  var passes=Math.max(1,Math.ceil((thick+0.6)/passDepth)), tabTopZ=-(thick-tabH);
+  for(var p2=1;p2<=passes;p2++){ var z=Math.max(full,-passDepth*p2);
+    g.push('G1 Z'+z.toFixed(3)+' F'+plunge);
+    for(var si=0;si<segs.length;si++){ var sg=segs[si], n=Math.max(1,Math.round(sg.len/2));
+      for(var q=1;q<=n;q++){ var f=q/n, px=sg.ax+(sg.bx-sg.ax)*f, py=sg.ay+(sg.by-sg.ay)*f, dist=sg.start+sg.len*f, zz=z;
+        if(withTabs && z<tabTopZ && inTab(dist)) zz=tabTopZ;
+        g.push('G1 X'+px.toFixed(3)+' Y'+py.toFixed(3)+' Z'+zz.toFixed(3)+' F'+feed); } } }
+  g.push('G0 Z'+safeZ.toFixed(2));
+}
 function cncGenReliefRegion(img, reg, o, cb){ try{
   var panelW=cncClamp(o.panelW||100,10,2000), panelH=cncClamp(o.panelH||100,10,2000),
     maxDepth=cncClamp(o.maxDepth||1.5,0.1,60), feed=cncClamp(o.feed||300,50,4000), plunge=cncClamp(o.plunge||100,20,1500),
@@ -1777,6 +1833,7 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
   for(ry=0; ry<rows; ry++){ yy=(panelH-ry*dymm).toFixed(3); var ltrf=(ry%2===0); seq=[]; for(cxi=0;cxi<cols;cxi++) seq.push(ltrf?cxi:(cols-1-cxi));
     g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+(seq[0]*dxmm).toFixed(3)+' Y'+yy,'G1 Z'+targ(seq[0],ry).toFixed(3)+' F'+plunge);
     for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+targ(cc,ry).toFixed(3)+' F'+feed); } }
+  cncAppendCutout(g, panelW, panelH, {matThick:o.matThick, cutout:o.cutout, tabs:o.tabs, tabHeight:o.tabHeight, bitR:o.bitR||1.5875, feed:feed, plunge:plunge, safeZ:safeZ, passDepth:Math.max(passDepth,1.2)});
   g.push('G0 Z'+safeZ.toFixed(2),'M5','G0 X0 Y0','M2'); cb(g.join('\n'));
 }catch(e){ cb(null); } }
 function cncPatchesFor(job){ var f=cncFinished(job); var mm=f?Math.max(f.W,f.H):200; return Math.max(48,Math.min(72,Math.round(mm/16))); }
@@ -1804,7 +1861,8 @@ async function cncGeneratePanels(){ var job=cncCurrentJob(); if(!job){ alert('Pi
     var opts0={ maxDepth:f.depth, feed:Math.round(mat.feed*(cons?0.6:1)), plunge:Math.round(mat.plunge*(cons?0.6:1)), rpm:mat.rpm,
       passDepth:+(mat.step*(cons?0.7:1)).toFixed(3), stepover:cncBitStepover(job), carveType:job.carveType||'3D relief', leveling:job.leveling||'',
       invert:(job.invertDepth==='true'||job.invertDepth===true), flatten:(job.flattenBg==='true'||job.flattenBg===true), gMn:gr.mn, gMx:gr.mx,
-      contrast:(job.reliefSource==='depth'?1.0:1.4), smooth:(job.reliefSource==='depth') };
+      contrast:(job.reliefSource==='depth'?1.0:1.4), smooth:(job.reliefSource==='depth'),
+      cutout:job.cutout, matThick:Number(job.matThick)||0, tabs:Number(job.tabs)||6, tabHeight:Number(job.tabHeight)||1.5, bitR:cncBitRadius(job) };
     CNC_PANEL_CTX[job.id]={src:src, plW:pl.panelW, plH:pl.panelH, cols:pl.cols, rows:pl.rows, opts:opts0, project:job.project};
     cncRenderRelief(src,(pl.total>1?(pl.total+' panels, '):'')+f.W+'x'+f.H+' mm - '+f.depth+' mm deep');
     var out=document.getElementById('cncPanelOut'); if(out){ var html='<div style="font-size:12px;margin-bottom:6px">Click a panel to generate + download its .nc (each carves with its own front-left zero):</div><div style="display:flex;gap:8px;flex-wrap:wrap">'; for(var r=0;r<pl.rows;r++)for(var c=0;c<pl.cols;c++){ html+='<button onclick="cncDownloadPanel(\''+job.id+'\','+r+','+c+')">R'+(r+1)+'C'+(c+1)+' &#11015;</button>'; } html+='</div>'; if(pl.total>1) html+='<div style="margin-top:8px"><button onclick="cncDownloadAllPanels(\''+job.id+'\')">&#11015; Download all '+pl.total+' panels</button></div>'; out.innerHTML=html; }
@@ -1829,7 +1887,8 @@ async function cncGenFromImage(job, srcDataURL){
   var mat=job.material||'C752 nickel silver', preset=CNC_MATS[mat]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||'');
   var params={ widthMM:(Number(job.sizeMM)||100), maxDepth:(Number(job.reliefDepth)||preset.depth),
     step:+(preset.step*(cons?0.7:1)).toFixed(3), feed:Math.round(preset.feed*(cons?0.6:1)), plunge:Math.round(preset.plunge*(cons?0.6:1)),
-    rpm:preset.rpm, carveType:job.carveType||'3D relief', leveling:job.leveling||'' };
+    rpm:preset.rpm, carveType:job.carveType||'3D relief', leveling:job.leveling||'',
+    cutout:job.cutout, matThick:Number(job.matThick)||0, tabs:Number(job.tabs)||6, tabHeight:Number(job.tabHeight)||1.5, bitR:cncBitRadius(job) };
   return new Promise(function(resolve){ cncGenerateRelief(srcDataURL, params, resolve); });
 }
 async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add a job first.'); return; }
