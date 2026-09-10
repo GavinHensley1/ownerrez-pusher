@@ -2614,6 +2614,7 @@ if(action==="email_recipients"){
           const token=process.env.REPLICATE_API_TOKEN||sec.depthToken||"";
           if(!token) return res.status(200).json({error:"no_token", cnc:st});
           let model=(st.config&&st.config.depthModel)||"vufinder/depth-anything-v3-mono";
+          let _ddbg={model:model};
           if(model.indexOf("chenxwh/depth-anything")>=0) model="vufinder/depth-anything-v3-mono";
           let pj=null;
           try{
@@ -2630,17 +2631,17 @@ if(action==="email_recipients"){
                 if(mr.status===404) return res.status(200).json({error:"model_not_found", cnc:st});
                 if(mr.status===401) return res.status(200).json({error:"bad_token", cnc:st});
                 const mj=await mr.json();
-                version=(mj&&mj.latest_version&&mj.latest_version.id)||"";
+                version=(mj&&mj.latest_version&&mj.latest_version.id)||""; _ddbg.ver=version; _ddbg.mstatus=mr.status;
               }catch(e){ return res.status(200).json({error:"depth_call_failed: "+String(e&&e.message||e).slice(0,120), cnc:st}); }
               if(!version) return res.status(200).json({error:"model_not_found", cnc:st});
               const depthInput=(model.indexOf("depth-anything-v3")>=0||model.indexOf("v3-")>=0)?{images:[cimg]}:{image:cimg};
               const cr=await fetch("https://api.replicate.com/v1/predictions",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json","Prefer":"wait=60"},body:JSON.stringify({version:version, input:depthInput})});
               if(cr.status===404) return res.status(200).json({error:"model_not_found", cnc:st});
               if(cr.status===401) return res.status(200).json({error:"bad_token", cnc:st});
-              pj=await cr.json();
+              pj=await cr.json(); _ddbg.cstatus=cr.status; _ddbg.pid=(pj&&pj.id)||null; _ddbg.pstatus=(pj&&pj.status)||null; _ddbg.perr=(pj&&pj.error)||null;
             }
           }catch(e){ return res.status(200).json({error:"depth_call_failed: "+String(e&&e.message||e).slice(0,140), cnc:st}); }
-          if(!pj||!pj.status){ return res.status(200).json({error:(pj&&pj.error)?String(pj.error).slice(0,160):"bad_response", cnc:st}); }
+          if(!pj||!pj.status){ return res.status(200).json({error:(pj&&pj.error)?String(pj.error).slice(0,160):"bad_response", _ddbg:_ddbg, cnc:st}); }
           if(pj.status==="succeeded"){
             let out=pj.output; let src="";
             if(typeof out==="string"){ src=out; }
@@ -2660,7 +2661,7 @@ if(action==="email_recipients"){
             return res.status(200).json({error:"depth_failed: "+String(pj.error||"").slice(0,140), cnc:st});
           } else {
             job.depthPredId=String(pj.id||job.depthPredId||""); try{ if(redis) await redis.set("parkside:cnc", JSON.stringify(st)); }catch(e){}
-            return res.status(200).json({pending:true, cnc:st});
+            return res.status(200).json({pending:true, _ddbg:_ddbg, cnc:st});
           }
         } else if(b.jobId){
           const jid=String(b.jobId); let job=null; for(let i=0;i<st.jobs.length;i++){ if(st.jobs[i]&&st.jobs[i].id===jid){ job=st.jobs[i]; break; } }
