@@ -421,18 +421,18 @@
 
     <div style="margin-top:14px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:12px">
       <div style="font-weight:600;margin-bottom:8px">Job setup</div>
-      <div style="font-size:11px;color:#93a2b8;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin-bottom:6px">Design size &mdash; drives the 3D design (set these first, then Load)</div>
+      <div style="font-size:11px;color:#93a2b8;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin-bottom:2px">Design size &mdash; drives the 3D design (set these first, then Load)</div><div class="muted" style="font-size:11px;margin-bottom:8px">You set the <b>max depth</b> (the deepest cut). The software reads the image and decides how deep each part is, up to that max &mdash; the deepest point hits your number, everything else is proportionally shallower.</div>
       <div style="display:flex;gap:12px;flex-wrap:wrap">
         <label class="muted" style="font-size:12px">Width<br>
           <span style="display:inline-flex;gap:4px"><input id="cncSizeVal" type="number" step="0.1" value="100" style="width:78px" onchange="cncSaveSetup()"><select id="cncSizeUnit" onchange="cncSaveSetup()"><option>mm</option><option>in</option></select></span></label>
         <label class="muted" style="font-size:12px">Height (mm)<br>
           <input id="cncPieceH" type="number" step="1" placeholder="auto from image" style="width:120px" onchange="cncSaveSetup()"></label>
-        <label class="muted" style="font-size:12px">Depth &mdash; deepest cut (mm)<br>
+        <label class="muted" style="font-size:12px">Max depth (mm) &mdash; deepest cut<br>
           <input id="cncReliefD" type="number" step="0.1" placeholder="e.g. 3" style="width:140px" onchange="cncSaveSetup()"></label>
         <label class="muted" style="font-size:12px">Relief from<br>
           <select id="cncRelSrc" onchange="cncSaveSetup()">
-            <option value="image">Artwork brightness &mdash; logos, drawings, engraving art</option>
-            <option value="depth">AI depth &mdash; photos of real 3D objects</option>
+            <option value="image">From the artwork &mdash; reads the image shading into depth (logos, drawings, art)</option>
+            <option value="depth">AI scene depth &mdash; photos of real 3D objects</option>
           </select></label>
         <label class="muted" style="font-size:12px;align-self:flex-end;display:flex;align-items:center;gap:5px">
           <input id="cncInvert" type="checkbox" onchange="cncSaveSetup()" style="width:auto"> invert (if carved backwards)</label>
@@ -1844,7 +1844,7 @@ async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add 
   if(!gcode){ if(st) st.textContent=''; alert('Could not generate the design.'); return; }
   if(gcode.length>790000){ if(st) st.textContent=''; alert('Too large - lower the Size or the depth under Advanced.'); return; }
   var j=await cncPost({jobId:job.id, gcode:gcode, gcodeName:'auto-'+(usedDepth?'depth':'basic')+'.nc', machineAction:'load'});
-  if(j&&j.cnc){ CNC=j.cnc; cncRenderRelief(srcURL,(Number(job.sizeMM)||100)+' mm wide - '+(usedDepth?'AI 3D relief':'basic relief')); renderCncJobs(); renderCncActiveSelect(); if(st) st.textContent=cncLoadMsg(); }
+  if(j&&j.cnc){ CNC=j.cnc; cncRenderRelief(srcURL,(Number(job.sizeMM)||100)+' mm wide \u00b7 max depth '+(Number(job.reliefDepth)||(CNC_MATS[job.material]||CNC_MATS['Other']).depth)+' mm \u00b7 '+(usedDepth?'AI scene depth':'from the artwork')); renderCncJobs(); renderCncActiveSelect(); if(st) st.textContent=cncLoadMsg(); }
 }
 async function cncStart(){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
   if(!job.hasGcode){ alert('Hit Load to machine first — the design has to be generated before you can Start.'); return; }
