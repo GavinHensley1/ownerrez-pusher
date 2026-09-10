@@ -429,6 +429,11 @@
           <input id="cncPieceH" type="number" step="1" placeholder="auto from image" style="width:120px" onchange="cncSaveSetup()"></label>
         <label class="muted" style="font-size:12px">Depth &mdash; deepest cut (mm)<br>
           <input id="cncReliefD" type="number" step="0.1" placeholder="e.g. 3" style="width:140px" onchange="cncSaveSetup()"></label>
+        <label class="muted" style="font-size:12px">Relief from<br>
+          <select id="cncRelSrc" onchange="cncSaveSetup()">
+            <option value="image">Artwork brightness &mdash; logos, drawings, engraving art</option>
+            <option value="depth">AI depth &mdash; photos of real 3D objects</option>
+          </select></label>
         <label class="muted" style="font-size:12px;align-self:flex-end;display:flex;align-items:center;gap:5px">
           <input id="cncInvert" type="checkbox" onchange="cncSaveSetup()" style="width:auto"> invert (if carved backwards)</label>
         <label class="muted" style="font-size:12px;align-self:flex-end;display:flex;align-items:center;gap:5px">
@@ -1511,6 +1516,7 @@ function cncPopulateSetup(job){
   var rdp=document.getElementById('cncReliefD'); if(rdp) rdp.value=(job.reliefDepth&&job.reliefDepth!=='0')?job.reliefDepth:'';
   var iv=document.getElementById('cncInvert'); if(iv) iv.checked=(job.invertDepth==='true'||job.invertDepth===true);
   var fb=document.getElementById('cncFlatten'); if(fb) fb.checked=(job.flattenBg==='true'||job.flattenBg===true);
+  cncSetSel('cncRelSrc', job.reliefSource||'image');
   cncSetupHint();
 }
 function cncSetupHint(){
@@ -1541,7 +1547,8 @@ async function cncSaveSetup(){
     pieceH:String(parseFloat((document.getElementById('cncPieceH')||{}).value)||''),
     reliefDepth:String(parseFloat((document.getElementById('cncReliefD')||{}).value)||''),
     invertDepth:String(!!(document.getElementById('cncInvert')||{}).checked),
-    flattenBg:String(!!(document.getElementById('cncFlatten')||{}).checked) }};
+    flattenBg:String(!!(document.getElementById('cncFlatten')||{}).checked),
+    reliefSource:((document.getElementById('cncRelSrc')||{}).value||'image') }};
   var j=await cncPost(b); if(j&&j.cnc){ CNC=j.cnc; renderCncActiveSelect(); cncRenderPanelPlan(); }
 }
 function cncSetActive(id){ CNC_CUR=id||null; cncRenderActive(); }
@@ -1739,7 +1746,8 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
     maxDepth=cncClamp(o.maxDepth||1.5,0.1,60), feed=cncClamp(o.feed||300,50,4000), plunge=cncClamp(o.plunge||100,20,1500),
     rpm=cncClamp(o.rpm||10000,3000,24000), passDepth=cncClamp(o.passDepth||0.4,0.05,6), stepover=cncClamp(o.stepover||0.6,0.1,4),
     three=!/2D/i.test(o.carveType||'3D'), probe=/probe/i.test(o.leveling||''), invert=!!o.invert, flatten=!!o.flatten,
-    gMn=(o.gMn!=null?o.gMn:0), gMx=(o.gMx!=null?o.gMx:255), budget=o.budget||1200000, safeZ=Math.max(2,Math.min(6,maxDepth*0.4+2));
+    gMn=(o.gMn!=null?o.gMn:0), gMx=(o.gMx!=null?o.gMx:255), budget=o.budget||1200000, safeZ=Math.max(2,Math.min(6,maxDepth*0.4+2)),
+    contrast=cncClamp(o.contrast||1,0.5,2.5), doSmooth=(o.smooth!==false);
   var passes=Math.max(1,Math.ceil(maxDepth/passDepth)); if(passes>28){ passDepth=+(maxDepth/28).toFixed(3); passes=28; }
   var cols=cncClamp(Math.round(panelW/stepover),40,900), ar=panelH/panelW, rows=cncClamp(Math.round(cols*ar),20,900);
   while(((passes-1)*rows*Math.ceil(cols/2)+rows*cols)>budget && cols>60){ cols=Math.round(cols*0.85); rows=Math.round(rows*0.85); }
@@ -1749,9 +1757,10 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
   for(iy=0;iy<rows;iy++)for(ix=0;ix<cols;ix++){ i=(iy*cols+ix)*4; var a=data[i+3];
     var lum=(a<10)?gMx:(0.299*data[i]+0.587*data[i+1]+0.114*data[i+2]); var h=(lum-gMn)/rng; if(h<0)h=0; if(h>1)h=1; if(invert) h=1-h; hm[iy*cols+ix]=h; }
   if(flatten){ var thr=0.12; for(var k=0;k<hm.length;k++){ hm[k]=(hm[k]<thr)?0:((hm[k]-thr)/(1-thr)); } }
-  var sm=new Float32Array(cols*rows);
-  for(y=0;y<rows;y++)for(x=0;x<cols;x++){ var s=0,n=0; for(dy=-1;dy<=1;dy++)for(dx=-1;dx<=1;dx++){ var xx=x+dx,yy=y+dy; if(xx<0||yy<0||xx>=cols||yy>=rows) continue; s+=hm[yy*cols+xx]; n++; } sm[y*cols+x]=s/n; }
-  hm=sm;
+  if(contrast!==1){ for(var kc=0;kc<hm.length;kc++){ var hv=(hm[kc]-0.5)*contrast+0.5; hm[kc]=hv<0?0:(hv>1?1:hv); } }
+  if(doSmooth){ var sm=new Float32Array(cols*rows);
+    for(y=0;y<rows;y++)for(x=0;x<cols;x++){ var s=0,n=0; for(dy=-1;dy<=1;dy++)for(dx=-1;dx<=1;dx++){ var xx=x+dx,yy=y+dy; if(xx<0||yy<0||xx>=cols||yy>=rows) continue; s+=hm[yy*cols+xx]; n++; } sm[y*cols+x]=s/n; }
+    hm=sm; }
   var dxmm=panelW/((cols-1)||1), dymm=panelH/((rows-1)||1);
   function targ(px,py){ var h=hm[py*cols+px]; if(!three) return (h<0.5)?-maxDepth:0; return -maxDepth*(1-h); }
   var g=['; CNC Studio panel '+(o.label||'')+' ('+(three?'3D relief':'2D outline')+')',
@@ -1772,7 +1781,8 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
 }catch(e){ cb(null); } }
 function cncPatchesFor(job){ var f=cncFinished(job); var mm=f?Math.max(f.W,f.H):200; return Math.max(48,Math.min(72,Math.round(mm/16))); }
 async function cncEnsureReliefSource(job, st){
-  if(CNC.config&&CNC.config.hasDepthToken){
+  var mode=job.reliefSource||'image';
+  if(mode==='depth' && CNC.config&&CNC.config.hasDepthToken){
     var want=cncPatchesFor(job);
     if(job.hasDepth && Number(job.depthPatches||0)>=want){ var ex=await cncFetchFile(job.id,'depth'); if(ex) return ex; }
     if(st) st.textContent='AI is analyzing 3D depth (high-res)...';
@@ -1793,7 +1803,8 @@ async function cncGeneratePanels(){ var job=cncCurrentJob(); if(!job){ alert('Pi
     var gr=cncGlobalRange(img), mat=CNC_MATS[job.material]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||''), f=cncFinished(job);
     var opts0={ maxDepth:f.depth, feed:Math.round(mat.feed*(cons?0.6:1)), plunge:Math.round(mat.plunge*(cons?0.6:1)), rpm:mat.rpm,
       passDepth:+(mat.step*(cons?0.7:1)).toFixed(3), stepover:cncBitStepover(job), carveType:job.carveType||'3D relief', leveling:job.leveling||'',
-      invert:(job.invertDepth==='true'||job.invertDepth===true), flatten:(job.flattenBg==='true'||job.flattenBg===true), gMn:gr.mn, gMx:gr.mx };
+      invert:(job.invertDepth==='true'||job.invertDepth===true), flatten:(job.flattenBg==='true'||job.flattenBg===true), gMn:gr.mn, gMx:gr.mx,
+      contrast:(job.reliefSource==='depth'?1.0:1.4), smooth:(job.reliefSource==='depth') };
     CNC_PANEL_CTX[job.id]={src:src, plW:pl.panelW, plH:pl.panelH, cols:pl.cols, rows:pl.rows, opts:opts0, project:job.project};
     cncRenderRelief(src,(pl.total>1?(pl.total+' panels, '):'')+f.W+'x'+f.H+' mm - '+f.depth+' mm deep');
     var out=document.getElementById('cncPanelOut'); if(out){ var html='<div style="font-size:12px;margin-bottom:6px">Click a panel to generate + download its .nc (each carves with its own front-left zero):</div><div style="display:flex;gap:8px;flex-wrap:wrap">'; for(var r=0;r<pl.rows;r++)for(var c=0;c<pl.cols;c++){ html+='<button onclick="cncDownloadPanel(\''+job.id+'\','+r+','+c+')">R'+(r+1)+'C'+(c+1)+' &#11015;</button>'; } html+='</div>'; if(pl.total>1) html+='<div style="margin-top:8px"><button onclick="cncDownloadAllPanels(\''+job.id+'\')">&#11015; Download all '+pl.total+' panels</button></div>'; out.innerHTML=html; }
@@ -1827,7 +1838,7 @@ async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add 
   if(!job.hasCreative){ alert('Upload a creative image first (step 1).'); return; }
   var _pl=cncPanels(job); if(_pl && _pl.total>1){ alert('This finished size needs '+_pl.total+' panels ('+_pl.cols+' x '+_pl.rows+') - bigger than the machine. Use "Generate panel files" in the Size & panels card to make the per-panel .nc files.'); return; }
   var srcURL=await cncEnsureReliefSource(job, st); if(!srcURL){ if(st) st.textContent=''; return; }
-  var usedDepth=!!(CNC.config&&CNC.config.hasDepthToken&&(cncCurrentJob()||{}).hasDepth);
+  var usedDepth=(job.reliefSource==='depth'&&CNC.config&&CNC.config.hasDepthToken&&(cncCurrentJob()||{}).hasDepth);
   if(st) st.textContent=usedDepth?'Building the 3D relief from the AI depth...':'Building a basic relief (add a depth-AI token in 3D design AI for true 3D)...';
   var gcode=await cncGenFromImage(job, srcURL);
   if(!gcode){ if(st) st.textContent=''; alert('Could not generate the design.'); return; }
