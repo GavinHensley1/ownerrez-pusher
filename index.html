@@ -1672,7 +1672,7 @@ async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add 
     while(dj&&dj.pending&&tries<40){ await new Promise(function(r){setTimeout(r,3000);}); dj=await cncPost({jobId:job.id, genDepthStatus:true}); tries++; if(st) st.textContent='AI is analyzing the 3D depth... ('+(tries*3)+'s)'; }
     if(dj&&dj.cnc) CNC=dj.cnc;
     if(dj&&dj.depthReady){ srcURL=await cncFetchFile(job.id,'depth'); usedDepth=true; }
-    else if(dj&&dj.error&&dj.error!=='no_token'){ if(st) st.textContent=''; alert('Depth AI: '+dj.error+(dj.error==='model_not_found'?' - set the correct Replicate model in the 3D design AI panel.':'')); return; }
+    else if(dj&&dj.error&&dj.error!=='no_token'){ if(st) st.textContent=''; var _hint=(dj.error==='model_not_found')?' - set the correct Replicate model in the 3D design AI panel.':(dj.error==='billing_required')?' - your Replicate account needs billing. Go to replicate.com/account/billing and add a payment method / credit, then hit Load again.':(dj.error==='bad_token')?' - the Replicate token was rejected. Re-paste a valid token in the 3D design AI panel.':''; alert('Depth AI: '+dj.error+_hint); return; }
   }
   if(!srcURL){ srcURL=await cncFetchFile(job.id,'img'); if(!srcURL){ if(st) st.textContent=''; alert('Could not read the creative.'); return; } }
   if(st) st.textContent=usedDepth?'Building the 3D relief from the AI depth...':'Building a basic relief (add a depth-AI token in 3D design AI for true 3D)...';
