@@ -2613,7 +2613,8 @@ if(action==="email_recipients"){
           let sec={}; try{ if(redis){ const raw=await redis.get("parkside:cnc:secrets"); sec=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):{});} }catch(e){ sec={}; }
           const token=process.env.REPLICATE_API_TOKEN||sec.depthToken||"";
           if(!token) return res.status(200).json({error:"no_token", cnc:st});
-          const model=(st.config&&st.config.depthModel)||"chenxwh/depth-anything-v2";
+          let model=(st.config&&st.config.depthModel)||"vufinder/depth-anything-v3-mono";
+          if(model.indexOf("chenxwh/depth-anything")>=0) model="vufinder/depth-anything-v3-mono";
           let pj=null;
           try{
             if(b.genDepthStatus && job.depthPredId){
@@ -2622,15 +2623,18 @@ if(action==="email_recipients"){
             } else {
               let cimg=""; try{ if(redis){ const v=await redis.get("parkside:cnc:img:"+jid); cimg=(v==null)?"":String(v);} }catch(e){}
               if(!cimg) return res.status(200).json({error:"no_creative", cnc:st});
-              const cr=await fetch("https://api.replicate.com/v1/models/"+model+"/predictions",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json","Prefer":"wait=30"},body:JSON.stringify({input:{image:cimg}})});
+              const depthInput=(model.indexOf("depth-anything-v3")>=0||model.indexOf("v3-")>=0)?{images:[cimg]}:{image:cimg};
+              const cr=await fetch("https://api.replicate.com/v1/models/"+model+"/predictions",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json","Prefer":"wait=60"},body:JSON.stringify({input:depthInput})});
               if(cr.status===404) return res.status(200).json({error:"model_not_found", cnc:st});
               pj=await cr.json();
             }
           }catch(e){ return res.status(200).json({error:"depth_call_failed: "+String(e&&e.message||e).slice(0,140), cnc:st}); }
           if(!pj||!pj.status){ return res.status(200).json({error:(pj&&pj.error)?String(pj.error).slice(0,160):"bad_response", cnc:st}); }
           if(pj.status==="succeeded"){
-            let out=pj.output; if(Array.isArray(out)) out=out[out.length-1];
-            let src=(typeof out==="string")?out:((out&&(out.grey_depth||out.image||out.depth||out.grey||out.grayscale||out.color_depth))||"");
+            let out=pj.output; let src="";
+            if(typeof out==="string"){ src=out; }
+            else if(Array.isArray(out)){ const last=out[out.length-1]; src=(typeof last==="string")?last:((last&&((Array.isArray(last.depth_images)&&last.depth_images[0])||last.grey_depth||last.image||last.depth))||""); }
+            else if(out&&typeof out==="object"){ src=(Array.isArray(out.depth_images)&&out.depth_images.length?out.depth_images[0]:"")||out.grey_depth||out.image||out.depth||out.grey||out.grayscale||out.color_depth||""; }
             if(!src) return res.status(200).json({error:"no_depth_output", cnc:st});
             let depthData="";
             try{ const dr=await fetch(src); const ab=await dr.arrayBuffer(); const ct=dr.headers.get("content-type")||"image/png"; depthData="data:"+ct+";base64,"+Buffer.from(ab).toString("base64"); }
