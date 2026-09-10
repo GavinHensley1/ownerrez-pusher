@@ -421,9 +421,21 @@
 
     <div style="margin-top:14px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:12px">
       <div style="font-weight:600;margin-bottom:8px">Job setup</div>
+      <div style="font-size:11px;color:#93a2b8;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin-bottom:6px">Design size &mdash; drives the 3D design (set these first, then Load)</div>
       <div style="display:flex;gap:12px;flex-wrap:wrap">
-        <label class="muted" style="font-size:12px">Finished width<br>
+        <label class="muted" style="font-size:12px">Width<br>
           <span style="display:inline-flex;gap:4px"><input id="cncSizeVal" type="number" step="0.1" value="100" style="width:78px" onchange="cncSaveSetup()"><select id="cncSizeUnit" onchange="cncSaveSetup()"><option>mm</option><option>in</option></select></span></label>
+        <label class="muted" style="font-size:12px">Height (mm)<br>
+          <input id="cncPieceH" type="number" step="1" placeholder="auto from image" style="width:120px" onchange="cncSaveSetup()"></label>
+        <label class="muted" style="font-size:12px">Depth &mdash; deepest cut (mm)<br>
+          <input id="cncReliefD" type="number" step="0.1" placeholder="e.g. 3" style="width:140px" onchange="cncSaveSetup()"></label>
+        <label class="muted" style="font-size:12px;align-self:flex-end;display:flex;align-items:center;gap:5px">
+          <input id="cncInvert" type="checkbox" onchange="cncSaveSetup()" style="width:auto"> invert (if carved backwards)</label>
+        <label class="muted" style="font-size:12px;align-self:flex-end;display:flex;align-items:center;gap:5px">
+          <input id="cncFlatten" type="checkbox" onchange="cncSaveSetup()" style="width:auto"> flatten background</label>
+      </div>
+      <div style="font-size:11px;color:#93a2b8;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin:12px 0 6px">Machining</div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
         <label class="muted" style="font-size:12px">Material<br>
           <select id="cncMat" onchange="cncSaveSetup()">
             <option>C752 nickel silver</option><option>Aluminum / soft metal</option><option>Hardwood</option><option>Softwood / pine</option><option>Acrylic</option><option>Other</option>
@@ -436,16 +448,6 @@
           <select id="cncLevel" onchange="cncSaveSetup()"><option>I'll jog to the corner &amp; zero (manual)</option><option>I have a Z-probe (add probing)</option></select></label>
         <label class="muted" style="font-size:12px">Speed<br>
           <select id="cncSpeed" onchange="cncSaveSetup()"><option>Conservative (recommended)</option><option>Normal</option></select></label>
-      </div>
-      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px">
-        <label class="muted" style="font-size:12px">Finished height (mm)<br>
-          <input id="cncPieceH" type="number" step="1" placeholder="auto from image" style="width:120px" onchange="cncSaveSetup()"></label>
-        <label class="muted" style="font-size:12px">Relief depth (mm)<br>
-          <input id="cncReliefD" type="number" step="0.1" placeholder="material default" style="width:130px" onchange="cncSaveSetup()"></label>
-        <label class="muted" style="font-size:12px;align-self:flex-end;display:flex;align-items:center;gap:5px">
-          <input id="cncInvert" type="checkbox" onchange="cncSaveSetup()" style="width:auto"> subject carved backwards? invert</label>
-        <label class="muted" style="font-size:12px;align-self:flex-end;display:flex;align-items:center;gap:5px">
-          <input id="cncFlatten" type="checkbox" onchange="cncSaveSetup()" style="width:auto"> flatten background</label>
       </div>
       <div class="muted" id="cncSetupHint" style="font-size:11px;margin-top:8px"></div>
     </div>
@@ -483,7 +485,7 @@
     <div style="margin-top:10px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
       <label class="muted" style="font-size:12px">Machine work area X (mm)<br><input id="cncMachX" type="number" step="1" style="width:95px" onchange="cncSaveMachine()"></label>
       <label class="muted" style="font-size:12px">Y (mm)<br><input id="cncMachY" type="number" step="1" style="width:85px" onchange="cncSaveMachine()"></label>
-      <label class="muted" style="font-size:12px">Max Z depth (mm)<br><input id="cncMachZ" type="number" step="1" style="width:105px" onchange="cncSaveMachine()"></label>
+      <label class="muted" style="font-size:12px">Max Z travel (mm)<br><input id="cncMachZ" type="number" step="1" style="width:105px" onchange="cncSaveMachine()"></label>
       <label class="muted" style="font-size:12px">Safe margin per side (mm)<br><input id="cncMachMargin" type="number" step="0.5" style="width:130px" onchange="cncSaveMachine()"></label>
       <span id="cncMachStatus" class="muted" style="font-size:12px"></span>
     </div>
@@ -497,10 +499,9 @@
 
   <div class="card">
     <h2 style="margin:.1em 0">Design tools</h2>
-    <div class="legend">Optional &mdash; make a design image here, then upload it above. The built-in Load already turns any image into a carve, so these are just for sourcing artwork.</div>
+    <div class="legend">Optional &mdash; if you don't have artwork yet, generate an image here, then upload it above. Everything from there (depth, relief, G-code, panels) happens in this app.</div>
     <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
       <button onclick="window.open('https://chat.openai.com','_blank')">Open ChatGPT &#8599;</button>
-      <button onclick="window.open('https://carveco.com','_blank')">Open Carveco Maker &#8599;</button>
     </div>
   </div>
 
@@ -523,14 +524,8 @@
   <div class="card">
     <h2 style="margin:.1em 0;cursor:pointer" onclick="var d=document.getElementById('cncAdv');d.style.display=(d.style.display==='none'?'block':'none')">Advanced &#9662;</h2>
     <div id="cncAdv" style="display:none">
-      <div class="legend">Optional. Upload your own Carveco/GRBL .nc to use instead of the built-in auto-relief, or tune the auto-relief size &amp; depth (leave blank to use the conservative material default).</div>
+      <div class="legend">Optional. Upload your own Carveco/GRBL .nc to use instead of the built-in auto-relief. (Size and depth are set up top under Design size.)</div>
       <div style="margin-top:10px"><label class="muted" style="font-size:12px">Upload your own .nc<br><input type="file" id="cncGcode" accept=".nc,.gcode,.tap,.txt,.cnc" onchange="cncUploadGcode(event)"></label></div>
-      <div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
-        <label class="muted" style="font-size:12px">Relief width (mm)<br><input id="cncRW" type="number" placeholder="100" style="width:90px"></label>
-        <label class="muted" style="font-size:12px">Max depth (mm)<br><input id="cncRD" type="number" step="0.1" placeholder="material default" style="width:120px"></label>
-        <button onclick="saveReliefCfg()">Save</button>
-        <span id="cncRelStatus" class="muted" style="font-size:12px"></span>
-      </div>
     </div>
   </div>
 
@@ -1528,7 +1523,7 @@ function cncSetupHint(){
   var lvlMsg=/probe/i.test(lvl)? 'Zeroing: the toolpath will probe Z at the start (needs a Z-probe wired to the machine).'
     : 'Zeroing: before running, jog to the FRONT-LEFT TOP corner of your stock and set X0 Y0 Z0 in the controller — that corner is where the design starts.';
   var szv=(document.getElementById('cncSizeVal')||{}).value||'100', szu=(document.getElementById('cncSizeUnit')||{}).value||'mm';
-  h.innerHTML='<b>'+cncEsc(mat)+'</b> &middot; '+cncEsc(szv)+' '+cncEsc(szu)+' wide &middot; '+(cons?'conservative':'normal')+': feed ~'+feed+' mm/min, '+step+' mm/pass, depth ~'+depth+' mm. '+lvlMsg;
+  h.innerHTML='<b>'+cncEsc(mat)+'</b> &middot; '+(cons?'conservative':'normal')+' feeds: ~'+feed+' mm/min, '+step+' mm per Z pass. '+lvlMsg;
 }
 async function cncSaveSetup(){
   var job=cncCurrentJob(); if(!job){ job=await cncEnsureJob(); if(!job) return; }
@@ -1713,7 +1708,7 @@ function cncJobAR(job){ if(!job) return 0.75; if(CNC_AR[job.id]) return CNC_AR[j
 function cncFinished(job){ if(!job) return null;
   var W=Number(job.sizeMM)||0; if(!W) return null;
   var H=Number(job.pieceH)||0; if(!H){ H=Math.round(W*cncJobAR(job)); }
-  var depth=Number(job.reliefDepth)||(CNC.config&&CNC.config.reliefDepth)||((CNC_MATS[job.material]||CNC_MATS['Other']).depth);
+  var depth=Number(job.reliefDepth)||((CNC_MATS[job.material]||CNC_MATS['Other']).depth);
   return {W:W,H:H,depth:depth}; }
 function cncPanels(job){ var f=cncFinished(job); if(!f) return null; var m=cncMach();
   var uX=Math.max(20,m.X-2*m.M), uY=Math.max(20,m.Y-2*m.M);
@@ -1775,15 +1770,16 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
     for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+targ(cc,ry).toFixed(3)+' F'+feed); } }
   g.push('G0 Z'+safeZ.toFixed(2),'M5','G0 X0 Y0','M2'); cb(g.join('\n'));
 }catch(e){ cb(null); } }
-function cncPatchesFor(job){ var f=cncFinished(job); var mm=f?Math.max(f.W,f.H):200; return Math.max(36,Math.min(72,Math.round(mm/20))); }
+function cncPatchesFor(job){ var f=cncFinished(job); var mm=f?Math.max(f.W,f.H):200; return Math.max(48,Math.min(72,Math.round(mm/16))); }
 async function cncEnsureReliefSource(job, st){
   if(CNC.config&&CNC.config.hasDepthToken){
-    if(job.hasDepth){ var ex=await cncFetchFile(job.id,'depth'); if(ex) return ex; }
+    var want=cncPatchesFor(job);
+    if(job.hasDepth && Number(job.depthPatches||0)>=want){ var ex=await cncFetchFile(job.id,'depth'); if(ex) return ex; }
     if(st) st.textContent='AI is analyzing 3D depth (high-res)...';
-    var dj=await cncPost({jobId:job.id, genDepth:true, patches:cncPatchesFor(job)}), tries=0;
+    var dj=await cncPost({jobId:job.id, genDepth:true, patches:want}), tries=0;
     while(dj&&dj.pending&&tries<40){ await new Promise(function(r){setTimeout(r,3000);}); dj=await cncPost({jobId:job.id, genDepthStatus:true}); tries++; if(st) st.textContent='AI 3D depth... ('+(tries*3)+'s)'; }
     if(dj&&dj.cnc) CNC=dj.cnc;
-    if(dj&&dj.depthReady) return await cncFetchFile(job.id,'depth');
+    if(dj&&dj.depthReady){ try{ var jr=await cncPost({updateJob:{id:job.id, depthPatches:String(want)}}); if(jr&&jr.cnc) CNC=jr.cnc; }catch(e){} return await cncFetchFile(job.id,'depth'); }
     if(dj&&dj.error&&dj.error!=='no_token'){ var _h=(dj.error==='billing_required')?' - add Replicate credit at replicate.com/account/billing.':(dj.error==='model_not_found')?' - set the model in 3D design AI.':(dj.error==='bad_token')?' - re-paste your token in 3D design AI.':''; alert('Depth AI: '+dj.error+_h); return null; }
   }
   return await cncFetchFile(job.id,'img');
@@ -1820,7 +1816,7 @@ async function cncDownloadAllPanels(jobId){ var ctx=CNC_PANEL_CTX[jobId]; if(!ct
 function cncLoadMsg(){ return (CNC.config&&CNC.config.machineUrl)?'Loaded — review the design, then Start.':'Loaded. (Set a machine address under “Machine connection” to send it to the machine for real.)'; }
 async function cncGenFromImage(job, srcDataURL){
   var mat=job.material||'C752 nickel silver', preset=CNC_MATS[mat]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||'');
-  var params={ widthMM:(Number(job.sizeMM)||100), maxDepth:(CNC.config&&CNC.config.reliefDepth)||preset.depth,
+  var params={ widthMM:(Number(job.sizeMM)||100), maxDepth:(Number(job.reliefDepth)||preset.depth),
     step:+(preset.step*(cons?0.7:1)).toFixed(3), feed:Math.round(preset.feed*(cons?0.6:1)), plunge:Math.round(preset.plunge*(cons?0.6:1)),
     rpm:preset.rpm, carveType:job.carveType||'3D relief', leveling:job.leveling||'' };
   return new Promise(function(resolve){ cncGenerateRelief(srcDataURL, params, resolve); });
