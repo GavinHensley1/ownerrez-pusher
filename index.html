@@ -1775,10 +1775,12 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
     for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+targ(cc,ry).toFixed(3)+' F'+feed); } }
   g.push('G0 Z'+safeZ.toFixed(2),'M5','G0 X0 Y0','M2'); cb(g.join('\n'));
 }catch(e){ cb(null); } }
+function cncPatchesFor(job){ var f=cncFinished(job); var mm=f?Math.max(f.W,f.H):200; return Math.max(36,Math.min(72,Math.round(mm/20))); }
 async function cncEnsureReliefSource(job, st){
   if(CNC.config&&CNC.config.hasDepthToken){
-    if(st) st.textContent='AI is analyzing 3D depth...';
-    var dj=await cncPost({jobId:job.id, genDepth:true}), tries=0;
+    if(job.hasDepth){ var ex=await cncFetchFile(job.id,'depth'); if(ex) return ex; }
+    if(st) st.textContent='AI is analyzing 3D depth (high-res)...';
+    var dj=await cncPost({jobId:job.id, genDepth:true, patches:cncPatchesFor(job)}), tries=0;
     while(dj&&dj.pending&&tries<40){ await new Promise(function(r){setTimeout(r,3000);}); dj=await cncPost({jobId:job.id, genDepthStatus:true}); tries++; if(st) st.textContent='AI 3D depth... ('+(tries*3)+'s)'; }
     if(dj&&dj.cnc) CNC=dj.cnc;
     if(dj&&dj.depthReady) return await cncFetchFile(job.id,'depth');
@@ -1828,16 +1830,8 @@ async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add 
   if(job.hasGcode && !job.hasCreative){ if(st) st.textContent='Loading...'; var j0=await cncPost({jobId:job.id, machineAction:'load'}); if(j0&&j0.cnc){ CNC=j0.cnc; renderCncJobs(); await cncRenderActive(); if(st) st.textContent=cncLoadMsg(); } return; }
   if(!job.hasCreative){ alert('Upload a creative image first (step 1).'); return; }
   var _pl=cncPanels(job); if(_pl && _pl.total>1){ alert('This finished size needs '+_pl.total+' panels ('+_pl.cols+' x '+_pl.rows+') - bigger than the machine. Use "Generate panel files" in the Size & panels card to make the per-panel .nc files.'); return; }
-  var srcURL=null, usedDepth=false;
-  if(CNC.config&&CNC.config.hasDepthToken){
-    if(st) st.textContent='AI is analyzing the 3D depth of your image...';
-    var dj=await cncPost({jobId:job.id, genDepth:true}); var tries=0;
-    while(dj&&dj.pending&&tries<40){ await new Promise(function(r){setTimeout(r,3000);}); dj=await cncPost({jobId:job.id, genDepthStatus:true}); tries++; if(st) st.textContent='AI is analyzing the 3D depth... ('+(tries*3)+'s)'; }
-    if(dj&&dj.cnc) CNC=dj.cnc;
-    if(dj&&dj.depthReady){ srcURL=await cncFetchFile(job.id,'depth'); usedDepth=true; }
-    else if(dj&&dj.error&&dj.error!=='no_token'){ if(st) st.textContent=''; var _hint=(dj.error==='model_not_found')?' - set the correct Replicate model in the 3D design AI panel.':(dj.error==='billing_required')?' - your Replicate account needs billing. Go to replicate.com/account/billing and add a payment method / credit, then hit Load again.':(dj.error==='bad_token')?' - the Replicate token was rejected. Re-paste a valid token in the 3D design AI panel.':''; alert('Depth AI: '+dj.error+_hint); return; }
-  }
-  if(!srcURL){ srcURL=await cncFetchFile(job.id,'img'); if(!srcURL){ if(st) st.textContent=''; alert('Could not read the creative.'); return; } }
+  var srcURL=await cncEnsureReliefSource(job, st); if(!srcURL){ if(st) st.textContent=''; return; }
+  var usedDepth=!!(CNC.config&&CNC.config.hasDepthToken&&(cncCurrentJob()||{}).hasDepth);
   if(st) st.textContent=usedDepth?'Building the 3D relief from the AI depth...':'Building a basic relief (add a depth-AI token in 3D design AI for true 3D)...';
   var gcode=await cncGenFromImage(job, srcURL);
   if(!gcode){ if(st) st.textContent=''; alert('Could not generate the design.'); return; }

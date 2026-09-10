@@ -2637,7 +2637,9 @@ if(action==="email_recipients"){
                 version=(mj&&mj.latest_version&&mj.latest_version.id)||"";
               }catch(e){ return res.status(200).json({error:"depth_call_failed: "+String(e&&e.message||e).slice(0,120), cnc:st}); }
               if(!version) return res.status(200).json({error:"model_not_found", cnc:st});
-              const depthInput=(model.indexOf("depth-anything-v3")>=0||model.indexOf("v3-")>=0)?{images:[cimg]}:{image:cimg};
+              const _isV3=(model.indexOf("depth-anything-v3")>=0||model.indexOf("v3-")>=0);
+              const _patches=Math.max(0,Math.min(72,Math.round(Number(b.patches)||0)));
+              const depthInput=_isV3?(_patches>=36?{images:[cimg],processing_resolution:"custom",num_patches:_patches}:{images:[cimg]}):{image:cimg};
               const cr=await fetch("https://api.replicate.com/v1/predictions",{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json","Prefer":"wait=60"},body:JSON.stringify({version:version, input:depthInput})});
               if(cr.status===404) return res.status(200).json({error:"model_not_found", cnc:st});
               if(cr.status===401) return res.status(200).json({error:"bad_token", cnc:st});
