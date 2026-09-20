@@ -87,7 +87,7 @@ export class GrblTcpController extends EventEmitter {
   }
 
   setBooleanSetting(setting, enabled) {
-    const allowed = new Set([20, 22]);
+    const allowed = new Set([20, 21, 22]);
     if (!allowed.has(Number(setting))) return Promise.reject(new Error(`Setting $${setting} is not allowed through this controller`));
     return this.#enqueue(() => this.#lineCommandUnlocked(`$${Number(setting)}=${enabled ? 1 : 0}`, false));
   }
@@ -215,6 +215,84 @@ export class GrblTcpController extends EventEmitter {
 
   spindleOff() { return this.#enqueue(() => this.#lineCommandUnlocked("M5", true)); }
 
+  async #booleanSettingUnlocked(setting) {
+    const lines = await this.#lineCommandUnlocked("$$", false);
+    const match = lines.map((line) => line.match(new RegExp(`^\\$${Number(setting)}=(0|1)(?:\\s|$)`))).find(Boolean);
+    if (!match) throw new Error(`Could not read $${Number(setting)} setting`);
+    return match[1] === "1";
+  }
+
+  async #probeRetractUnlocked(distanceMm, feedMmPerMin) {
+    const distance = Number(distanceMm), feed = Number(feedMmPerMin);
+    if (!Number.isFinite(distance) || distance < 0.5 || distance > 10) throw new Error("Probe retract must be 0.5-10 mm");
+    if (!Number.isFinite(feed) || feed < 20 || feed > 250) throw new Error("Probe retract feed must be 20-250 mm/min");
+    const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+    if (before.state !== "Idle") throw new Error(`Controller must be Idle before probe retract, got ${before.state}`);
+    const beforeZ = coordinateAxis(before, "Z");
+    const reply = await this.#guardedMotionLine(`$J=G91 G21 Z${distance.toFixed(3)} F${Math.round(feed)}`, 20_000);
+    const deadline = now() + Math.max(5_000, (distance / feed) * 180_000 + 3_000);
+    const samples = [];
+    while (now() < deadline) {
+      await this.motionGuard();
+      const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
+      samples.push(status.raw);
+      if (status.state === "Idle") {
+        const delta = coordinateAxis(status, "Z") - beforeZ;
+        if (delta < distance - 0.75 || delta > distance + 0.75) throw new Error(`Probe retract delta mismatch: expected ${distance}, got ${delta}`);
+        return { before, reply, after: status, deltaMm: delta, samples };
+      }
+      if (!(status.state === "Jog" || status.state === "Run")) throw new Error(`Unexpected probe retract state: ${status.raw}`);
+      await sleep(200);
+    }
+    throw new Error("Probe retract completion timeout");
+  }
+
+  async #restoreHardLimitsUnlocked() {
+    try {
+      const status = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      if (status.state.split(":")[0] === "Alarm") await this.#lineCommandUnlocked("$X", false);
+    } catch {}
+    return this.#lineCommandUnlocked("$21=1", false);
+  }
+
+  recoverProbeContact({ retractMm = 3, feed = 100 } = {}) {
+    return this.#enqueue(async () => {
+      if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for probe recovery");
+      await this.motionGuard();
+      const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      if (!new Set(["Idle", "Alarm"]).has(before.state.split(":")[0])) throw new Error(`Probe recovery requires Idle or Alarm, got ${before.state}`);
+      if (!String(before.Pn || "").includes("P")) throw new Error("Probe recovery requires an active probe contact");
+      const hardLimitsWereEnabled = await this.#booleanSettingUnlocked(21);
+      let hardLimitsSuppressed = false;
+      try {
+        await this.#lineCommandUnlocked("M5", true).catch(() => []);
+        let current = before;
+        if (current.state.split(":")[0] === "Alarm") {
+          await this.#lineCommandUnlocked("$X", false);
+          current = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+        }
+        if (current.state !== "Idle") throw new Error(`Controller did not unlock for probe recovery: ${current.raw}`);
+        if (hardLimitsWereEnabled) {
+          await this.#lineCommandUnlocked("$21=0", false);
+          hardLimitsSuppressed = true;
+        }
+        const retract = await this.#probeRetractUnlocked(retractMm, feed);
+        if (/[PZ]/.test(String(retract.after.Pn || ""))) throw new Error(`Probe/limit input did not clear after retract: ${retract.after.Pn}`);
+        if (hardLimitsWereEnabled) {
+          await this.#lineCommandUnlocked("$21=1", false);
+          hardLimitsSuppressed = false;
+        }
+        const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+        await this.motionGuard();
+        return { before, retract, after, hardLimitsRestored: hardLimitsWereEnabled };
+      } catch (error) {
+        if (hardLimitsWereEnabled && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
+        if (!this.fault) await this.#emergencyStop(`PROBE_RECOVERY_FAILED:${error.message}`);
+        throw this.fault || error;
+      }
+    });
+  }
+
   probeZ({ thicknessMm = 12.1, fastTravelMm = 20, fastFeed = 100, slowTravelMm = 2, slowFeed = 10, retractMm = 3 } = {}) {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for probing");
@@ -229,22 +307,38 @@ export class GrblTcpController extends EventEmitter {
       if (before.state !== "Idle") throw new Error(`Controller must be Idle, got ${before.state}`);
       const [feed, spindle] = feedAndSpindle(before);
       if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before probe: ${before.FS}`);
-      if (String(before.Pn || "").includes("P")) throw new Error("Probe is already active before motion; remove the clip/plate contact");
+      if (before.Pn) throw new Error(`Active input pins before probe: ${before.Pn}`);
+      const hardLimitsWereEnabled = await this.#booleanSettingUnlocked(21);
+      let hardLimitsSuppressed = false;
       try {
         await this.#lineCommandUnlocked("M5", true);
+        if (hardLimitsWereEnabled) {
+          await this.#lineCommandUnlocked("$21=0", false);
+          hardLimitsSuppressed = true;
+        }
         await this.#lineCommandUnlocked("G21 G91", false);
         const fastReply = await this.#guardedMotionLine(`G38.2 Z-${fastTravel.toFixed(3)} F${Math.round(fast)}`, 25_000);
         const firstContact = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
-        await this.#lineCommandUnlocked("G0 Z1.000", true);
+        if (!String(firstContact.Pn || "").includes("P")) throw new Error(`Fast probe ended without probe contact: ${firstContact.raw}`);
+        const firstRetract = await this.#probeRetractUnlocked(1, fast);
+        if (/[PZ]/.test(String(firstRetract.after.Pn || ""))) throw new Error(`Probe/limit input did not clear after first retract: ${firstRetract.after.Pn}`);
         const slowReply = await this.#guardedMotionLine(`G38.2 Z-${slowTravel.toFixed(3)} F${Math.round(slow)}`, 20_000);
         const finalContact = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+        if (!String(finalContact.Pn || "").includes("P")) throw new Error(`Slow probe ended without probe contact: ${finalContact.raw}`);
         await this.#lineCommandUnlocked(`G10 L20 P1 Z${thickness.toFixed(3)}`, false);
-        await this.#lineCommandUnlocked(`G0 Z${retract.toFixed(3)}`, true);
+        const finalRetract = await this.#probeRetractUnlocked(retract, fast);
+        if (/[PZ]/.test(String(finalRetract.after.Pn || ""))) throw new Error(`Probe/limit input did not clear after final retract: ${finalRetract.after.Pn}`);
         await this.#lineCommandUnlocked("G90", false);
+        if (hardLimitsWereEnabled) {
+          await this.#lineCommandUnlocked("$21=1", false);
+          hardLimitsSuppressed = false;
+        }
         const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
         await this.motionGuard();
-        return { thicknessMm: thickness, before, fastReply, firstContact, slowReply, finalContact, after };
+        return { thicknessMm: thickness, before, fastReply, firstContact, firstRetract, slowReply, finalContact, finalRetract, after, hardLimitsRestored: hardLimitsWereEnabled };
       } catch (error) {
+        await this.#lineCommandUnlocked("G90", false).catch(() => {});
+        if (hardLimitsWereEnabled && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
         if (!this.fault) await this.#emergencyStop(`PROBE_FAILED:${error.message}`);
         throw this.fault || error;
       }

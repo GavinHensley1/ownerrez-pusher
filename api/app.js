@@ -2724,7 +2724,7 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","probe_bed","probe_stock","zero_xy","start","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["jog","probe_bed","probe_stock","recover_probe","zero_xy","start","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, camera=health.camera||{}, ws=health.workspace||{}, setup=health.setup||{};
               if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});

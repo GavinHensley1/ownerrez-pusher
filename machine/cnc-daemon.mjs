@@ -8,7 +8,7 @@ const PORT = Number(process.env.CNC_PORT || 10086);
 const CAMERA = process.env.CNC_CAMERA_BRIDGE || "http://127.0.0.1:47831";
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
 const CAMERA_MAX_AGE_MS = 3000;
-const CAMERA_REQUIRED = /^(1|true|yes)$/i.test(process.env.CNC_CAMERA_REQUIRED || "0");
+const CAMERA_REQUIRED = /^(1|true|yes)$/i.test(process.env.CNC_CAMERA_REQUIRED || "1");
 const MAX_BODY_BYTES = 900_000;
 let controller, lastControllerStatus, incident, moving = false, keepaliveBusy = false;
 let restartScheduled = false;
@@ -160,6 +160,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/zero/xy") return json(res, 200, await setXyZero());
     if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/probe/recover") return json(res, 200, await controller.recoverProbeContact(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/job/start") return json(res, 200, await startProgram(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/job/pause") { controller.pauseProgramNow(); Object.assign(job, { state: "paused", message: "Paused", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
     if (req.method === "POST" && req.url === "/job/resume") { controller.resumeProgramNow(); Object.assign(job, { state: "running", message: "Running", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
@@ -170,8 +171,18 @@ const server = http.createServer(async (req, res) => {
   } catch (error) { return json(res, 500, { ok: false, error: error?.message || "Error" }); }
 });
 
+const restoreHardLimitsOnStartup = async () => {
+  try {
+    const lines = await controller.query("$$");
+    if (lines.some((line) => /^\$21=0(?:\s|$)/.test(line))) await controller.setBooleanSetting(21, true);
+  } catch (error) {
+    incident = `STARTUP_SAFETY_CHECK_FAILED:${error?.message || "unknown"}`;
+  }
+};
+
 const keepalive = setInterval(async () => { if (moving || keepaliveBusy || !controller.connected) return; keepaliveBusy = true; try { await readStatus(); } catch (error) { incident = `KEEPALIVE_FAILED:${error?.message || "unknown"}`; workspace.clear(); clearSetup(); } finally { keepaliveBusy = false; } }, 1500);
 keepalive.unref();
+await restoreHardLimitsOnStartup();
 if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
 server.listen(SOCKET_PATH, () => { chmodSync(SOCKET_PATH, 0o600); process.stdout.write(JSON.stringify({ event: "CNC_DAEMON_READY", socket: SOCKET_PATH, host: HOST, port: PORT }) + "\n"); });
 const shutdown = async () => { clearInterval(keepalive); workspace.clear(); clearSetup(); if (moving) await controller.emergencyStop("DAEMON_SHUTDOWN_DURING_MOTION").catch(() => {}); await controller.close(); server.close(() => { try { if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH); } catch {} process.exit(0); }); };

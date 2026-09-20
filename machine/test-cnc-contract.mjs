@@ -11,11 +11,12 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  for (const id of ["cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncMeasuredStock", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
+  for (const id of ["cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeRecoverBtn", "cncMeasuredStock", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
   assert.match(html, /machineAction:'jog'/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
   assert.match(html, /probe_bed/);
   assert.match(html, /probe_stock/);
+  assert.match(html, /recover_probe/);
   assert.doesNotMatch(html, /G38\.2/);
   assert.doesNotMatch(html, /rpm:\s*(?:10000|12000|24000)/);
 });
@@ -38,6 +39,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /manualPositioning: true/);
   assert.match(agent, /splitJogDistance/);
   assert.match(agent, /completedSegments/);
+  assert.match(agent, /recover_probe: "\/probe\/recover"/);
   assert.ok(agent.includes('const isHealth = path === "/health"'));
   assert.match(agent, /headers: isHealth \? \{\} :/);
   assert.match(agent, /if \(!isHealth\) req\.write\(data\)/);

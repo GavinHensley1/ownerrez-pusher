@@ -65,7 +65,7 @@ async function report(command, state, message, extra = {}) {
 }
 
 async function execute(command) {
-  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", zero_xy: "/zero/xy", start: "/job/start", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
+  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", recover_probe: "/probe/recover", zero_xy: "/zero/xy", start: "/job/start", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
   const axis = String(command.axis || "").toUpperCase();
   const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);

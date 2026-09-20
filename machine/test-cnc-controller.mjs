@@ -3,8 +3,8 @@ import net from "node:net";
 import test from "node:test";
 import { GrblTcpController, parseStatus, VirtualWorkspace } from "./cnc-controller.mjs";
 
-const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false } = {}) => {
-  let connections = 0, statusQueries = 0, x = 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = false, spindle = 0;
+const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, startProbeAlarm = false } = {}) => {
+  let connections = 0, statusQueries = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true;
   const writes = [];
   const server = net.createServer((socket) => {
     connections += 1;
@@ -27,18 +27,27 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
               else { state = "Idle"; socket.write(`ok${delimiter}`); }
             }
           }
-          socket.write(`<${state}|MPos:${x.toFixed(3)},0.000,0.000|FS:${state === "Idle" ? `0,${spindle}` : "100,0"}>${delimiter}`);
+          const pins = `${probeActive ? "P" : ""}${zLimitActive ? "Z" : ""}`;
+          socket.write(`<${state}|MPos:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}|FS:${state === "Idle" || state === "Alarm" ? `0,${spindle}` : "100,0"}${pins ? `|Pn:${pins}` : ""}>${delimiter}`);
         } else {
           buffer += char;
           if (char === "\r") {
             const command = buffer.trim(); buffer = "";
             if (command === "$G") setTimeout(() => socket.write(`[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]${delimiter}ok${delimiter}`), lateQueryAckMs);
-            else if (command === "$$") socket.write(`$3=4${delimiter}$27=3.000${delimiter}ok${delimiter}`);
-            else if (command.startsWith("$J=")) { x += Number(command.match(/X(-?\d+(?:\.\d+)?)/)?.[1] || 0); jogging = true; jogPolls = 0; socket.write(`ok${delimiter}`); }
+            else if (command === "$$") socket.write(`$3=4${delimiter}$21=${hardLimits ? 1 : 0}${delimiter}$27=3.000${delimiter}ok${delimiter}`);
+            else if (command === "$X") { alarmed = false; socket.write(`ok${delimiter}`); }
+            else if (command.startsWith("$J=")) {
+              x += Number(command.match(/X(-?\d+(?:\.\d+)?)/)?.[1] || 0);
+              y += Number(command.match(/Y(-?\d+(?:\.\d+)?)/)?.[1] || 0);
+              z += Number(command.match(/Z(-?\d+(?:\.\d+)?)/)?.[1] || 0);
+              if ((command.match(/Z(-?\d+(?:\.\d+)?)/)?.[1] || 0) > 0) { probeActive = false; zLimitActive = false; }
+              jogging = true; jogPolls = 0; socket.write(`ok${delimiter}`);
+            }
             else if (/^M3 S\d+$/.test(command)) { spindle = Number(command.slice(command.indexOf("S") + 1)); socket.write(`ok${delimiter}`); }
             else if (command === "M5") { spindle = 0; socket.write(`ok${delimiter}`); }
-            else if (/^\$(20|22)=[01]$/.test(command) || command.startsWith("G10 L20 P1 ")) socket.write(`ok${delimiter}`);
-            else if (/^G38\.2 Z-/.test(command)) socket.write(`ok${delimiter}`);
+            else if (/^\$(20|21|22)=[01]$/.test(command)) { if (command.startsWith("$21=")) hardLimits = command.endsWith("1"); socket.write(`ok${delimiter}`); }
+            else if (command.startsWith("G10 L20 P1 ")) socket.write(`ok${delimiter}`);
+            else if (/^G38\.2 Z-/.test(command)) { z -= 1; probeActive = true; zLimitActive = probeAssertsZ; if (hardLimits && zLimitActive) alarmed = true; socket.write(`ok${delimiter}`); }
             else if (/^(G21|G90|G17|G0\b|G1\b|G4\b|M2\b)/.test(command)) socket.write(`ok${delimiter}`);
             else if (command === "$H") {
               homing = true; homePolls = 0;
@@ -136,12 +145,13 @@ test("virtual workspace is required outside calibration mode", async () => {
   await c.close(); await mock.close();
 });
 
-test("manual-mode settings and work offset are narrowly allowed", async () => {
+test("manual and probe-safety settings and work offset are narrowly allowed", async () => {
   const mock = await makeMock();
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25 });
   assert((await c.setBooleanSetting(22, false)).includes("ok"));
   assert((await c.setBooleanSetting(20, false)).includes("ok"));
-  await assert.rejects(() => c.setBooleanSetting(21, false), /not allowed/);
+  assert((await c.setBooleanSetting(21, false)).includes("ok"));
+  await assert.rejects(() => c.setBooleanSetting(23, false), /not allowed/);
   assert((await c.setWorkOffset({ x: 0, y: 0, z: 5 })).includes("ok"));
   await c.close(); await mock.close();
 });
@@ -169,7 +179,18 @@ test("probe is camera guarded and establishes Z from a bounded two-pass cycle", 
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
   const result = await c.probeZ({ thicknessMm: 12.1 });
   assert.equal(result.thicknessMm, 12.1); assert.equal(result.after.state, "Idle"); assert(guards >= 4);
+  assert(mock.bytes.includes(Buffer.from("$21=0\r"))); assert(mock.bytes.includes(Buffer.from("$21=1\r")));
   assert(mock.bytes.includes(Buffer.from("G38.2 Z-20.000 F100\r"))); assert(mock.bytes.includes(Buffer.from("G10 L20 P1 Z12.100\r")));
+  assert.equal(result.firstContact.Pn, "PZ"); assert.equal(result.after.Pn, undefined); assert.equal(result.hardLimitsRestored, true);
+  await c.close(); await mock.close();
+});
+
+test("recovers an alarmed probe contact, retracts, and restores hard limits", async () => {
+  const mock = await makeMock({ startProbeAlarm: true }); let guards = 0;
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
+  const result = await c.recoverProbeContact({ retractMm: 3, feed: 100 });
+  assert.equal(result.before.state, "Alarm"); assert.equal(result.before.Pn, "PZ"); assert.equal(result.after.state, "Idle"); assert.equal(result.after.Pn, undefined);
+  assert(mock.bytes.includes(Buffer.from("$X\r"))); assert(mock.bytes.includes(Buffer.from("$21=0\r"))); assert(mock.bytes.includes(Buffer.from("$21=1\r"))); assert(guards >= 3);
   await c.close(); await mock.close();
 });
 

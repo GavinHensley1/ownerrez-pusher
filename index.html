@@ -505,6 +505,7 @@
         <button id="cncZeroBtn" onclick="cncMachineAction('zero_xy')">Set X/Y zero here</button>
         <button id="cncProbeBedBtn" onclick="cncProbe('bed')">1. Probe bed</button>
         <button id="cncProbeStockBtn" onclick="cncProbe('stock')">2. Probe stock</button>
+        <button id="cncProbeRecoverBtn" onclick="cncMachineAction('recover_probe')">Retract from probe</button>
         <span id="cncMeasuredStock" class="muted" style="font-size:11.5px">Thickness not measured.</span>
       </div>
       <div class="muted" style="font-size:11.5px;margin-top:8px">Probe the exposed spoilboard first, then the top of the wood with the same plate and clip. Project calculates thickness and locks out every cut that could reach the bottom.</div>
