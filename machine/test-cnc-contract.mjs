@@ -34,5 +34,8 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /openclaw-cnc-agent/);
   assert.match(agent, /socketPath: SOCKET_PATH/);
   assert.match(agent, /manualPositioning: true/);
+  assert.ok(agent.includes('const isHealth = path === "/health"'));
+  assert.match(agent, /headers: isHealth \? \{\} :/);
+  assert.match(agent, /if \(!isHealth\) req\.write\(data\)/);
   assert.doesNotMatch(agent, /console\.log\(token\)|process\.stdout\.write\(token/);
 });

@@ -15,20 +15,26 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function localRequest(path, body = {}) {
   return new Promise((resolve, reject) => {
+    const isHealth = path === "/health";
     const data = JSON.stringify(body);
-    const req = http.request({ socketPath: SOCKET_PATH, path, method: path === "/health" ? "GET" : "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (res) => {
+    const req = http.request({
+      socketPath: SOCKET_PATH,
+      path,
+      method: isHealth ? "GET" : "POST",
+      headers: isHealth ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(data) },
+    }, (res) => {
       let text = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => { text += chunk; });
       res.on("end", () => {
         let parsed; try { parsed = text ? JSON.parse(text) : {}; } catch { return reject(new Error(`Local CNC returned invalid JSON (${res.statusCode})`)); }
-        if ((res.statusCode || 500) >= 400 || parsed.ok === false) return reject(new Error(parsed.error || `Local CNC HTTP ${res.statusCode}`));
+        if ((res.statusCode || 500) >= 400 || parsed.ok === false) return reject(new Error(parsed.error || `Local CNC HTTP ${res.statusCode}: ${text.slice(0, 160)}`));
         resolve(parsed);
       });
     });
     req.setTimeout(path === "/job/start" ? 12 * 60 * 60 * 1000 : 30_000, () => req.destroy(new Error("Local CNC request timeout")));
     req.on("error", reject);
-    if (path !== "/health") req.write(data);
+    if (!isHealth) req.write(data);
     req.end();
   });
 }
@@ -72,7 +78,10 @@ async function execute(command) {
       const result = await localRequest(path, payload);
       const finalState = command.action === "start" ? "done" : command.action === "pause" ? "paused" : command.action === "resume" ? "running" : command.action === "stop" ? "stopped" : "ready";
       await report(command, finalState, command.action === "start" ? "Carve complete" : `${command.action} complete`, { result: { setup: result.setup, job: result.job } });
-    } catch (error) { await report(command, "error", error.message); }
+    } catch (error) {
+      process.stderr.write(`command ${command.action} ${command.axis || ""} ${command.distanceMm ?? ""}: ${error.message}\n`);
+      await report(command, "error", error.message);
+    }
   })();
   if (command.action === "start") { activeStart = task; task.finally(() => { activeStart = undefined; }); }
   else await task;
