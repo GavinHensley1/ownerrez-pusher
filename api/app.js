@@ -1798,17 +1798,18 @@ function recordingSidOf(v){ const s=String(v||''); const m=s.match(/(?:Recording
 function twilioCredentials(){ const sid=process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID||''; const token=process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN||''; return {sid,token}; }
 function twilioAuthHeader(){ const c=twilioCredentials(); return c.sid&&c.token ? ('Basic '+Buffer.from(c.sid+':'+c.token).toString('base64')) : ''; }
 async function transcribeCallRecording(recordingUrl){
-  const groqKey=String(process.env.GROQ_API_KEY||''); const auth=twilioAuthHeader();
-  if(!groqKey) throw new Error('Groq transcription is not configured');
+  const groqKey=String(process.env.GROQ_API_KEY||''), openaiKey=String(process.env.OPENAI_API_KEY||''); const auth=twilioAuthHeader();
+  if(!groqKey&&!openaiKey) throw new Error('No long-recording transcription provider is configured');
   if(!auth) throw new Error('Twilio recording access is not configured');
   const base=String(recordingUrl||'').replace(/\.json(?:\?.*)?$/,''); if(!base) throw new Error('Recording URL is missing');
   const audioRes=await fetch(/\.mp3(?:\?|$)/i.test(base)?base:(base+'.mp3'),{headers:{Authorization:auth}});
   if(!audioRes.ok) throw new Error('Twilio audio fetch failed ('+audioRes.status+')');
   const audioBuf=await audioRes.arrayBuffer(); if(audioBuf.byteLength<256) throw new Error('Twilio recording was empty');
-  const fd=new FormData(); fd.append('file',new Blob([audioBuf],{type:'audio/mpeg'}),'call.mp3'); fd.append('model','whisper-large-v3'); fd.append('response_format','json');
-  const gr=await fetch('https://api.groq.com/openai/v1/audio/transcriptions',{method:'POST',headers:{Authorization:'Bearer '+groqKey},body:fd});
-  const gj=await gr.json().catch(()=>({})); if(!gr.ok) throw new Error('Groq transcription failed ('+gr.status+')');
-  const text=String((gj&&gj.text)||'').trim(); if(!text) throw new Error('Groq returned an empty transcript'); return text;
+  const fd=new FormData(); fd.append('file',new Blob([audioBuf],{type:'audio/mpeg'}),'call.mp3'); fd.append('model',groqKey?'whisper-large-v3':'gpt-4o-mini-transcribe'); fd.append('response_format','json');
+  const url=groqKey?'https://api.groq.com/openai/v1/audio/transcriptions':'https://api.openai.com/v1/audio/transcriptions'; const key=groqKey||openaiKey;
+  const tr=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+key},body:fd});
+  const tj=await tr.json().catch(()=>({})); if(!tr.ok) throw new Error((groqKey?'Groq':'OpenAI')+' transcription failed ('+tr.status+')');
+  const text=String((tj&&tj.text)||'').trim(); if(!text) throw new Error((groqKey?'Groq':'OpenAI')+' returned an empty transcript'); return text;
 }
 async function upsertCallLog(meta){
   if(!redis) return null; meta=meta||{};
@@ -4043,7 +4044,7 @@ if(action==="email_recipients"){
     }
     if(action==="calls_audit"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
-      try{ const a=await auditVictorRecordings((req.query&&req.query.days)||120); const failed=a.rows.filter(function(x){return !x.textLength||x.existingStatus==="failed";}); return res.status(200).json({days:a.days,providerVictor:a.rows.length,storedVictor:a.stored.filter(function(x){return x&&x.isVictor;}).length,needsRecovery:failed.length,rows:a.rows.map(function(x){return {recordingSid:x.recordingSid,date:x.date,at:x.at,duration:x.duration,providerStatus:x.providerStatus,existingId:x.existingId,existingStatus:x.existingStatus,textLength:x.textLength};})}); }catch(e){ return res.status(502).json({error:String(e&&e.message||e)}); }
+      try{ const a=await auditVictorRecordings((req.query&&req.query.days)||120); const failed=a.rows.filter(function(x){return !x.textLength||x.existingStatus==="failed";}); return res.status(200).json({days:a.days,providerVictor:a.rows.length,storedVictor:a.stored.filter(function(x){return x&&x.isVictor;}).length,needsRecovery:failed.length,transcriptionProviders:{groq:!!process.env.GROQ_API_KEY,openai:!!process.env.OPENAI_API_KEY},rows:a.rows.map(function(x){return {recordingSid:x.recordingSid,date:x.date,at:x.at,duration:x.duration,providerStatus:x.providerStatus,existingId:x.existingId,existingStatus:x.existingStatus,textLength:x.textLength};})}); }catch(e){ return res.status(502).json({error:String(e&&e.message||e)}); }
     }
     if(action==="calls_reconcile"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
