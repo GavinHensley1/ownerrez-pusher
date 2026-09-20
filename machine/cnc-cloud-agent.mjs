@@ -1,5 +1,6 @@
 import http from "node:http";
 import { execFileSync } from "node:child_process";
+import { splitJogDistance } from "./cnc-jog.mjs";
 
 const PROJECT_URL = String(process.env.PROJECT_URL || "https://project-jvyw3.vercel.app").replace(/\/$/, "");
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
@@ -72,10 +73,19 @@ async function execute(command) {
   await report(command, command.action === "start" ? "running" : "accepted", `${command.action} accepted`);
   const task = (async () => {
     try {
-      const payload = command.action === "jog" ? { distanceMm: command.distanceMm, feedMmPerMin: command.feedMmPerMin, manualPositioning: true }
-        : (command.action === "probe_bed" || command.action === "probe_stock") ? { thicknessMm: command.probeThickness }
-        : command.action === "start" ? { jobId: command.jobId, gcode: command.gcode } : {};
-      const result = await localRequest(path, payload);
+      let result;
+      if (command.action === "jog") {
+        const segments = splitJogDistance(axis, command.distanceMm);
+        for (let index = 0; index < segments.length; index += 1) {
+          await report(command, "accepted", `Moving ${axis} segment ${index + 1} of ${segments.length}`);
+          result = await localRequest(path, { distanceMm: segments[index], feedMmPerMin: command.feedMmPerMin, manualPositioning: true });
+        }
+        result = { ...result, requestedDistanceMm: Number(command.distanceMm), completedSegments: segments.length };
+      } else {
+        const payload = (command.action === "probe_bed" || command.action === "probe_stock") ? { thicknessMm: command.probeThickness }
+          : command.action === "start" ? { jobId: command.jobId, gcode: command.gcode } : {};
+        result = await localRequest(path, payload);
+      }
       const finalState = command.action === "start" ? "done" : command.action === "pause" ? "paused" : command.action === "resume" ? "running" : command.action === "stop" ? "stopped" : "ready";
       await report(command, finalState, command.action === "start" ? "Carve complete" : `${command.action} complete`, { result: { setup: result.setup, job: result.job } });
     } catch (error) {
