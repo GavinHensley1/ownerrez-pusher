@@ -4046,6 +4046,22 @@ if(action==="email_recipients"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
       try{ const a=await auditVictorRecordings((req.query&&req.query.days)||120); const failed=a.rows.filter(function(x){return !x.textLength||x.existingStatus==="failed";}); return res.status(200).json({days:a.days,providerVictor:a.rows.length,storedVictor:a.stored.filter(function(x){return x&&x.isVictor;}).length,needsRecovery:failed.length,transcriptionProviders:{groq:!!process.env.GROQ_API_KEY,openai:!!process.env.OPENAI_API_KEY},rows:a.rows.map(function(x){return {recordingSid:x.recordingSid,date:x.date,at:x.at,duration:x.duration,providerStatus:x.providerStatus,existingId:x.existingId,existingStatus:x.existingStatus,textLength:x.textLength};})}); }catch(e){ return res.status(502).json({error:String(e&&e.message||e)}); }
     }
+    if(action==="call_audio"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).end("unauthorized");
+      const sid=String((req.query&&req.query.sid)||"").trim();
+      if(!/^RE[a-zA-Z0-9]{20,}$/.test(sid)) return res.status(400).end("invalid recording sid");
+      try{
+        const audit=await auditVictorRecordings(365); const row=audit.rows.find(function(x){return x.recordingSid===sid;});
+        if(!row) return res.status(404).end("Victor recording not found");
+        const rr=await fetch(row.recordingUrl+'.mp3',{headers:{Authorization:twilioAuthHeader()},redirect:'follow'});
+        if(!rr.ok) return res.status(502).end('Twilio audio fetch failed ('+rr.status+')');
+        const buf=Buffer.from(await rr.arrayBuffer()); if(buf.length<256) return res.status(502).end('Twilio recording was empty');
+        res.setHeader('Content-Type','audio/mpeg');
+        res.setHeader('Content-Disposition','attachment; filename="'+sid+'.mp3"');
+        res.setHeader('Cache-Control','private, no-store, max-age=0');
+        return res.status(200).end(buf);
+      }catch(e){ return res.status(502).end(String(e&&e.message||e)); }
+    }
     if(action==="calls_reconcile"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
       let b=hookBody(req.body); const limit=Math.max(1,Math.min(3,Number(b.limit)||1));
