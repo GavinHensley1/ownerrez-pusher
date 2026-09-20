@@ -262,7 +262,7 @@ export class GrblTcpController extends EventEmitter {
       const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
       if (!new Set(["Idle", "Alarm"]).has(before.state.split(":")[0])) throw new Error(`Probe recovery requires Idle or Alarm, got ${before.state}`);
       if (!String(before.Pn || "").includes("P")) throw new Error("Probe recovery requires an active probe contact");
-      const hardLimitsWereEnabled = await this.#booleanSettingUnlocked(21);
+      let hardLimitsWereEnabled;
       let hardLimitsSuppressed = false;
       try {
         await this.#lineCommandUnlocked("M5", true).catch(() => []);
@@ -272,6 +272,9 @@ export class GrblTcpController extends EventEmitter {
           current = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
         }
         if (current.state !== "Idle") throw new Error(`Controller did not unlock for probe recovery: ${current.raw}`);
+        // This ARM32 GRBL build rejects `$$` while alarmed. Read $21 only
+        // after $X has returned the controller to Idle.
+        hardLimitsWereEnabled = await this.#booleanSettingUnlocked(21);
         if (hardLimitsWereEnabled) {
           await this.#lineCommandUnlocked("$21=0", false);
           hardLimitsSuppressed = true;
@@ -286,7 +289,7 @@ export class GrblTcpController extends EventEmitter {
         await this.motionGuard();
         return { before, retract, after, hardLimitsRestored: hardLimitsWereEnabled };
       } catch (error) {
-        if (hardLimitsWereEnabled && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
+        if (hardLimitsWereEnabled === true && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
         if (!this.fault) await this.#emergencyStop(`PROBE_RECOVERY_FAILED:${error.message}`);
         throw this.fault || error;
       }

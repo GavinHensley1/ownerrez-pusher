@@ -34,7 +34,10 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
           if (char === "\r") {
             const command = buffer.trim(); buffer = "";
             if (command === "$G") setTimeout(() => socket.write(`[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]${delimiter}ok${delimiter}`), lateQueryAckMs);
-            else if (command === "$$") socket.write(`$3=4${delimiter}$21=${hardLimits ? 1 : 0}${delimiter}$27=3.000${delimiter}ok${delimiter}`);
+            else if (command === "$$") {
+              if (alarmed) socket.write(`error:9${delimiter}`);
+              else socket.write(`$3=4${delimiter}$21=${hardLimits ? 1 : 0}${delimiter}$27=3.000${delimiter}ok${delimiter}`);
+            }
             else if (command === "$X") { alarmed = false; socket.write(`ok${delimiter}`); }
             else if (command.startsWith("$J=")) {
               x += Number(command.match(/X(-?\d+(?:\.\d+)?)/)?.[1] || 0);
@@ -191,6 +194,7 @@ test("recovers an alarmed probe contact, retracts, and restores hard limits", as
   const result = await c.recoverProbeContact({ retractMm: 3, feed: 100 });
   assert.equal(result.before.state, "Alarm"); assert.equal(result.before.Pn, "PZ"); assert.equal(result.after.state, "Idle"); assert.equal(result.after.Pn, undefined);
   assert(mock.bytes.includes(Buffer.from("$X\r"))); assert(mock.bytes.includes(Buffer.from("$21=0\r"))); assert(mock.bytes.includes(Buffer.from("$21=1\r"))); assert(guards >= 3);
+  assert(mock.bytes.indexOf(Buffer.from("$X\r")) < mock.bytes.indexOf(Buffer.from("$$\r")));
   await c.close(); await mock.close();
 });
 
