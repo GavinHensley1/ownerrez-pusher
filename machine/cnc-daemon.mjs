@@ -1,7 +1,7 @@
 import http from "node:http";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { GrblTcpController, coordinates, parseStatus, VirtualWorkspace } from "./cnc-controller.mjs";
-import { validateProgramEnvelope } from "./cnc-program.mjs";
+import { measuredStockProtection, validateProgramEnvelope } from "./cnc-program.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
@@ -13,7 +13,7 @@ const MAX_BODY_BYTES = 900_000;
 let controller, lastControllerStatus, incident, moving = false, keepaliveBusy = false;
 let restartScheduled = false;
 const workspace = new VirtualWorkspace();
-const setup = { xyReady: false, probeReady: false, probeThickness: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
+const setup = { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
 const job = { state: "idle", jobId: null, progress: 0, message: "", updatedAt: null };
 
 const json = (res, status, value) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
@@ -41,8 +41,9 @@ const programGuard = async ({ analysis }) => {
   const snap = workspace.snapshot();
   if (!snap.calibrated) throw new Error("Virtual boundaries are not calibrated");
   if (!setup.xyReady) throw new Error("Set X/Y zero before starting");
-  if (!setup.probeReady) throw new Error("Probe Z before starting");
-  validateProgramEnvelope(analysis, { widthMm: 360, heightMm: 360, maxDepthMm: 68, maxSafeZMm: 6 });
+  if (!setup.bedProbeReady || !setup.stockProbeReady || !setup.probeReady) throw new Error("Probe the bed and stock before starting");
+  if (!Number.isFinite(setup.maxCutDepthMm) || setup.maxCutDepthMm <= 0) throw new Error("Measured stock depth is unavailable");
+  validateProgramEnvelope(analysis, { widthMm: 360, heightMm: 360, maxDepthMm: setup.maxCutDepthMm, maxSafeZMm: 6 });
   const origins = { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos };
   for (const axis of ["X", "Y", "Z"]) {
     if (!Number.isFinite(origins[axis])) throw new Error(`${axis} work origin is unavailable`);
@@ -53,7 +54,7 @@ const programGuard = async ({ analysis }) => {
 
 controller = new GrblTcpController({ host: HOST, port: PORT, statusTimeoutMs: 600, commandTimeoutMs: 15_000, motionGuard, workspaceGuard: (request) => workspace.assertJog(request), programGuard, maxJogMm: 25, maxJogFeed: 500, maxSessionTravelMm: 2000, maxSpindleTestRpm: 2000 });
 controller.on("programProgress", (value) => Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() }));
-const clearSetup = () => Object.assign(setup, { xyReady: false, probeReady: false, probeThickness: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const clearSetup = () => Object.assign(setup, { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
 const scheduleRestart = () => { if (restartScheduled) return; restartScheduled = true; setTimeout(() => process.exit(1), 750).unref(); };
 controller.on("fault", (error) => { incident = error?.message || "CONTROLLER_FAULT"; workspace.clear(); clearSetup(); scheduleRestart(); });
 controller.on("close", () => { if (moving || ["running", "paused"].includes(job.state)) incident = "CONTROLLER_CONNECTION_LOST"; workspace.clear(); clearSetup(); if (incident) scheduleRestart(); });
@@ -73,7 +74,14 @@ const assertIdle = async () => { const status = await readStatus(); if (status.s
 const jog = async (axis, payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   moving = true; incident = undefined;
-  try { await motionGuard(); const result = await controller.jog(axis, payload.distanceMm, payload.feedMmPerMin, { calibration: Boolean(payload.calibration) }); lastControllerStatus = result.after; return result; }
+  try {
+    await motionGuard();
+    const manualPositioning = Boolean(payload.manualPositioning);
+    const calibration = manualPositioning && !workspace.snapshot().calibrated;
+    const result = await controller.jog(axis, payload.distanceMm, payload.feedMmPerMin, { calibration });
+    lastControllerStatus = result.after;
+    return result;
+  }
   catch (error) { incident = error?.message || "JOG_FAILED"; throw error; } finally { moving = false; }
 };
 const spindleTest = async () => {
@@ -87,17 +95,50 @@ const setXyZero = async () => {
   await motionGuard(); const before = await assertIdle(); await controller.setWorkOffset({ x: 0, y: 0 });
   setup.xyOriginMPos = coordinates(before); setup.xyReady = true; setup.updatedAt = new Date().toISOString();
   const p=setup.xyOriginMPos, prior=workspace.snapshot().bounds;
-  workspace.setBounds({ X:{min:p.X,max:p.X+360}, Y:{min:p.Y,max:p.Y+360}, Z:prior?.Z||{min:p.Z-68,max:p.Z+6} });
+  const zBounds=setup.probeReady&&Number.isFinite(setup.zOriginMPos)&&Number.isFinite(setup.maxCutDepthMm)
+    ?{min:setup.zOriginMPos-setup.maxCutDepthMm,max:setup.zOriginMPos+6}
+    :(prior?.Z||{min:p.Z-68,max:p.Z+6});
+  workspace.setBounds({ X:{min:p.X,max:p.X+360}, Y:{min:p.Y,max:p.Y+360}, Z:zBounds });
   return { setup: { ...setup }, status: before };
 };
-const probeZ = async (payload) => {
+const probeSurface = async (kind, payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
+  if (!new Set(["bed", "stock"]).has(kind)) throw new Error("Unknown probe surface");
+  if (kind === "stock" && !setup.bedProbeReady) throw new Error("Probe the exposed bed before probing the stock");
   moving = true; incident = undefined;
   try {
     await motionGuard(); const result = await controller.probeZ({ thicknessMm: payload.thicknessMm }); const thickness = Number(result.thicknessMm);
-    setup.zOriginMPos = coordinates(result.after).Z - (thickness + 3); setup.probeReady = true; setup.probeThickness = thickness; setup.updatedAt = new Date().toISOString(); lastControllerStatus = result.after;
-    const p=setup.xyOriginMPos||coordinates(result.after), prior=workspace.snapshot().bounds;
-    workspace.setBounds({ X:prior?.X||{min:p.X,max:p.X+360}, Y:prior?.Y||{min:p.Y,max:p.Y+360}, Z:{min:setup.zOriginMPos-68,max:setup.zOriginMPos+6} });
+    const contactZ = coordinates(result.finalContact).Z;
+    const surfaceZ = contactZ - thickness;
+    setup.probeThickness = thickness;
+    if (kind === "bed") {
+      workspace.clear();
+      setup.bedSurfaceMPos = surfaceZ;
+      setup.bedProbeReady = true;
+      setup.stockProbeReady = false;
+      setup.probeReady = false;
+      setup.stockSurfaceMPos = null;
+      setup.stockThicknessMm = null;
+      setup.safetyFloorMm = null;
+      setup.maxCutDepthMm = null;
+      setup.zOriginMPos = null;
+    } else {
+      const protection = measuredStockProtection(setup.bedSurfaceMPos, surfaceZ);
+      setup.stockSurfaceMPos = surfaceZ;
+      setup.stockThicknessMm = protection.stockThicknessMm;
+      setup.safetyFloorMm = protection.safetyFloorMm;
+      setup.maxCutDepthMm = protection.maxCutDepthMm;
+      setup.zOriginMPos = surfaceZ;
+      setup.stockProbeReady = true;
+      setup.probeReady = true;
+    }
+    setup.updatedAt = new Date().toISOString(); lastControllerStatus = result.after;
+    if (setup.xyReady) {
+      const p=setup.xyOriginMPos||coordinates(result.after), prior=workspace.snapshot().bounds;
+      const zOrigin = Number.isFinite(setup.zOriginMPos) ? setup.zOriginMPos : surfaceZ;
+      const zDepth = Number.isFinite(setup.maxCutDepthMm) ? setup.maxCutDepthMm : 5;
+      workspace.setBounds({ X:prior?.X||{min:p.X,max:p.X+360}, Y:prior?.Y||{min:p.Y,max:p.Y+360}, Z:{min:zOrigin-zDepth,max:zOrigin+6} });
+    }
     return { ...result, setup: { ...setup } };
   } catch (error) { incident = error?.message || "PROBE_FAILED"; throw error; } finally { moving = false; }
 };
@@ -117,7 +158,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && /^\/jog\/[xyz]$/.test(req.url)) return json(res, 200, await jog(req.url.at(-1).toUpperCase(), await bodyJson(req)));
     if (req.method === "POST" && req.url === "/workspace/set") { clearSetup(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
     if (req.method === "POST" && req.url === "/zero/xy") return json(res, 200, await setXyZero());
-    if (req.method === "POST" && req.url === "/probe") return json(res, 200, await probeZ(await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/job/start") return json(res, 200, await startProgram(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/job/pause") { controller.pauseProgramNow(); Object.assign(job, { state: "paused", message: "Paused", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
     if (req.method === "POST" && req.url === "/job/resume") { controller.resumeProgramNow(); Object.assign(job, { state: "running", message: "Running", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }

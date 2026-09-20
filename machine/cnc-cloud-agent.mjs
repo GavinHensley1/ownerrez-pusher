@@ -58,14 +58,17 @@ async function report(command, state, message, extra = {}) {
 }
 
 async function execute(command) {
-  const routes = { probe: "/probe", zero_xy: "/zero/xy", start: "/job/start", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
-  const path = routes[command.action];
+  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", zero_xy: "/zero/xy", start: "/job/start", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
+  const axis = String(command.axis || "").toUpperCase();
+  const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);
   if (command.action === "start" && activeStart) return report(command, "error", "A carve is already running");
   await report(command, command.action === "start" ? "running" : "accepted", `${command.action} accepted`);
   const task = (async () => {
     try {
-      const payload = command.action === "probe" ? { thicknessMm: command.probeThickness } : command.action === "start" ? { jobId: command.jobId, gcode: command.gcode } : {};
+      const payload = command.action === "jog" ? { distanceMm: command.distanceMm, feedMmPerMin: command.feedMmPerMin, manualPositioning: true }
+        : (command.action === "probe_bed" || command.action === "probe_stock") ? { thicknessMm: command.probeThickness }
+        : command.action === "start" ? { jobId: command.jobId, gcode: command.gcode } : {};
       const result = await localRequest(path, payload);
       const finalState = command.action === "start" ? "done" : command.action === "pause" ? "paused" : command.action === "resume" ? "running" : command.action === "stop" ? "stopped" : "ready";
       await report(command, finalState, command.action === "start" ? "Carve complete" : `${command.action} complete`, { result: { setup: result.setup, job: result.job } });

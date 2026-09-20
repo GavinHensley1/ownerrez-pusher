@@ -74,3 +74,14 @@ export function validateProgramEnvelope(analysis, { widthMm = 360, heightMm = 36
   if (Z.max > Number(maxSafeZMm) + 0.001) throw new Error(`Program safe Z ${Z.max} mm exceeds ${maxSafeZMm} mm envelope`);
   return true;
 }
+
+export function measuredStockProtection(bedSurfaceMPos, stockSurfaceMPos) {
+  const bed = Number(bedSurfaceMPos), stock = Number(stockSurfaceMPos), thickness = stock - bed;
+  if (!Number.isFinite(thickness) || thickness < 1 || thickness > 70) throw new Error(`Measured stock thickness ${Number.isFinite(thickness) ? thickness.toFixed(3) : "invalid"} mm is outside the safe 1-70 mm range`);
+  const safetyFloorMm = Math.max(0.8, thickness * 0.05);
+  return {
+    stockThicknessMm: Number(thickness.toFixed(3)),
+    safetyFloorMm: Number(safetyFloorMm.toFixed(3)),
+    maxCutDepthMm: Number((thickness - safetyFloorMm).toFixed(3)),
+  };
+}

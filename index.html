@@ -458,22 +458,8 @@
         <label class="muted" style="font-size:12px">Speed<br>
           <select id="cncSpeed" onchange="cncSaveSetup()"><option>Conservative (recommended)</option><option>Normal</option></select></label>
       </div>
-      <div style="font-size:11px;color:#93a2b8;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin:12px 0 6px">Cut out (optional)</div>
-      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
-        <label class="muted" style="font-size:12px">Cut the piece out?<br>
-          <select id="cncCutout" onchange="cncSaveSetup()">
-            <option value="none">No &mdash; just carve the relief</option>
-            <option value="profile">Yes &mdash; cut it free of the stock</option>
-            <option value="tabs">Yes &mdash; cut out but leave tabs to snap</option>
-          </select></label>
-        <label class="muted" style="font-size:12px">Material thickness (mm)<br>
-          <input id="cncThick" type="number" step="0.5" placeholder="e.g. 19" style="width:130px" onchange="cncSaveSetup()"></label>
-        <label class="muted" style="font-size:12px">Tabs (count)<br>
-          <input id="cncTabs" type="number" step="1" placeholder="6" style="width:80px" onchange="cncSaveSetup()"></label>
-        <label class="muted" style="font-size:12px">Tab height (mm)<br>
-          <input id="cncTabH" type="number" step="0.1" placeholder="1.5" style="width:100px" onchange="cncSaveSetup()"></label>
-      </div>
-      <div class="muted" id="cncCutoutHint" style="font-size:11px;margin-top:6px"></div>
+      <div style="font-size:11px;color:#93a2b8;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin:12px 0 6px">No-cut-through protection</div>
+      <div class="muted" style="font-size:12px">Project measures the wood by probing the exposed bed and then the stock. Cut-through toolpaths are not permitted. The protected bottom layer is at least 0.8 mm and at least 5% of the measured thickness.</div>
       <div class="muted" id="cncSetupHint" style="font-size:11px;margin-top:8px"></div>
     </div>
 
@@ -499,11 +485,29 @@
     <div style="margin-top:16px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.09);border-radius:10px;padding:13px">
       <div style="font-weight:600;margin-bottom:9px">3 &middot; Machine setup</div>
       <div id="cncReadiness" style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:11px"></div>
+      <div style="font-weight:600;margin-bottom:7px">Position tool</div>
+      <div class="muted" style="font-size:11.5px;margin-bottom:8px">Use small bounded moves while watching the machine. X−/X+ move left/right, Y−/Y+ move front/back, and Z−/Z+ move down/up.</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+        <label class="muted" style="font-size:12px">X/Y step<br><select id="cncJogStep" style="width:82px"><option value="1">1 mm</option><option value="5">5 mm</option><option value="10" selected>10 mm</option></select></label>
+        <div style="display:grid;grid-template-columns:repeat(3,minmax(52px,1fr));gap:6px;max-width:220px;width:100%">
+          <span></span><button class="cncJogBtn" onclick="cncJog('Y',1)">Y+<br><small>back</small></button><span></span>
+          <button class="cncJogBtn" onclick="cncJog('X',-1)">X−<br><small>left</small></button><span></span><button class="cncJogBtn" onclick="cncJog('X',1)">X+<br><small>right</small></button>
+          <span></span><button class="cncJogBtn" onclick="cncJog('Y',-1)">Y−<br><small>front</small></button><span></span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(70px,1fr));gap:6px">
+          <button class="cncJogBtn" onclick="cncJog('Z',1)">Z+ up</button>
+          <button class="cncJogBtn" onclick="cncJog('Z',-1)">Z− down</button>
+        </div>
+        <span id="cncJogStatus" class="muted" style="font-size:12px"></span>
+      </div>
+      <div style="font-weight:600;margin-bottom:7px">Set origin and measure wood</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <button id="cncZeroBtn" onclick="cncMachineAction('zero_xy')">Set X/Y zero here</button>
-        <button id="cncProbeBtn" onclick="cncProbe()">Probe Z</button>
-        <span class="muted" style="font-size:11.5px">Put the bit at the front-left corner first. For Probe Z, place the probe plate under the bit and attach the clip.</span>
+        <button id="cncProbeBedBtn" onclick="cncProbe('bed')">1. Probe bed</button>
+        <button id="cncProbeStockBtn" onclick="cncProbe('stock')">2. Probe stock</button>
+        <span id="cncMeasuredStock" class="muted" style="font-size:11.5px">Thickness not measured.</span>
       </div>
+      <div class="muted" style="font-size:11.5px;margin-top:8px">Probe the exposed spoilboard first, then the top of the wood with the same plate and clip. Project calculates thickness and locks out every cut that could reach the bottom.</div>
     </div>
     <div style="margin-top:14px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.09);border-radius:10px;padding:13px">
       <div style="font-weight:600;margin-bottom:9px">4 &middot; Run</div>
@@ -1596,7 +1600,7 @@ async function cncRenderActive(){
 function cncRenderAgent(job){
   var as=document.getElementById('cncAgentStatus'), box=document.getElementById('cncReadiness');
   var h=(CNC.agent&&CNC.agent.health)||{}, cam=h.camera||{}, ws=h.workspace||{}, su=h.setup||{};
-  var checks=[['Bridge',!!CNC.agent],['Controller',!!h.connected],['Boundaries',!!ws.calibrated],['X/Y zero',!!su.xyReady],['Z probe',!!su.probeReady]];
+  var checks=[['Bridge',!!CNC.agent],['Controller',!!h.connected],['Boundaries',!!ws.calibrated],['X/Y zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady]];
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
   var ready=checks.every(function(c){return c[1];});
   var state=job&&job.agentState||'';
@@ -1604,6 +1608,11 @@ function cncRenderAgent(job){
   var pause=document.getElementById('cncPauseBtn'); if(pause) pause.disabled=state!=='running';
   var resume=document.getElementById('cncResumeBtn'); if(resume) resume.disabled=state!=='paused';
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!['queued','accepted','running','paused'].includes(state);
+  var motionBlocked=!CNC.agent||!h.connected||!!h.moving||['queued','accepted','running','paused'].includes(state);
+  document.querySelectorAll('.cncJogBtn').forEach(function(btn){btn.disabled=motionBlocked;});
+  var bed=document.getElementById('cncProbeBedBtn'); if(bed) bed.disabled=motionBlocked;
+  var stock=document.getElementById('cncProbeStockBtn'); if(stock) stock.disabled=motionBlocked||!su.bedProbeReady;
+  var measured=document.getElementById('cncMeasuredStock'); if(measured) measured.textContent=su.stockProbeReady?('Measured '+Number(su.stockThicknessMm).toFixed(2)+' mm; protected floor '+Number(su.safetyFloorMm).toFixed(2)+' mm; max cut '+Number(su.maxCutDepthMm).toFixed(2)+' mm.'):'Thickness not measured.';
   if(!as) return;
   if(job&&state){ var m={queued:'⏳ Command queued',accepted:'⏳ Machine preparing',running:'▶ Machine running'+((job.progress!=null)?(' — '+Math.round(job.progress)+'%'):''),paused:'⏸ Machine paused',stopped:'■ Machine stopped',done:'✅ Carve complete',error:'⚠ Machine error'}[state]||state; as.innerHTML=m+(job.agentMsg?(' <span style="opacity:.7">— '+cncEsc(job.agentMsg)+'</span>'):''); }
   else as.textContent=ready?'Machine is ready. Operator must watch the CNC during the full run.':'Start is locked until every required readiness check is green.';
@@ -1777,14 +1786,7 @@ function cncGlobalRange(img){ try{ var W=200, ar=(img.height||1)/(img.width||1),
   return {mn:mn,mx:mx}; }catch(e){ return {mn:0,mx:255}; } }
 function cncBitStepover(job){ var b=String(job&&job.bit||'').toLowerCase(); if(b.indexOf('ball')>=0) return 0.4; if(b.indexOf('flat')>=0||b.indexOf('end mill')>=0) return 1.0; return 0.5; }
 function cncBitRadius(job){ var b=String(job&&job.bit||'').toLowerCase(); var m=b.match(/([\d.]+)\s*mm/); if(m){ return (parseFloat(m[1])||3.175)/2; } if(b.indexOf('v-bit')>=0||b.indexOf('vbit')>=0) return 0.5; return 1.5875; }
-function cncCutoutHint(){ var h=document.getElementById('cncCutoutHint'); if(!h) return;
-  var mode=(document.getElementById('cncCutout')||{}).value||'none';
-  var th=parseFloat((document.getElementById('cncThick')||{}).value)||0;
-  if(mode==='none'){ h.textContent=''; return; }
-  if(!th){ h.innerHTML='&#9888; Enter the material thickness so the cut goes all the way through.'; return; }
-  if(mode==='tabs'){ var n=parseInt((document.getElementById('cncTabs')||{}).value,10)||6, tabh=parseFloat((document.getElementById('cncTabH')||{}).value)||1.5; h.textContent='After carving, the outline is cut through '+th+' mm leaving '+n+' tabs '+tabh+' mm tall holding the piece to the stock \u2014 snap or trim them off when done.'; }
-  else { h.textContent='After carving, the outline is cut through '+th+' mm so the piece drops free. Clamp the stock well (no tabs).'; }
-}
+function cncCutoutHint(){}
 function cncAppendCutout(g, W, H, o){
   if(!o||!o.cutout||o.cutout==='none') return;
   var thick=cncClamp(o.matThick||0,0.5,120); if(!(thick>0)) return;
@@ -1841,7 +1843,7 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
   for(ry=0; ry<rows; ry++){ yy=(panelH-ry*dymm).toFixed(3); var ltrf=(ry%2===0); seq=[]; for(cxi=0;cxi<cols;cxi++) seq.push(ltrf?cxi:(cols-1-cxi));
     g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+(seq[0]*dxmm).toFixed(3)+' Y'+yy,'G1 Z'+targ(seq[0],ry).toFixed(3)+' F'+plunge);
     for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+targ(cc,ry).toFixed(3)+' F'+feed); } }
-  cncAppendCutout(g, panelW, panelH, {matThick:o.matThick, cutout:o.cutout, tabs:o.tabs, tabHeight:o.tabHeight, bitR:o.bitR||1.5875, feed:feed, plunge:plunge, safeZ:safeZ, passDepth:Math.max(passDepth,1.2)});
+  cncAppendCutout(g, panelW, panelH, {matThick:0, cutout:'none', tabs:0, tabHeight:0, bitR:o.bitR||1.5875, feed:feed, plunge:plunge, safeZ:safeZ, passDepth:Math.max(passDepth,1.2)});
   g.push('G0 Z'+safeZ.toFixed(2),'M5','G0 X0 Y0','M2'); cb(g.join('\n'));
 }catch(e){ cb(null); } }
 function cncPatchesFor(job){ var f=cncFinished(job); var mm=f?Math.max(f.W,f.H):200; return Math.max(48,Math.min(72,Math.round(mm/16))); }
@@ -1870,7 +1872,7 @@ async function cncGeneratePanels(){ var job=cncCurrentJob(); if(!job){ alert('Pi
       passDepth:+(mat.step*(cons?0.7:1)).toFixed(3), stepover:cncBitStepover(job), carveType:job.carveType||'3D relief',
       invert:(job.invertDepth==='true'||job.invertDepth===true), flatten:(job.flattenBg==='true'||job.flattenBg===true), gMn:gr.mn, gMx:gr.mx,
       contrast:(job.reliefSource==='depth'?1.0:1.4), smooth:(job.reliefSource==='depth'),
-      cutout:job.cutout, matThick:Number(job.matThick)||0, tabs:Number(job.tabs)||6, tabHeight:Number(job.tabHeight)||1.5, bitR:cncBitRadius(job) };
+      cutout:'none', matThick:0, tabs:0, tabHeight:0, bitR:cncBitRadius(job) };
     CNC_PANEL_CTX[job.id]={src:src, plW:pl.panelW, plH:pl.panelH, cols:pl.cols, rows:pl.rows, opts:opts0, project:job.project};
     cncRenderRelief(src,(pl.total>1?(pl.total+' panels, '):'')+f.W+'x'+f.H+' mm - '+f.depth+' mm deep');
     var out=document.getElementById('cncPanelOut'); if(out){ var html='<div style="font-size:12px;margin-bottom:6px">Click a panel to generate + download its .nc (each carves with its own front-left zero):</div><div style="display:flex;gap:8px;flex-wrap:wrap">'; for(var r=0;r<pl.rows;r++)for(var c=0;c<pl.cols;c++){ html+='<button onclick="cncDownloadPanel(\''+job.id+'\','+r+','+c+')">R'+(r+1)+'C'+(c+1)+' &#11015;</button>'; } html+='</div>'; if(pl.total>1) html+='<div style="margin-top:8px"><button onclick="cncDownloadAllPanels(\''+job.id+'\')">&#11015; Download all '+pl.total+' panels</button></div>'; out.innerHTML=html; }
@@ -1890,13 +1892,13 @@ function cncDownloadPanel(jobId,r,c){ var ctx=CNC_PANEL_CTX[jobId]; if(!ctx){ al
 }
 async function cncDownloadAllPanels(jobId){ var ctx=CNC_PANEL_CTX[jobId]; if(!ctx) return; for(var r=0;r<ctx.rows;r++)for(var c=0;c<ctx.cols;c++){ cncDownloadPanel(jobId,r,c); await new Promise(function(res){setTimeout(res,1100);}); } }
 
-function cncLoadMsg(){ return 'Design generated. Review the preview, then set X/Y zero and Probe Z.'; }
+function cncLoadMsg(){ return 'Design generated. Review the preview, then set X/Y zero and complete both probes.'; }
 async function cncGenFromImage(job, srcDataURL){
   var mat=job.material||'C752 nickel silver', preset=CNC_MATS[mat]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||'');
   var params={ widthMM:(Number(job.sizeMM)||100), maxDepth:(Number(job.reliefDepth)||preset.depth),
     step:+(preset.step*(cons?0.7:1)).toFixed(3), feed:Math.round(preset.feed*(cons?0.6:1)), plunge:Math.round(preset.plunge*(cons?0.6:1)),
     rpm:preset.rpm, carveType:job.carveType||'3D relief',
-    cutout:job.cutout, matThick:Number(job.matThick)||0, tabs:Number(job.tabs)||6, tabHeight:Number(job.tabHeight)||1.5, bitR:cncBitRadius(job) };
+    cutout:'none', matThick:0, tabs:0, tabHeight:0, bitR:cncBitRadius(job) };
   return new Promise(function(resolve){ cncGenerateRelief(srcDataURL, params, resolve); });
 }
 async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add a job first.'); return; }
@@ -1916,14 +1918,21 @@ async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add 
 async function cncStart(){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
   if(!job.hasGcode){ alert('Generate and preview the design before you Start.'); return; }
   var h=(CNC.agent&&CNC.agent.health)||{}, w=h.workspace||{}, s=h.setup||{};
-  if(!CNC.agent||!h.connected||!w.calibrated||!s.xyReady||!s.probeReady){ alert('Start is locked until Bridge, Controller, Boundaries, X/Y zero, and Z probe are all green.'); return; }
-  if(!confirm('Start the carve for “'+(job.project||'job')+'”?\nConfirm the material is clamped, probe plate and clip are removed, the path is clear, and the e-stop is reachable.')) return;
+  if(!CNC.agent||!h.connected||!w.calibrated||!s.xyReady||!s.bedProbeReady||!s.stockProbeReady||!s.probeReady){ alert('Start is locked until Bridge, Controller, Boundaries, X/Y zero, Bed probe, and Stock probe are all green.'); return; }
+  if(!confirm('Start the carve for “'+(job.project||'job')+'”?\nConfirm the glue is fully cured, the stock cannot move, the probe plate and clip are removed, the path is clear, and the e-stop is reachable.')) return;
   var st=document.getElementById('cncRunStatus'); if(st) st.textContent='Starting…';
   var j=await cncPost({jobId:job.id, machineAction:'start'});
   if(j&&j.cnc){ CNC=j.cnc; renderCncJobs(); await cncRenderActive(); if(st) st.textContent='Start queued — the Mac bridge is running preflight checks.'; }
 }
 async function cncMachineAction(action){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; } var st=document.getElementById('cncRunStatus'); if(st) st.textContent=action.replace('_',' ')+'…'; var j=await cncPost({jobId:job.id,machineAction:action}); if(j&&j.cnc){CNC=j.cnc;renderCncJobs();await cncRenderActive();if(st)st.textContent=action.replace('_',' ')+' queued.';} }
-async function cncProbe(){ var t=cncClamp((document.getElementById('cncProbeThickness')||{}).value||12.1,1,30); if(!confirm('Probe Z with a '+t.toFixed(1)+' mm plate?\nPlace the plate under the bit, attach the clip, and keep hands clear.'))return; await cncSaveProbeThickness(); return cncMachineAction('probe'); }
+async function cncJog(axis,dir){
+  var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
+  axis=String(axis||'').toUpperCase(); var step=cncClamp((document.getElementById('cncJogStep')||{}).value||1,1,10); if(axis==='Z') step=Math.min(step,5);
+  var distance=step*(dir<0?-1:1), feed=axis==='Z'?100:300, st=document.getElementById('cncJogStatus'); if(st)st.textContent='Moving '+axis+(distance>0?'+':'−')+Math.abs(distance)+' mm…';
+  var j=await cncPost({jobId:job.id,machineAction:'jog',axis:axis,distanceMm:distance,feedMmPerMin:feed});
+  if(j&&j.cnc){CNC=j.cnc;renderCncJobs();await cncRenderActive();if(st)st.textContent='Move queued — watch the machine.';}
+}
+async function cncProbe(kind){ var t=cncClamp((document.getElementById('cncProbeThickness')||{}).value||12.1,1,30), label=kind==='bed'?'exposed bed':'top of the wood'; if(!confirm('Probe the '+label+' with the '+t.toFixed(1)+' mm plate?\nPlace the plate at that location, attach the clip, and keep hands clear.'))return; await cncSaveProbeThickness(); return cncMachineAction(kind==='bed'?'probe_bed':'probe_stock'); }
 async function cncSaveProbeThickness(){ var e=document.getElementById('cncProbeThickness'); var t=cncClamp(e&&e.value||12.1,1,30); if(e)e.value=t.toFixed(1); var j=await cncPost({config:{probeThickness:t}}); if(j&&j.cnc)CNC=j.cnc; }
 async function cncSaveDepthToken(){ var v=(document.getElementById('cncDepthTok')||{}).value||''; var s=document.getElementById('cncTokState'); if(s) s.textContent='Saving...'; var j=await cncPost({secret:{depthToken:v}}); if(j&&j.cnc){ CNC=j.cnc; var el=document.getElementById('cncDepthTok'); if(el) el.value=''; if(s) s.textContent=CNC.config.hasDepthToken?'✓ token saved':'no token yet'; } else if(s) s.textContent='Error.'; }
 async function cncSaveDepthModel(){ var v=(document.getElementById('cncDepthModel')||{}).value||''; var j=await cncPost({config:{depthModel:v}}); if(j&&j.cnc) CNC=j.cnc; }

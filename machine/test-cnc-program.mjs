@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeProgram, cleanProgramLine, validateProgramEnvelope } from "./cnc-program.mjs";
+import { analyzeProgram, cleanProgramLine, measuredStockProtection, validateProgramEnvelope } from "./cnc-program.mjs";
 
 const safe = `; sample\nG21\nG90\nG17\nG0 Z2\nM3 S9000\nG0 X0 Y0\nG1 Z-1 F100\nG1 X100 Y80 F200\nG0 Z2\nM5\nM2`;
 
@@ -30,4 +30,10 @@ test("permits a small negative profile offset but not an unbounded one", () => {
 test("rejects a program outside the software travel envelope", () => {
   assert.throws(() => validateProgramEnvelope(analyzeProgram(safe.replace("X100", "X361")), { widthMm: 360, heightMm: 360, maxDepthMm: 68, maxSafeZMm: 5 }), /exceeds/);
   assert.throws(() => validateProgramEnvelope(analyzeProgram(safe.replace("Z-1", "Z-69")), { widthMm: 360, heightMm: 360, maxDepthMm: 68, maxSafeZMm: 5 }), /depth/);
+});
+
+test("derives a protected no-cut-through depth from two measured surfaces", () => {
+  assert.deepEqual(measuredStockProtection(10, 22), { stockThicknessMm: 12, safetyFloorMm: 0.8, maxCutDepthMm: 11.2 });
+  assert.deepEqual(measuredStockProtection(-30, -10), { stockThicknessMm: 20, safetyFloorMm: 1, maxCutDepthMm: 19 });
+  assert.throws(() => measuredStockProtection(10, 10.5), /outside the safe/);
 });

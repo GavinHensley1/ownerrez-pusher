@@ -2724,20 +2724,30 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["probe","zero_xy","start","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["jog","probe_bed","probe_stock","zero_xy","start","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, camera=health.camera||{}, ws=health.workspace||{}, setup=health.setup||{};
               if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
+              if(act==="probe_stock"&&!setup.bedProbeReady) return res.status(409).json({error:"Probe the exposed bed before probing the stock",cnc:st});
               if(act==="start"){
                 if(!job.hasGcode) return res.status(409).json({error:"Generate the design before Start",cnc:st});
                 if(!ws.calibrated) return res.status(409).json({error:"Virtual machine boundaries are not ready",cnc:st});
                 if(!setup.xyReady) return res.status(409).json({error:"Set X/Y zero before Start",cnc:st});
-                if(!setup.probeReady) return res.status(409).json({error:"Probe Z before Start",cnc:st});
+                if(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady) return res.status(409).json({error:"Probe both the bed and stock before Start",cnc:st});
+                if(!(Number(setup.maxCutDepthMm)>0)) return res.status(409).json({error:"Measured no-cut-through depth is unavailable",cnc:st});
               }
               let prior=null; try{const raw=await redis.get("parkside:cnc:command"); prior=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null);}catch(e){}
               if(prior&&act!=="stop") return res.status(409).json({error:"Another CNC command is still pending",cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
-              if(act==="probe")cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
+              if(act==="probe_bed"||act==="probe_stock")cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
+              if(act==="jog"){
+                const axis=String(b.axis||"").toUpperCase(), distance=Number(b.distanceMm), feed=Number(b.feedMmPerMin);
+                if(["X","Y","Z"].indexOf(axis)===-1) return res.status(400).json({error:"Jog axis must be X, Y, or Z",cnc:st});
+                const maxStep=axis==="Z"?5:10;
+                if(!Number.isFinite(distance)||distance===0||Math.abs(distance)>maxStep) return res.status(400).json({error:"Jog step is outside the safe per-click limit",cnc:st});
+                if(!Number.isFinite(feed)||feed<20||feed>(axis==="Z"?150:400)) return res.status(400).json({error:"Jog feed is outside the safe range",cnc:st});
+                cmd.axis=axis; cmd.distanceMm=Number(distance.toFixed(3)); cmd.feedMmPerMin=Math.round(feed);
+              }
               try{await redis.set("parkside:cnc:command",JSON.stringify(cmd),{ex:600});}catch(e){return res.status(500).json({error:"Could not queue CNC command"});}
               job.agentState="queued"; job.agentMsg=act.replace("_"," ")+" queued"; job.agentAt=now;
               if(act==="start"){job.startedAt=now;job.progress=0;}
