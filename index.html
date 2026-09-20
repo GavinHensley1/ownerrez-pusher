@@ -1582,12 +1582,12 @@ async function cncRenderActive(){
   renderCncActiveSelect();
   var job=cncCurrentJob(); cncPopulateSetup(job); cncFillMachine(); cncRenderPanelPlan();
   var cp=document.getElementById('cncCreativePrev'), gp=document.getElementById('cncGcodePrev'), gm=document.getElementById('cncGcodeMeta');
+  cncRenderAgent(job); cncMaybePoll();
   if(!job){ if(cp)cp.innerHTML='<span class="muted">No image yet</span>'; if(gp)gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm)gm.textContent=''; return; }
   if(job.hasCreative){ var img=await cncFetchFile(job.id,'img'); if(cp) cp.innerHTML=img?('<img src="'+img+'" style="max-width:100%;max-height:220px;object-fit:contain">'):'<span class="muted">No image yet</span>'; }
   else if(cp){ cp.innerHTML='<span class="muted">No image yet</span>'; }
   if(job.hasGcode){ var src=null; if(job.hasDepth){ src=await cncFetchFile(job.id,'depth'); } else if(job.hasCreative){ src=await cncFetchFile(job.id,'img'); } if(src){ cncRenderRelief(src,(Number(job.sizeMM)||100)+' mm wide'); } else { var gc=await cncFetchFile(job.id,'gc'); if(gc) cncRenderToolpath(gc); else if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; } }
   else { if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm) gm.textContent=''; }
-  cncRenderAgent(job); cncMaybePoll();
 }
 function cncRenderAgent(job){
   var as=document.getElementById('cncAgentStatus'), box=document.getElementById('cncReadiness');
