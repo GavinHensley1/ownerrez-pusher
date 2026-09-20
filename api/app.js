@@ -1792,6 +1792,59 @@ const ZONES_DEFAULT=[
   { name:'resort',      lat:35.7678,    lon:-83.5730,    radius_m:800 }
 ];
 function etDate(iso){ try{ return new Date(iso).toLocaleDateString('en-CA',{timeZone:'America/New_York'}); }catch(e){ return new Date().toLocaleDateString('en-CA',{timeZone:'America/New_York'}); } }
+function hookBody(body){ if(body&&typeof body==='object') return body; if(typeof body==='string'){ try{ return JSON.parse(body); }catch(e){ try{ return Object.fromEntries(new URLSearchParams(body)); }catch(e2){} } } return {}; }
+function phoneDigits(v){ return String(v||'').replace(/\D/g,'').slice(-10); }
+function recordingSidOf(v){ const s=String(v||''); const m=s.match(/(?:Recordings\/)?(RE[a-zA-Z0-9]{20,})/); return m?m[1]:''; }
+function twilioCredentials(){ const sid=process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID||''; const token=process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN||''; return {sid,token}; }
+function twilioAuthHeader(){ const c=twilioCredentials(); return c.sid&&c.token ? ('Basic '+Buffer.from(c.sid+':'+c.token).toString('base64')) : ''; }
+async function transcribeCallRecording(recordingUrl){
+  const groqKey=String(process.env.GROQ_API_KEY||''); const auth=twilioAuthHeader();
+  if(!groqKey) throw new Error('Groq transcription is not configured');
+  if(!auth) throw new Error('Twilio recording access is not configured');
+  const base=String(recordingUrl||'').replace(/\.json(?:\?.*)?$/,''); if(!base) throw new Error('Recording URL is missing');
+  const audioRes=await fetch(/\.mp3(?:\?|$)/i.test(base)?base:(base+'.mp3'),{headers:{Authorization:auth}});
+  if(!audioRes.ok) throw new Error('Twilio audio fetch failed ('+audioRes.status+')');
+  const audioBuf=await audioRes.arrayBuffer(); if(audioBuf.byteLength<256) throw new Error('Twilio recording was empty');
+  const fd=new FormData(); fd.append('file',new Blob([audioBuf],{type:'audio/mpeg'}),'call.mp3'); fd.append('model','whisper-large-v3'); fd.append('response_format','json');
+  const gr=await fetch('https://api.groq.com/openai/v1/audio/transcriptions',{method:'POST',headers:{Authorization:'Bearer '+groqKey},body:fd});
+  const gj=await gr.json().catch(()=>({})); if(!gr.ok) throw new Error('Groq transcription failed ('+gr.status+')');
+  const text=String((gj&&gj.text)||'').trim(); if(!text) throw new Error('Groq returned an empty transcript'); return text;
+}
+async function upsertCallLog(meta){
+  if(!redis) return null; meta=meta||{};
+  const recUrl=String(meta.recordingUrl||'').trim(), recSid=String(meta.recordingSid||recordingSidOf(recUrl)||'').trim();
+  const now=String(meta.at||new Date().toISOString()), date=String(meta.date||etDate(now));
+  let log=(await redis.get('parkside:calllog'))||[];
+  let entry=log.find(function(c){ const cs=String(c.recordingSid||recordingSidOf(c.recordingUrl)||''); return (recSid&&cs===recSid)||(recUrl&&String(c.recordingUrl||'').replace(/\.json$/,'')===recUrl.replace(/\.json$/,'')); });
+  if(!entry){ entry={id:recSid||('c'+Date.now().toString(36)+Math.random().toString(36).slice(2,7))}; log.unshift(entry); }
+  entry.from=String(meta.from||entry.from||'').trim(); entry.date=date; entry.at=now;
+  if(recUrl) entry.recordingUrl=recUrl; if(recSid) entry.recordingSid=recSid; if(meta.callSid) entry.callSid=String(meta.callSid);
+  if(meta.text!=null) entry.text=String(meta.text).trim(); entry.status=String(meta.status||(entry.text?'completed':'recorded'));
+  entry.isVictor=meta.isVictor!=null?!!meta.isVictor:!!entry.isVictor; delete entry.transcriptionError;
+  if(meta.transcriptionError) entry.transcriptionError=String(meta.transcriptionError).slice(0,180);
+  await redis.set('parkside:calllog',log.slice(0,500));
+  if(entry.isVictor&&entry.text){ const prev=(await redis.get('parkside:report:'+date))||''; if(String(prev).indexOf(entry.text)===-1){ const merged=prev?(String(prev)+'\n\n[call] '+entry.text):entry.text; await redis.set('parkside:report:'+date,merged); } }
+  return entry;
+}
+async function twilioJson(url){ const auth=twilioAuthHeader(); if(!auth) throw new Error('Twilio API is not configured'); const r=await fetch(url,{headers:{Authorization:auth}}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error('Twilio API failed ('+r.status+')'); return j; }
+async function auditVictorRecordings(days){
+  days=Math.max(1,Math.min(365,Number(days)||120)); const c=twilioCredentials(); if(!c.sid||!c.token) throw new Error('Twilio API is not configured');
+  const cutoff=Date.now()-days*86400000;
+  const base='https://api.twilio.com/2010-04-01/Accounts/'+encodeURIComponent(c.sid);
+  const data=await twilioJson(base+'/Recordings.json?PageSize=1000');
+  const recs=((data&&data.recordings)||[]).filter(function(r){ const t=Date.parse(r.date_created||r.date_updated||0); return !isFinite(t)||t>=cutoff; }).slice(0,250);
+  const log=redis?((await redis.get('parkside:calllog'))||[]):[]; const cfg=await getNotifyConfig(); const vn=phoneDigits(cfg.smsTo||victorNumber());
+  const rows=await Promise.all(recs.map(async function(r){
+    const sid=String(r.sid||''), existing=log.find(function(x){ return String(x.recordingSid||recordingSidOf(x.recordingUrl)||'')===sid; });
+    let from=String(existing&&existing.from||''), call=null;
+    if(!from&&r.call_sid){ try{ call=await twilioJson(base+'/Calls/'+encodeURIComponent(r.call_sid)+'.json'); from=String(call.from||''); }catch(e){} }
+    const isVictor=existing?!!existing.isVictor:!!(vn&&phoneDigits(from)===vn); if(!isVictor) return null;
+    const when=String((call&&(call.start_time||call.date_created))||r.date_created||new Date().toISOString());
+    const recordingUrl=base+'/Recordings/'+sid;
+    return {recordingSid:sid,callSid:String(r.call_sid||''),recordingUrl,from,date:String((existing&&existing.date)||etDate(when)),at:String((existing&&existing.at)||new Date(when).toISOString()),duration:Number(r.duration||0),providerStatus:String(r.status||''),existingId:existing&&existing.id||'',existingStatus:String(existing&&existing.status||''),textLength:String(existing&&existing.text||'').length,isVictor:true};
+  }));
+  return {days,rows:rows.filter(Boolean).sort(function(a,b){return String(b.at).localeCompare(String(a.at));}),stored:log};
+}
 // Weekday (0=Sun..6=Sat) in America/New_York for a given iso (or now). Used to gate the
 // daily verification-call reminder to Wed-Sat only (Sun/Mon/Tue are not monitored).
 function etWeekday(iso){ try{ var d=iso?new Date(iso):new Date(); var wd=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',weekday:'short'}).format(d); return {Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6}[wd]; }catch(e){ return new Date().getUTCDay(); } }
@@ -3921,11 +3974,11 @@ if(action==="email_recipients"){
       // recording ourselves for free via Groq Whisper in the voice_recording callback.
       const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
       const tokQ=(req.query&&req.query.token)?("&amp;token="+encodeURIComponent(req.query.token)):"";
-      const cb=origin+"/api/app?action=voice_transcription"+tokQ;
+      const cb=origin+"/api/app?action=voice_recording"+tokQ;
       const xml='<?xml version="1.0" encoding="UTF-8"?>'
         +'<Response>'
         +'<Say voice="alice">Hi, you have reached Parkside Tepees. After the tone, please walk me through your whole day hour by hour \u2014 what you worked on and roughly when, from start to finish. Then hang up when you are done.</Say>'
-        +'<Record maxLength="180" playBeep="true" transcribe="true" transcribeCallback="'+cb+'" />'
+        +'<Record maxLength="180" playBeep="true" recordingStatusCallback="'+cb+'" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed" />'
         +'<Say voice="alice">Thanks. Goodbye.</Say>'
         +'</Response>';
       res.setHeader("Content-Type","text/xml"); res.status(200); return res.end(xml);
@@ -3934,51 +3987,40 @@ if(action==="email_recipients"){
       // Twilio recording-complete callback. Fetch the audio and transcribe it FREE via Groq Whisper (no Twilio
       // transcription charge). Stores transcript to the call log and, for Victor, into the daily scorecard report.
       const cfg=await getNotifyConfig();
-      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+      const b=hookBody(req.body);
       const tok=(req.query&&req.query.token)||""; if(cfg.secret && tok && tok!==cfg.secret){ res.status(200); return res.end(""); }
-      const from=String(b.From||b.from||"").trim();
+      let from=String(b.From||b.from||"").trim();
       const recUrl=String(b.RecordingUrl||b.recording_url||"").trim();
-      const date=etDate(new Date().toISOString());
+      const recSid=String(b.RecordingSid||b.recording_sid||recordingSidOf(recUrl)||"");
+      const callSid=String(b.CallSid||b.call_sid||"");
+      let callInfo=null; if(!from&&callSid){ try{ const tc=twilioCredentials(); callInfo=await twilioJson('https://api.twilio.com/2010-04-01/Accounts/'+encodeURIComponent(tc.sid)+'/Calls/'+encodeURIComponent(callSid)+'.json'); from=String(callInfo.from||'').trim(); }catch(e){} }
+      const when=String(b.RecordingStartTime||b.Timestamp||b.timestamp||(callInfo&&(callInfo.start_time||callInfo.date_created))||new Date().toISOString());
+      const at=isFinite(Date.parse(when))?new Date(when).toISOString():new Date().toISOString(); const date=etDate(at);
       const vn=cfg.smsTo||victorNumber();
-      const isVictor=!!(vn && from && from.replace(/\D/g,"").slice(-10)===vn.replace(/\D/g,"").slice(-10));
-      let transcript="";
-      try{
-        const groqKey=process.env.GROQ_API_KEY;
-        const twSid=process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID;
-        const twTok=process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN;
-        if(groqKey && twSid && twTok && recUrl){
-          const audioRes=await fetch(recUrl+".mp3",{headers:{Authorization:"Basic "+Buffer.from(twSid+":"+twTok).toString("base64")}});
-          const audioBuf=await audioRes.arrayBuffer();
-          const fd=new FormData(); fd.append("file", new Blob([audioBuf],{type:"audio/mpeg"}), "call.mp3"); fd.append("model","whisper-large-v3"); fd.append("response_format","json");
-          const gr=await fetch("https://api.groq.com/openai/v1/audio/transcriptions",{method:"POST",headers:{Authorization:"Bearer "+groqKey},body:fd});
-          const gj=await gr.json(); transcript=(gj&&gj.text)?String(gj.text).trim():"";
-        }
-      }catch(e){}
-      try{ if(redis){
-        const entry={ id:"c"+Date.now().toString(36)+Math.random().toString(36).slice(2,7), from, date, text:transcript, recordingUrl:recUrl, status:(transcript?"transcribed":"recorded"), isVictor, at:new Date().toISOString() };
-        const log=(await redis.get("parkside:calllog"))||[]; log.unshift(entry); await redis.set("parkside:calllog", log.slice(0,500));
-        if(isVictor && transcript){ const prev=(await redis.get("parkside:report:"+date))||""; const merged=(prev && prev.indexOf(transcript)===-1)?(prev+"\n\n[call] "+transcript):transcript; await redis.set("parkside:report:"+date, merged); }
-      } }catch(e){}
+      const isVictor=!!(vn&&from&&phoneDigits(from)===phoneDigits(vn));
+      let transcript="", transcriptionError=""; try{ transcript=await transcribeCallRecording(recUrl); }catch(e){ transcriptionError=String(e&&e.message||e); }
+      try{ await upsertCallLog({from,date,at,text:transcript,recordingUrl:recUrl,recordingSid:recSid,callSid,status:transcript?"completed":"failed",isVictor,transcriptionError}); }catch(e){}
+      // A non-2xx response makes Twilio retry a transient recording/transcription failure instead of silently
+      // accepting a blank daily report. upsertCallLog is idempotent by RecordingSid, so retries cannot duplicate it.
+      if(!transcript){ res.status(503); return res.end("transcription pending retry"); }
       res.setHeader("Content-Type","text/xml"); res.status(200); return res.end('<?xml version="1.0" encoding="UTF-8"?><Response/>');
     }
     if(action==="voice_transcription"){
       // Twilio transcription callback (POST urlencoded): TranscriptionText, RecordingUrl, From, TranscriptionStatus.
       const cfg=await getNotifyConfig();
-      let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+      const b=hookBody(req.body);
       const tok=(req.query&&req.query.token)||""; if(cfg.secret && tok && tok!==cfg.secret){ res.status(200); return res.end(""); }
-      const from=String(b.From||b.from||"").trim();
-      const text=String(b.TranscriptionText||b.transcription_text||b.text||"").trim();
+      let from=String(b.From||b.from||"").trim();
+      let text=String(b.TranscriptionText||b.transcription_text||b.text||"").trim();
       const rec=String(b.RecordingUrl||b.recording_url||"").trim();
-      const status=String(b.TranscriptionStatus||b.status||"").trim();
-      const date=etDate(new Date().toISOString());
+      const recSid=String(b.RecordingSid||b.recording_sid||recordingSidOf(rec)||""); const callSid=String(b.CallSid||b.call_sid||"");
+      let callInfo=null; if(!from&&callSid){ try{ const tc=twilioCredentials(); callInfo=await twilioJson('https://api.twilio.com/2010-04-01/Accounts/'+encodeURIComponent(tc.sid)+'/Calls/'+encodeURIComponent(callSid)+'.json'); from=String(callInfo.from||'').trim(); }catch(e){} }
+      let status=String(b.TranscriptionStatus||b.status||"").trim(); let transcriptionError="";
+      if(!text&&rec){ try{ text=await transcribeCallRecording(rec); status="completed"; }catch(e){ transcriptionError=String(e&&e.message||e); } }
+      const when=String(b.RecordingStartTime||b.Timestamp||b.timestamp||(callInfo&&(callInfo.start_time||callInfo.date_created))||new Date().toISOString()); const at=isFinite(Date.parse(when))?new Date(when).toISOString():new Date().toISOString(); const date=etDate(at);
       const vn=cfg.smsTo||victorNumber();
-      const isVictor=!!(vn && from && from.replace(/\D/g,"").slice(-10)===vn.replace(/\D/g,"").slice(-10));
-      try{ if(redis){
-        const entry={ id:"c"+Date.now().toString(36)+Math.random().toString(36).slice(2,7), from, date, text, recordingUrl:rec, status, isVictor, at:new Date().toISOString() };
-        const log=(await redis.get("parkside:calllog"))||[]; log.unshift(entry); await redis.set("parkside:calllog", log.slice(0,500));
-        // Victor's daily verbal report -> auto-fills the scorecard self-report for that date (the AI truth-score then uses it)
-        if(isVictor && text){ const prev=(await redis.get("parkside:report:"+date))||""; const merged=(prev && prev.indexOf(text)===-1) ? (prev+"\n\n[call] "+text) : text; await redis.set("parkside:report:"+date, merged); }
-      } }catch(e){}
+      const isVictor=!!(vn&&from&&phoneDigits(from)===phoneDigits(vn));
+      try{ await upsertCallLog({from,date,at,text,recordingUrl:rec,recordingSid:recSid,callSid,status:text?"completed":(status||"failed"),isVictor,transcriptionError}); }catch(e){}
       res.setHeader("Content-Type","text/xml"); res.status(200); return res.end('<?xml version="1.0" encoding="UTF-8"?><Response/>');
     }
     if(action==="signal_debug"){
@@ -3998,6 +4040,18 @@ if(action==="email_recipients"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
       let log=[]; try{ if(redis) log=(await redis.get("parkside:calllog"))||[]; }catch(e){}
       return res.status(200).json({calls:log.slice(0,100)});
+    }
+    if(action==="calls_audit"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      try{ const a=await auditVictorRecordings((req.query&&req.query.days)||120); const failed=a.rows.filter(function(x){return !x.textLength||x.existingStatus==="failed";}); return res.status(200).json({days:a.days,providerVictor:a.rows.length,storedVictor:a.stored.filter(function(x){return x&&x.isVictor;}).length,needsRecovery:failed.length,rows:a.rows.map(function(x){return {recordingSid:x.recordingSid,date:x.date,at:x.at,duration:x.duration,providerStatus:x.providerStatus,existingId:x.existingId,existingStatus:x.existingStatus,textLength:x.textLength};})}); }catch(e){ return res.status(502).json({error:String(e&&e.message||e)}); }
+    }
+    if(action==="calls_reconcile"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      let b=hookBody(req.body); const limit=Math.max(1,Math.min(3,Number(b.limit)||1));
+      try{ const a=await auditVictorRecordings(Number(b.days)||120); let wanted=Array.isArray(b.recordingSids)?b.recordingSids.map(String):[]; let rows=a.rows.filter(function(x){return (!wanted.length||wanted.indexOf(x.recordingSid)>=0)&&(!x.textLength||x.existingStatus==="failed");}).slice(0,limit); const processed=[];
+        for(const row of rows){ try{ const text=await transcribeCallRecording(row.recordingUrl); const entry=await upsertCallLog({from:row.from,date:row.date,at:row.at,text,recordingUrl:row.recordingUrl,recordingSid:row.recordingSid,callSid:row.callSid,status:"completed",isVictor:true}); processed.push({recordingSid:row.recordingSid,date:row.date,ok:true,textLength:String(entry&&entry.text||"").length}); }catch(e){ await upsertCallLog({from:row.from,date:row.date,at:row.at,text:"",recordingUrl:row.recordingUrl,recordingSid:row.recordingSid,callSid:row.callSid,status:"failed",isVictor:true,transcriptionError:String(e&&e.message||e)}); processed.push({recordingSid:row.recordingSid,date:row.date,ok:false,error:String(e&&e.message||e)}); } }
+        return res.status(200).json({ok:true,processed,remaining:Math.max(0,a.rows.filter(function(x){return !x.textLength||x.existingStatus==="failed";}).length-processed.filter(function(x){return x.ok;}).length)});
+      }catch(e){ return res.status(502).json({error:String(e&&e.message||e)}); }
     }
     if(action==="calls_delete"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
@@ -4346,6 +4400,7 @@ if(action==="email_recipients"){
 
 module.exports.__model={compute,paceMult,scarMult,gapGm,deriveLearned,interp,SENS,MODEL,UNIT_PREM,GAP_SEED,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
 module.exports.__msg={kbAutoMatch,normQ,smsProvider,smsConfigured,sendSms,decideApproval};
+module.exports.__calls={hookBody,phoneDigits,recordingSidOf};
 // item MW-12: expose pure helpers for unit tests (attaches to the handler export).
 module.exports.onDutyActivePct=onDutyActivePct;
 module.exports.timeOffForDate=timeOffForDate;
