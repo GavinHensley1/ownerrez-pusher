@@ -2563,6 +2563,41 @@ if(action==="email_recipients"){
       }
       return res.status(200).json({bugs:list});
     }
+    // CNC machine agent — authenticated outbound bridge from the Mac mini.
+    // Vercel never reaches the LAN directly; the local agent polls this queue.
+    if(action==="cnc_agent"){
+      const expected=String(process.env.CNC_AGENT_TOKEN||"");
+      if(!expected) return res.status(503).json({error:"CNC agent is not configured"});
+      if(String(req.headers["authorization"]||"")!=="Bearer "+expected) return res.status(401).json({error:"unauthorized"});
+      if(!redis) return res.status(503).json({error:"CNC storage unavailable"});
+      const commandKey="parkside:cnc:command", agentKey="parkside:cnc:agent";
+      if(req.method!=="POST"){
+        let command=null; try{ const raw=await redis.get(commandKey); command=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); }catch(e){}
+        if(command&&command.action==="start"&&command.jobId){ try{ const gc=await redis.get("parkside:cnc:gc:"+String(command.jobId)); command.gcode=(gc==null)?"":String(gc); }catch(e){ command.gcode=""; } }
+        return res.status(200).json({ok:true,command:command});
+      }
+      let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
+      if(b.type==="heartbeat"){
+        const rec={at:String(b.at||new Date().toISOString()),health:b.health&&typeof b.health==="object"?b.health:{}};
+        try{ await redis.set(agentKey,JSON.stringify(rec),{ex:15}); }catch(e){ return res.status(500).json({error:"db error"}); }
+        let st=null; try{ const raw=await redis.get("parkside:cnc"); st=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); }catch(e){}
+        const lj=rec.health&&rec.health.job;
+        if(st&&Array.isArray(st.jobs)&&lj&&lj.jobId){ const target=st.jobs.find(function(x){return x&&x.id===String(lj.jobId);}); if(target){ target.progress=Math.max(0,Math.min(100,Number(lj.progress)||0)); target.agentState=String(lj.state||"").slice(0,24); target.agentMsg=String(lj.message||"").slice(0,300); target.agentAt=rec.at; target.updatedAt=rec.at; try{await redis.set("parkside:cnc",JSON.stringify(st));}catch(e){} } }
+        return res.status(200).json({ok:true});
+      }
+      if(b.type==="command"){
+        const commandId=String(b.commandId||""), state=String(b.state||"").slice(0,24), now=new Date().toISOString();
+        let queued=null; try{ const raw=await redis.get(commandKey); queued=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); }catch(e){}
+        if(queued&&String(queued.id)===commandId) try{await redis.del(commandKey);}catch(e){}
+        let st={jobs:[],config:{}}; try{ const raw=await redis.get("parkside:cnc"); const o=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); if(o&&typeof o==="object")st=o; }catch(e){}
+        if(!Array.isArray(st.jobs))st.jobs=[];
+        const jid=String(b.jobId||""); const target=st.jobs.find(function(x){return x&&x.id===jid;});
+        if(target){ target.agentState=state; target.agentMsg=String(b.message||"").slice(0,500); target.agentAt=now; target.updatedAt=now; if(state==="running"&&String(b.action)==="start")target.status="Carving"; if(state==="done"&&String(b.action)==="start"){target.status="Done";target.progress=100;} if(state==="stopped")target.status="Relief"; }
+        try{await redis.set("parkside:cnc",JSON.stringify(st));}catch(e){return res.status(500).json({error:"db error"});}
+        return res.status(200).json({ok:true});
+      }
+      return res.status(400).json({error:"unsupported agent payload"});
+    }
     // CNC Studio — SHARED staff tab. GET=state (?file=img|gc&jobId= returns a stored file).
     // POST addJob/updateJob/delJob/config, or {jobId, creativeImage|gcode|machineAction}.
     // Metadata at parkside:cnc {jobs:[],config:{}}; heavy files at parkside:cnc:img:<id> / parkside:cnc:gc:<id>.
@@ -2579,6 +2614,8 @@ if(action==="email_recipients"){
       if(!st||typeof st!=="object") st={jobs:[],config:{}};
       if(!Array.isArray(st.jobs)) st.jobs=[];
       if(!st.config||typeof st.config!=="object") st.config={};
+      let cncAgent=null; try{ if(redis){ const raw=await redis.get("parkside:cnc:agent"); cncAgent=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); } }catch(e){}
+      st.agent=cncAgent||null;
       const now=new Date().toISOString();
       if(req.method==="POST"){
         let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
@@ -2596,9 +2633,10 @@ if(action==="email_recipients"){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
           try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); await redis.del("parkside:cnc:depth:"+id); } }catch(e){}
         } else if(b.config&&typeof b.config==="object"){
-          const c=b.config; if(c.machineUrl!==undefined) st.config.machineUrl=String(c.machineUrl||"").slice(0,300);
+          const c=b.config;
           if(c.reliefWidth!==undefined) st.config.reliefWidth=Math.max(20,Math.min(600,Number(c.reliefWidth)||100));
           if(c.reliefDepth!==undefined) st.config.reliefDepth=Math.max(0.1,Math.min(10,Number(c.reliefDepth)||1.5));
+          if(c.probeThickness!==undefined) st.config.probeThickness=Math.max(1,Math.min(30,Number(c.probeThickness)||12.1));
           if(c.depthModel!==undefined) st.config.depthModel=String(c.depthModel||"").slice(0,120);
           if(c.machX!==undefined) st.config.machX=Math.max(50,Math.min(2000,Number(c.machX)||400));
           if(c.machY!==undefined) st.config.machY=Math.max(50,Math.min(2000,Number(c.machY)||400));
@@ -2686,24 +2724,23 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(act==="start"){
-              job.status="Carving"; job.startedAt=now; job.progress=0; job.agentAt=now;
-              const murl=(st.config&&st.config.machineUrl)||"";
-              if(!murl){ job.agentState="queued"; job.agentMsg="No machine address set (open Machine connection and add the machine's URL)"; }
-              else {
-                let gc=""; try{ if(redis){ const v=await redis.get("parkside:cnc:gc:"+jid); gc=(v==null)?"":String(v); } }catch(e){}
-                if(!gc){ job.agentState="error"; job.agentMsg="No G-code on this job — hit Load first"; }
-                else {
-                  try{
-                    const ctrl=new AbortController(); const _t=setTimeout(function(){ctrl.abort();},9000);
-                    const rr=await fetch(murl,{method:"POST",headers:{"Content-Type":"text/plain"},body:gc,signal:ctrl.signal});
-                    clearTimeout(_t);
-                    let txt=""; try{ txt=(await rr.text()).slice(0,160); }catch(e){}
-                    job.agentState = rr.ok ? "running" : "error";
-                    job.agentMsg = "machine responded HTTP "+rr.status+(txt?(" — "+txt):"");
-                  }catch(e){ job.agentState="error"; job.agentMsg="Could not reach the machine at that URL ("+String(e&&e.message||e).slice(0,120)+")"; }
-                }
+            else if(["probe","zero_xy","start","pause","resume","stop"].indexOf(act)!==-1){
+              const health=st.agent&&st.agent.health||{}, camera=health.camera||{}, ws=health.workspace||{}, setup=health.setup||{};
+              if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
+              if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
+              if(act==="start"){
+                if(!job.hasGcode) return res.status(409).json({error:"Generate the design before Start",cnc:st});
+                if(!ws.calibrated) return res.status(409).json({error:"Virtual machine boundaries are not ready",cnc:st});
+                if(!setup.xyReady) return res.status(409).json({error:"Set X/Y zero before Start",cnc:st});
+                if(!setup.probeReady) return res.status(409).json({error:"Probe Z before Start",cnc:st});
               }
+              let prior=null; try{const raw=await redis.get("parkside:cnc:command"); prior=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null);}catch(e){}
+              if(prior&&act!=="stop") return res.status(409).json({error:"Another CNC command is still pending",cnc:st});
+              const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
+              if(act==="probe")cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
+              try{await redis.set("parkside:cnc:command",JSON.stringify(cmd),{ex:600});}catch(e){return res.status(500).json({error:"Could not queue CNC command"});}
+              job.agentState="queued"; job.agentMsg=act.replace("_"," ")+" queued"; job.agentAt=now;
+              if(act==="start"){job.startedAt=now;job.progress=0;}
             }
             job.updatedAt=now;
           }
