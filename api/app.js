@@ -4047,9 +4047,17 @@ if(action==="email_recipients"){
       try{ const a=await auditVictorRecordings((req.query&&req.query.days)||120); const failed=a.rows.filter(function(x){return !x.textLength||x.existingStatus==="failed";}); return res.status(200).json({days:a.days,providerVictor:a.rows.length,storedVictor:a.stored.filter(function(x){return x&&x.isVictor;}).length,needsRecovery:failed.length,transcriptionProviders:{groq:!!process.env.GROQ_API_KEY,openai:!!process.env.OPENAI_API_KEY},rows:a.rows.map(function(x){return {recordingSid:x.recordingSid,date:x.date,at:x.at,duration:x.duration,providerStatus:x.providerStatus,existingId:x.existingId,existingStatus:x.existingStatus,textLength:x.textLength};})}); }catch(e){ return res.status(502).json({error:String(e&&e.message||e)}); }
     }
     if(action==="call_audio"){
-      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).end("unauthorized");
       const sid=String((req.query&&req.query.sid)||"").trim();
       if(!/^RE[a-zA-Z0-9]{20,}$/.test(sid)) return res.status(400).end("invalid recording sid");
+      const secret=String(process.env.GAVIN_PASSWORD||"__x"); let authorized=(req.headers["x-gavin-password"]||"")===secret;
+      if(!authorized){
+        const exp=Number((req.query&&req.query.exp)||0), sig=String((req.query&&req.query.sig)||""); const now=Math.floor(Date.now()/1000);
+        if(Number.isInteger(exp)&&exp>=now&&exp<=now+600&&/^[a-f0-9]{64}$/i.test(sig)){
+          const crypto=require('crypto'); const expected=crypto.createHmac('sha256',secret).update(sid+'.'+exp).digest('hex');
+          try{ authorized=crypto.timingSafeEqual(Buffer.from(sig,'hex'),Buffer.from(expected,'hex')); }catch(e){ authorized=false; }
+        }
+      }
+      if(!authorized) return res.status(401).end("unauthorized");
       try{
         const audit=await auditVictorRecordings(365); const row=audit.rows.find(function(x){return x.recordingSid===sid;});
         if(!row) return res.status(404).end("Victor recording not found");
