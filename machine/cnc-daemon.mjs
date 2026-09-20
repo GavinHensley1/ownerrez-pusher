@@ -60,6 +60,7 @@ controller.on("close", () => { if (moving || ["running", "paused"].includes(job.
 
 const readStatus = async () => (lastControllerStatus = parseStatus(await controller.status({ attempts: 5 })));
 const health = async () => {
+  if (!controller.connected && !moving && !incident) { try { await readStatus(); } catch (error) { incident = `CONNECT_FAILED:${error.message}`; } }
   let camera;
   try { const status = await cameraStatus(); camera = { state: status.state, monitoring: Boolean(status.monitoring), lastFrameAt: status.lastFrameAt || null, fresh: status.state === "ready" && status.monitoring && Date.now() - Number(status.lastFrameAt || 0) <= CAMERA_MAX_AGE_MS }; }
   catch (error) { camera = { state: "error", monitoring: false, fresh: false, error: error.message }; }
