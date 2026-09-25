@@ -215,6 +215,27 @@ const setXyZero = async () => {
   persistLockedProbe(before);
   return { setup: { ...setup }, status: before };
 };
+const setStockZZero = async (payload) => {
+  if (payload.confirm !== true) throw new Error("Explicit stock Z-zero confirmation is required");
+  if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
+  if (!setup.probeLocked || !setup.stockProbeReady || !Number.isFinite(setup.stockThicknessMm)) throw new Error("Lock a measured stock calibration before setting physical stock Z zero");
+  await motionGuard();
+  const before = await assertIdle(), position = coordinates(before), stockThicknessMm = Number(setup.stockThicknessMm);
+  await controller.setWorkOffset({ z: 0 });
+  const workOffset = parseWorkOffset(await controller.query("$#"));
+  if (Math.abs(workOffset.Z - position.Z) > 0.05) throw new Error(`Stock Z-zero verification failed: expected ${position.Z}, got ${workOffset.Z}`);
+  setup.stockSurfaceMPos = position.Z;
+  setup.bedSurfaceMPos = position.Z - stockThicknessMm;
+  setup.zOriginMPos = position.Z;
+  setup.probeLockStatus = "locked_touch_off";
+  setup.probeLockedAt = new Date().toISOString();
+  setup.updatedAt = setup.probeLockedAt;
+  persistLockedProbe(before);
+  persistLockedXy(before);
+  rebuildWorkspaceFromSetup();
+  lastControllerStatus = await readStatus();
+  return { ok: true, setup: { ...setup }, status: lastControllerStatus, workOffset };
+};
 const probeSurface = async (kind, payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (!new Set(["bed", "stock"]).has(kind)) throw new Error("Unknown probe surface");
@@ -292,6 +313,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && /^\/jog\/[xyz]$/.test(req.url)) return json(res, 200, await jog(req.url.at(-1).toUpperCase(), await bodyJson(req)));
     if (req.method === "POST" && req.url === "/workspace/set") { removeXyLock(XY_STATE_PATH); setup.xyReady = false; setup.xyLockStatus = "unlocked"; setup.xyLockedAt = null; setup.xyOriginMPos = null; setup.updatedAt = new Date().toISOString(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
     if (req.method === "POST" && req.url === "/zero/xy") return json(res, 200, await setXyZero());
+    if (req.method === "POST" && req.url === "/zero/z") return json(res, 200, await setStockZZero(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/lock") return json(res, 200, await lockProbeCalibration());

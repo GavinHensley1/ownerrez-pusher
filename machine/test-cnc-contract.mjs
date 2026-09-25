@@ -11,14 +11,16 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  for (const id of ["cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
+  for (const id of ["cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
   assert.match(html, /machineAction:'jog'/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
+  assert.match(html, /<option value="0\.1">0\.1 mm<\/option>/);
   assert.match(html, /Z is limited to 5 mm per click/);
   assert.match(html, /probe_bed/);
   assert.match(html, /probe_stock/);
   assert.match(html, /lock_probe/);
   assert.match(html, /unlock_probe/);
+  assert.match(html, /zero_z/);
   assert.match(html, /Required carve footprint/);
   assert.match(html, /Stock fit/);
   assert.match(html, /Stock width X/);
@@ -40,6 +42,7 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /Virtual machine boundaries are not ready/);
   assert.match(api, /Probe both the bed and stock before Start/);
   assert.match(api, /Lock the probe calibration before Start/);
+  assert.match(api, /Explicit stock Z-zero confirmation is required/);
   assert.match(api, /complete toolpath does not fit inside the entered stock dimensions/);
   assert.match(api, /Probe calibration is locked; unlock it before re-probing/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
@@ -59,6 +62,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /recover_probe: "\/probe\/recover"/);
   assert.match(agent, /lock_probe: "\/probe\/lock"/);
   assert.match(agent, /unlock_probe: "\/probe\/unlock"/);
+  assert.match(agent, /zero_z: "\/zero\/z"/);
   assert.ok(agent.includes('const isHealth = path === "/health"'));
   assert.match(agent, /headers: isHealth \? \{\} :/);
   assert.match(agent, /if \(!isHealth\) req\.write\(data\)/);
