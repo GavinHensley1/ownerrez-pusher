@@ -48,5 +48,12 @@ test("probe lock rejects a changed G54 Z origin", () => {
 test("locked probe rejects Z motion below the protected floor", () => {
   const locked = { ...setup, probeLocked: true };
   assert.deepEqual(assertLockedProbeZJog(locked, { MPos: "-116.685,0.000,-14.859,0.000" }, -5).target, -19.859);
-  assert.throws(() => assertLockedProbeZJog(locked, { MPos: "-116.685,0.000,-14.859,0.000" }, -6), /exceeds locked probe range/);
+  assert.throws(() => assertLockedProbeZJog(locked, { MPos: "-116.685,0.000,-14.859,0.000" }, -6), /exceeds locked probe floor/);
+});
+
+test("locked probe permits guarded positive Z retract above setup clearance", () => {
+  const locked = { ...setup, probeLocked: true };
+  const result = assertLockedProbeZJog(locked, { MPos: "-116.685,0.000,-9.000,0.000" }, 5);
+  assert.equal(result.target, -4);
+  assert.equal(result.aboveSetupClearance, true);
 });

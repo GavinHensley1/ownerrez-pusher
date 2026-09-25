@@ -191,7 +191,8 @@ const jog = async (axis, payload) => {
     if (axis === "Z" && setup.probeLocked) assertLockedProbeZJog(setup, await assertIdle(), distance);
     const manualPositioning = Boolean(payload.manualPositioning);
     const calibration = manualPositioning && !workspace.snapshot().calibrated;
-    const result = await controller.jog(axis, payload.distanceMm, payload.feedMmPerMin, { calibration });
+    const safeRetract = manualPositioning && axis === "Z" && distance > 0;
+    const result = await controller.jog(axis, payload.distanceMm, payload.feedMmPerMin, { calibration, safeRetract });
     lastControllerStatus = result.after;
     persistLockedXy(result.after);
     persistLockedProbe(result.after);

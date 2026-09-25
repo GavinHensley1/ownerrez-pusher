@@ -56,8 +56,8 @@ export function assertLockedProbeZJog(setup, status, distanceMm) {
   const current = machinePosition(status), distance = Number(distanceMm);
   if (!current || !Number.isFinite(distance)) throw new Error("Cannot validate the locked Z move");
   const target = current.Z + distance;
-  if (target < range.min - 0.001 || target > range.max + 0.001) throw new Error(`Z target ${target.toFixed(3)} exceeds locked probe range ${range.min.toFixed(3)}..${range.max.toFixed(3)}`);
-  return { current: current.Z, target, ...range };
+  if (target < range.min - 0.001) throw new Error(`Z target ${target.toFixed(3)} exceeds locked probe floor ${range.min.toFixed(3)}`);
+  return { current: current.Z, target, aboveSetupClearance: target > range.max + 0.001, ...range };
 }
 
 export function calibrationFromSetup(setup, status, now = new Date().toISOString()) {

@@ -145,6 +145,19 @@ test("virtual workspace permits inside jog and rejects barrier crossing", async 
   await c.close(); await mock.close();
 });
 
+test("safe retract bypasses only the upper workspace ceiling for positive Z", async () => {
+  const mock = await makeMock();
+  const workspace = new VirtualWorkspace();
+  workspace.setBounds({ X: { min: -20, max: 20 }, Y: { min: -20, max: 20 }, Z: { min: -10, max: 1 } });
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, motionGuard: async () => {}, workspaceGuard: (request) => workspace.assertJog(request) });
+  await c.connect();
+  const result = await c.jog("Z", 5, 100, { safeRetract: true });
+  assert.equal(result.deltaMm, 5);
+  await assert.rejects(() => c.jog("Z", -1, 100, { safeRetract: true }), /only allowed for positive Z/);
+  await assert.rejects(() => c.jog("X", 1, 100, { safeRetract: true }), /only allowed for positive Z/);
+  await c.close(); await mock.close();
+});
+
 test("virtual workspace is required outside calibration mode", async () => {
   const mock = await makeMock();
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {} });

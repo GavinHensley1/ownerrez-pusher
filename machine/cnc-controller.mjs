@@ -112,7 +112,7 @@ export class GrblTcpController extends EventEmitter {
     return this.#enqueue(() => this.#lineCommandUnlocked(`G10 L20 P1 ${words.join(" ")}`, false));
   }
 
-  jog(axis, distanceMm, feedMmPerMin, { calibration = false } = {}) {
+  jog(axis, distanceMm, feedMmPerMin, { calibration = false, safeRetract = false } = {}) {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for jogging");
       const normalizedAxis = String(axis).toUpperCase();
@@ -123,6 +123,7 @@ export class GrblTcpController extends EventEmitter {
       const feed = Number(formattedFeed);
       if (!Number.isFinite(distance) || distance === 0 || Math.abs(distance) > this.maxJogMm) throw new Error(`Jog distance must round to non-zero and be no more than ${this.maxJogMm} mm`);
       if (!Number.isFinite(feed) || feed < 1 || feed > this.maxJogFeed) throw new Error(`Jog feed must round to 1-${this.maxJogFeed} mm/min`);
+      if (safeRetract && !(normalizedAxis === "Z" && distance > 0)) throw new Error("Safe retract is only allowed for positive Z motion");
       if (this.sessionTravelMm + Math.abs(distance) > this.maxSessionTravelMm) throw new Error(`Session jog envelope of ${this.maxSessionTravelMm} mm would be exceeded`);
       await this.motionGuard();
       const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
@@ -131,7 +132,7 @@ export class GrblTcpController extends EventEmitter {
       if (currentFeed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before jog: ${before.FS}`);
       if (before.Pn) throw new Error(`Active input pins before jog: ${before.Pn}`);
       const beforeCoordinate = coordinateAxis(before, normalizedAxis);
-      if (!calibration) {
+      if (!calibration && !safeRetract) {
         if (typeof this.workspaceGuard !== "function") throw new Error("Virtual workspace is not calibrated");
         await this.workspaceGuard({ before, axis: normalizedAxis, distanceMm: distance });
       }
