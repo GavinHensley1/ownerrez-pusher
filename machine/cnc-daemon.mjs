@@ -13,6 +13,9 @@ const CAMERA_REQUIRED = /^(1|true|yes)$/i.test(process.env.CNC_CAMERA_REQUIRED |
 const MAX_BODY_BYTES = 900_000;
 let controller, lastControllerStatus, incident, moving = false, keepaliveBusy = false;
 let restartScheduled = false;
+let reconnectPromise;
+let nextReconnectAt = 0;
+const RECONNECT_BACKOFF_MS = 10_000;
 const workspace = new VirtualWorkspace();
 const setup = { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
 const job = { state: "idle", jobId: null, progress: 0, message: "", updatedAt: null };
@@ -62,13 +65,42 @@ const programGuard = async ({ analysis }) => {
 controller = new GrblTcpController({ host: HOST, port: PORT, statusTimeoutMs: 600, commandTimeoutMs: 15_000, motionGuard, workspaceGuard: (request) => workspace.assertJog(request), programGuard, maxJogMm: 25, maxJogFeed: 500, maxSessionTravelMm: 2000, maxSpindleTestRpm: 2000 });
 controller.on("programProgress", (value) => Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() }));
 const clearSetup = () => Object.assign(setup, { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const hazardousOperationActive = () => moving || ["running", "paused"].includes(job.state);
 const scheduleRestart = () => { if (restartScheduled) return; restartScheduled = true; setTimeout(() => process.exit(1), 750).unref(); };
-controller.on("fault", (error) => { incident = error?.message || "CONTROLLER_FAULT"; workspace.clear(); clearSetup(); scheduleRestart(); });
-controller.on("close", () => { if (moving || ["running", "paused"].includes(job.state)) incident = "CONTROLLER_CONNECTION_LOST"; workspace.clear(); clearSetup(); if (incident) scheduleRestart(); });
+controller.on("fault", (error) => {
+  const hazardous = hazardousOperationActive();
+  incident = error?.message || "CONTROLLER_FAULT";
+  workspace.clear();
+  clearSetup();
+  if (hazardous) scheduleRestart();
+});
+controller.on("close", () => {
+  const hazardous = hazardousOperationActive();
+  if (hazardous) incident = "CONTROLLER_CONNECTION_LOST";
+  workspace.clear();
+  clearSetup();
+  if (hazardous) scheduleRestart();
+});
 
 const readStatus = async () => (lastControllerStatus = parseStatus(await controller.status({ attempts: 5 })));
+const recoverIdleConnection = async () => {
+  if (controller.connected || hazardousOperationActive()) return;
+  if (reconnectPromise) return reconnectPromise;
+  if (Date.now() < nextReconnectAt) return;
+  nextReconnectAt = Date.now() + RECONNECT_BACKOFF_MS;
+  reconnectPromise = (async () => {
+    await controller.resetConnection();
+    await readStatus();
+    await restoreHardLimitsOnStartup();
+    if (!controller.connected) throw new Error("Controller disconnected during startup safety check");
+    incident = undefined;
+  })().catch((error) => {
+    incident = `CONNECT_FAILED:${error?.message || "unknown"}`;
+  }).finally(() => { reconnectPromise = undefined; });
+  return reconnectPromise;
+};
 const health = async () => {
-  if (!controller.connected && !moving && !incident) { try { await readStatus(); } catch (error) { incident = `CONNECT_FAILED:${error.message}`; } }
+  if (!controller.connected && !hazardousOperationActive()) await recoverIdleConnection();
   let camera;
   try {
     const status = await cameraStatus();
@@ -198,8 +230,8 @@ const restoreHardLimitsOnStartup = async () => {
 
 const keepalive = setInterval(async () => { if (moving || keepaliveBusy || !controller.connected) return; keepaliveBusy = true; try { await readStatus(); } catch (error) { incident = `KEEPALIVE_FAILED:${error?.message || "unknown"}`; workspace.clear(); clearSetup(); } finally { keepaliveBusy = false; } }, 1500);
 keepalive.unref();
-await restoreHardLimitsOnStartup();
 if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
 server.listen(SOCKET_PATH, () => { chmodSync(SOCKET_PATH, 0o600); process.stdout.write(JSON.stringify({ event: "CNC_DAEMON_READY", socket: SOCKET_PATH, host: HOST, port: PORT }) + "\n"); });
+void recoverIdleConnection();
 const shutdown = async () => { clearInterval(keepalive); workspace.clear(); clearSetup(); if (moving) await controller.emergencyStop("DAEMON_SHUTDOWN_DURING_MOTION").catch(() => {}); await controller.close(); server.close(() => { try { if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH); } catch {} process.exit(0); }); };
 process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);

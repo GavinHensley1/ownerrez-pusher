@@ -488,6 +488,24 @@ export class GrblTcpController extends EventEmitter {
     });
   }
 
+  resetConnection() {
+    return this.#enqueue(async () => {
+      if (this.programRunning) throw new Error("Cannot reset the controller while a program is running");
+      const socket = this.socket;
+      ++this.socketGeneration;
+      this.connectionState = "closing";
+      this.socket = undefined;
+      this.connectPromise = undefined;
+      this.buffer = "";
+      this.#rejectWaiters(new Error("Controller connection reset"));
+      if (socket && !socket.destroyed) socket.destroy();
+      this.connectionState = "disconnected";
+      this.fault = undefined;
+      this.sessionTravelMm = 0;
+      await sleep(25);
+    });
+  }
+
   async #statusUnlocked({ attempts = 5 } = {}) {
     await this.connect();
     if (!this.connected) throw new Error("CNC socket is not connected");
