@@ -2938,17 +2938,16 @@ async function loadBonusVictor(){ await bLoad(); renderBonusVictor(); }
 function renderBonusVictor(){ var el=document.getElementById('bonusBody'); if(!el) return;
   var pub=[]; for(var i=0;i<12;i++){ var raw=BONUS.data[bKey(BYEAR,i)]; if(!raw||raw.published===false) continue; var e=Object.assign(bBlank(),raw); pub.push({i:i,e:e,c:bCalc(e)}); }
   var ann=bAnnual(BYEAR), showA=ann.published!==false, health=showA?bNum(ann.healthAmount):0, annAdj=showA?bNum(ann.adjustment):0;
-  var sum=function(k){return pub.reduce(function(a,p){return a+p.c[k];},0);}; var cnt=function(k){return pub.reduce(function(a,p){return a+bNum(p.e[k]);},0);};
-  var ytd=sum('total')+health+annAdj, cr=BONUS.terms.cleanRate||5, pctL=BONUS.terms.revenueSharePct||1;
-  var amtS=function(n){return 'text-align:right;font-weight:600;color:'+(n<0?'#f4b942':'#e6edf6')+';';};
-  var grp=function(name,amount,foot,items){ return '<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:12px 14px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px"><span style="text-transform:uppercase;letter-spacing:.08em;font-size:11px;color:#f4633c;font-weight:700">'+name+'</span><b style="font-size:18px">'+bMoney(amount)+'</b></div>'+items.map(function(it){return '<div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:2px 0"><span class="muted">'+it.l+'</span><span style="'+amtS(it.a)+'">'+bMoney(it.a)+'</span></div>';}).join('')+'<div class="muted" style="font-size:11px;margin-top:8px">'+foot+'</div></div>'; };
+  var sum=function(k){return pub.reduce(function(a,p){return a+p.c[k];},0);};
+  var ytd=sum('total')+health+annAdj;
   var h='';
   // item 4: month toggle — view a single month's AI% / self% and that month's notes.
   var mE=Object.assign(bBlank(),BONUS.data[bKey(BVYEAR,BVMONTH)]||{});
   var mHas=!!BONUS.data[bKey(BVYEAR,BVMONTH)]; var mPub=mHas && mE.published!==false;
   var mc=bCalc(mE);   // item MW-8: month figures reused by the yearly perf cards below
   h+='<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:12px 14px;margin-bottom:14px">';
-  h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span onclick="bvMonthStep(-1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:16px">‹</span><b style="font-size:13px">'+BFULL[BVMONTH]+' '+BVYEAR+'</b><span onclick="bvMonthStep(1)" style="cursor:pointer;padding:0 6px;color:#64758d;font-size:16px">›</span><span style="flex:1"></span><span class="muted" style="font-size:11px">by month</span></div>';
+  h+='<div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;color:#8fa0b8;font-weight:700;margin-bottom:8px">Browse bonus by month</div>';
+  h+='<div style="display:grid;grid-template-columns:minmax(112px,1fr) minmax(130px,1.25fr) minmax(112px,1fr);align-items:center;gap:8px;margin-bottom:12px"><button class="ghost" onclick="bvMonthStep(-1)" style="min-height:42px;border:1px solid #435474;background:#172235;color:#eef4ff;font-weight:700;font-size:12px">← Previous</button><div style="text-align:center;border:1px solid #33435d;background:#111a27;border-radius:8px;padding:10px 8px"><b style="font-size:14px;color:#fff">'+BFULL[BVMONTH]+' '+BVYEAR+'</b></div><button class="ghost" onclick="bvMonthStep(1)" style="min-height:42px;border:1px solid #435474;background:#172235;color:#eef4ff;font-weight:700;font-size:12px">Next →</button></div>';
   if(!mPub){ h+='<div class="muted" style="font-size:12px">No published bonus entry for this month yet.</div>'; }
   else {
     h+='<div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:8px">';
@@ -2962,28 +2961,9 @@ function renderBonusVictor(){ var el=document.getElementById('bonusBody'); if(!e
   h+='</div>';
   h+='<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px"><div><div class="muted" style="font-size:12px">Year-to-date incentive pay ('+BYEAR+')</div><div style="font-size:38px;font-weight:700;line-height:1">'+bMoney(ytd)+'</div></div><div><div class="muted" style="font-size:12px">Payout</div><div style="font-weight:600">Mid-December '+BYEAR+'</div></div><div><div class="muted" style="font-size:12px">Months logged</div><div style="font-weight:600">'+pub.length+' of 12</div></div></div>';
   h+='<div style="font-size:12px;color:#7e8b9e;margin-bottom:14px">Not pro-ratable — payable mid-December. Each grouping is never reduced below $0 in a month. Tips are yours and not tracked here.</div>';
-  // item MW5: breakdown is collapsed on first load, expandable via this toggle (matches design's bonusOpen=false)
-  h+='<div onclick="toggleBonusDetail()" id="bonusToggle" style="cursor:pointer;display:inline-flex;align-items:center;gap:8px;margin-bottom:14px;padding:8px 14px;border-radius:8px;border:1px solid #2c3a51;color:#cfd9e8;font-size:12.5px;font-weight:600">See the breakdown <span style="color:#7f8fa6">&#9656;</span></div>';
-  h+='<div id="bonusDetail" style="display:none">';
-  h+=grp('Revenue share',sum('revenue'),pctL+'% of net revenue, each month.',[{l:'Gross revenue',a:cnt('gross')},{l:'Refunds & chargebacks',a:-cnt('refunds')},{l:'Net revenue',a:cnt('gross')-cnt('refunds')+cnt('revAdj')},{l:'Your share ('+pctL+'%)',a:sum('revenue')}]);
-  h+=grp('Cleaning',sum('cleaning'),'Never below $0 in a month.',[{l:'Turnovers you cleaned ('+cnt('cleans')+' x $'+cr+')',a:cnt('cleans')*cr},{l:'Cleans we covered ('+cnt('covered')+' x -$25)',a:-cnt('covered')*25},{l:'Hired inspections ('+cnt('inspections')+' x -$5)',a:-cnt('inspections')*5}]);
-  h+=grp('Guest reviews',sum('reviews'),'Never below $0 in a month.',[{l:'Max-star reviews ('+cnt('goodReviews')+' x $5)',a:cnt('goodReviews')*5},{l:'Below-max reviews ('+cnt('badReviews')+' x -$25)',a:-cnt('badReviews')*25}]);
-  h+=grp('Sales commission',sum('sales'),'10% of minibar net income and guidebook upsells.',[{l:'Minibar net income ('+bMoney(cnt('minibar'))+' x 10%)',a:cnt('minibar')*0.1},{l:'Guidebook upsells ('+bMoney(cnt('guidebook'))+' x 10%)',a:cnt('guidebook')*0.1}]);
-  var perfCard=function(name,amt,cap,barPct,blurb,extra){ return '<div style="background:#0e151d;border:1px solid #26354a;border-radius:8px;padding:14px;flex:1;min-width:200px"><div style="font-weight:700">'+name+'</div><div style="font-size:26px;font-weight:700;line-height:1.1">'+bMoney(amt)+'</div><div class="muted" style="font-size:12px">'+cap+'</div><div style="height:6px;background:#1b2739;border-radius:99px;overflow:hidden;margin:6px 0"><div style="height:100%;width:'+Math.max(0,Math.min(100,barPct))+'%;background:#f4633c"></div></div><div class="muted" style="font-size:12px">'+blurb+'</div>'+(extra||'')+'</div>'; };
-  // item MW-8: AI-score & Self-management cards show BOTH the yearly total (above) AND the selected month, with each note under its own section.
-  var moLbl=BFULL[BVMONTH]+' '+BVYEAR;
-  var moExtra=function(pct,dollars,note){ return mPub?('<div style="border-top:1px solid #1c2839;margin-top:8px;padding-top:8px"><div class="muted" style="font-size:10.5px;text-transform:uppercase;letter-spacing:.06em">'+moLbl+'</div><div style="font-size:13px;font-weight:600;color:#cdd8e6">'+bNum(pct)+'% &middot; '+bMoney(dollars)+'</div>'+((note||'').trim()?('<div style="font-size:12px;color:#b9c6d8;margin-top:4px">'+bEsc(note)+'</div>'):'')+'</div>'):''; };
-  h+='<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px">';
-  h+=perfCard('AI score',sum('ai'),'of $1,000 annual cap',(sum('ai')/1000)*100,'Determined by AI from your daily grades.',moExtra(mE.aiPct,mc.ai,mE.aiNote));
-  h+=perfCard('Self-management',sum('self'),'of $500 annual cap',(sum('self')/500)*100,'Running operations with minimal oversight.',moExtra(mE.selfPct,mc.self,mE.selfNote));
-  var awarded=showA&&health>0;
-  h+=perfCard('Property health',awarded?health:0,awarded?'awarded of $1,000':'Assessed at year end',(health/1000)*100,(showA&&ann.healthNote)?bEsc(ann.healthNote):'Gavin writes this up before the December payout.');
-  h+='</div>';
-  // item MW-8: the pooled "Notes from Gavin" list at the bottom was removed — notes now appear under their respective AI-score / Self-management sections above.
-  h+='</div>';   // close #bonusDetail (collapsed breakdown)
+  h+='<div style="background:#152033;border:1px solid #3b4d69;border-left:4px solid #f4b942;border-radius:8px;padding:12px 14px"><div style="font-weight:700;color:#f2f6fb;margin-bottom:3px">Property health bonus</div><div style="font-size:12.5px;line-height:1.45;color:#b9c6d8">Gavin will assess the property health bonus separately at year end.</div></div>';
   el.innerHTML=h;
 }
-function toggleBonusDetail(){ var d=document.getElementById('bonusDetail'), t=document.getElementById('bonusToggle'); if(!d) return; var open=d.style.display!=='none'; d.style.display=open?'none':'block'; if(t) t.innerHTML=(open?'See the breakdown <span style="color:#7f8fa6">&#9656;</span>':'Hide the breakdown <span style="color:#7f8fa6">&#9662;</span>'); }
 
 async function loadBonusOwner(){ await bLoad(); renderBonusOwner(); }
 function bOwnerSaveMonth(){ var e=bBlank(); BNUMF.forEach(function(k){ var el=document.getElementById('bo_'+k); if(el) e[k]=el.value; }); ['aiNote','reviewNote','note'].forEach(function(k){ var el=document.getElementById('bo_'+k); if(el) e[k]=el.value; }); var sn=document.getElementById('bo_selfNote'); if(sn) e.selfNote=sn.value; e.aiPct=bNum((document.getElementById('bo_aiPct')||{}).value); e.selfPct=bNum((document.getElementById('bo_selfPct')||{}).value); e.published=!!(document.getElementById('bo_published')||{}).checked; bSave({key:bKey(BYEAR,BMONTH),entry:e}).then(function(){ BONUS.data[bKey(BYEAR,BMONTH)]=e; renderBonusOwner(); }); }
