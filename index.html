@@ -1855,10 +1855,10 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
     for(ry=0; ry<rows; ry++){ yy=(panelH-ry*dymm).toFixed(3); var ltr=(ry%2===0); seq=[]; for(cxi=0;cxi<cols;cxi+=2) seq.push(ltr?cxi:(cols-1-cxi));
       if(!seq.length) continue; var z0=Math.max(targ(seq[0],ry),level);
       g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+(seq[0]*dxmm).toFixed(3)+' Y'+yy,'G1 Z'+z0.toFixed(3)+' F'+plunge);
-      for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; z=Math.max(targ(cc,ry),level); g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+z.toFixed(3)+' F'+feed); } } }
+      for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; z=Math.max(targ(cc,ry),level); g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+z.toFixed(3)+(kk===0?(' F'+feed):'')); } } }
   for(ry=0; ry<rows; ry++){ yy=(panelH-ry*dymm).toFixed(3); var ltrf=(ry%2===0); seq=[]; for(cxi=0;cxi<cols;cxi++) seq.push(ltrf?cxi:(cols-1-cxi));
     g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+(seq[0]*dxmm).toFixed(3)+' Y'+yy,'G1 Z'+targ(seq[0],ry).toFixed(3)+' F'+plunge);
-    for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+targ(cc,ry).toFixed(3)+' F'+feed); } }
+    for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+targ(cc,ry).toFixed(3)+(kk===0?(' F'+feed):'')); } }
   cncAppendCutout(g, panelW, panelH, {matThick:0, cutout:'none', tabs:0, tabHeight:0, bitR:o.bitR||1.5875, feed:feed, plunge:plunge, safeZ:safeZ, passDepth:Math.max(passDepth,1.2)});
   g.push('G0 Z'+safeZ.toFixed(2),'M5','G0 X0 Y0','M2'); cb(g.join('\n'));
 }catch(e){ cb(null); } }
@@ -1911,11 +1911,19 @@ async function cncDownloadAllPanels(jobId){ var ctx=CNC_PANEL_CTX[jobId]; if(!ct
 function cncLoadMsg(){ return 'Design generated. Review the preview, then set X/Y zero and complete both probes.'; }
 async function cncGenFromImage(job, srcDataURL){
   var mat=job.material||'C752 nickel silver', preset=CNC_MATS[mat]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||'');
-  var params={ widthMM:(Number(job.sizeMM)||100), maxDepth:(Number(job.reliefDepth)||preset.depth),
-    step:+(preset.step*(cons?0.7:1)).toFixed(3), feed:Math.round(preset.feed*(cons?0.6:1)), plunge:Math.round(preset.plunge*(cons?0.6:1)),
-    rpm:preset.rpm, carveType:job.carveType||'3D relief',
-    cutout:'none', matThick:0, tabs:0, tabHeight:0, bitR:cncBitRadius(job) };
-  return new Promise(function(resolve){ cncGenerateRelief(srcDataURL, params, resolve); });
+  return new Promise(function(resolve){ var img=new Image();
+    img.onload=function(){ var width=(Number(job.sizeMM)||100), ar=(img.height||1)/(img.width||1), height=(Number(job.pieceH)||width*ar), range=cncGlobalRange(img);
+      cncGenReliefRegion(img,{sx:0,sy:0,sw:img.width,sh:img.height},{
+        label:'machine job', panelW:width, panelH:height, maxDepth:(Number(job.reliefDepth)||preset.depth),
+        passDepth:+(preset.step*(cons?0.7:1)).toFixed(3), stepover:cncBitStepover(job),
+        feed:Math.round(preset.feed*(cons?0.6:1)), plunge:Math.round(preset.plunge*(cons?0.6:1)), rpm:preset.rpm,
+        carveType:job.carveType||'3D relief', invert:(job.invertDepth==='true'||job.invertDepth===true),
+        flatten:(job.flattenBg==='true'||job.flattenBg===true), gMn:range.mn, gMx:range.mx,
+        contrast:(job.reliefSource==='depth'?1:1.4), smooth:(job.reliefSource==='depth'), budget:30000,
+        cutout:'none', matThick:0, tabs:0, tabHeight:0, bitR:cncBitRadius(job)
+      },resolve); };
+    img.onerror=function(){ resolve(null); }; img.src=srcDataURL;
+  });
 }
 async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add a job first.'); return; }
   var st=document.getElementById('cncRunStatus');
