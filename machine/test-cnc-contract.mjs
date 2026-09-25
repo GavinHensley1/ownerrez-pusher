@@ -6,6 +6,7 @@ const root = new URL("../", import.meta.url);
 const html = readFileSync(new URL("index.html", root), "utf8");
 const api = readFileSync(new URL("api/app.js", root), "utf8");
 const agent = readFileSync(new URL("machine/cnc-cloud-agent.mjs", root), "utf8");
+const daemon = readFileSync(new URL("machine/cnc-daemon.mjs", root), "utf8");
 
 test("CNC page script parses and exposes guarded positioning and two-probe controls", () => {
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
@@ -21,6 +22,8 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /lock_probe/);
   assert.match(html, /unlock_probe/);
   assert.match(html, /zero_z/);
+  assert.match(html, /Re-probe bed/);
+  assert.match(html, /confirmReprobe/);
   assert.match(html, /Required carve footprint/);
   assert.match(html, /Stock fit/);
   assert.match(html, /Stock width X/);
@@ -44,7 +47,8 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /Lock the probe calibration before Start/);
   assert.match(api, /Explicit stock Z-zero confirmation is required/);
   assert.match(api, /complete toolpath does not fit inside the entered stock dimensions/);
-  assert.match(api, /Probe calibration is locked; unlock it before re-probing/);
+  assert.match(api, /Explicit confirmation is required to replace the locked Z calibration/);
+  assert.match(api, /cmd\.confirmReprobe=b\.confirmReprobe===true/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
   assert.match(api, /const maxStep=axis==="Z"\?5:100/);
   assert.match(api, /Z jogs are limited to 5 mm per click/);
@@ -63,6 +67,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /lock_probe: "\/probe\/lock"/);
   assert.match(agent, /unlock_probe: "\/probe\/unlock"/);
   assert.match(agent, /zero_z: "\/zero\/z"/);
+  assert.match(agent, /confirmReprobe: command\.confirmReprobe === true/);
   assert.ok(agent.includes('const isHealth = path === "/health"'));
   assert.match(agent, /headers: isHealth \? \{\} :/);
   assert.match(agent, /if \(!isHealth\) req\.write\(data\)/);
@@ -70,7 +75,12 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
 });
 
 test("local daemon separates manual probe staging from the carve envelope", () => {
-  const daemon = readFileSync(new URL("machine/cnc-daemon.mjs", root), "utf8");
   assert.match(daemon, /negativeWorkspaceMarginMm/);
   assert.match(daemon, /new Set\(\["X", "Y"\]\)\.has\(axis\) \? 60 : 0/);
+});
+
+test("bed re-probe atomically replaces only the locked Z calibration", () => {
+  assert.match(daemon, /kind !== "bed" \|\| payload\.confirmReprobe !== true/);
+  assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);\s*workspace\.clear\(\);/);
+  assert.doesNotMatch(daemon, /removeXyLock\(XY_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\)/);
 });

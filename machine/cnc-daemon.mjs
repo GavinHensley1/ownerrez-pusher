@@ -241,7 +241,12 @@ const setStockZZero = async (payload) => {
 const probeSurface = async (kind, payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (!new Set(["bed", "stock"]).has(kind)) throw new Error("Unknown probe surface");
-  if (setup.probeLocked) throw new Error("Probe calibration is locked; unlock it before re-probing");
+  if (setup.probeLocked) {
+    if (kind !== "bed" || payload.confirmReprobe !== true) throw new Error("Probe calibration is locked; confirm a bed re-probe to replace it");
+    removeProbeLock(PROBE_STATE_PATH);
+    clearProbeSetup("reprobe_in_progress");
+    workspace.clear();
+  }
   if (kind === "stock" && !setup.bedProbeReady) throw new Error("Probe the exposed bed before probing the stock");
   moving = true; incident = undefined;
   try {

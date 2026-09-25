@@ -2783,7 +2783,8 @@ if(action==="email_recipients"){
               if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
               if(act==="probe_stock"&&!setup.bedProbeReady) return res.status(409).json({error:"Probe the exposed bed before probing the stock",cnc:st});
-              if((act==="probe_bed"||act==="probe_stock")&&setup.probeLocked) return res.status(409).json({error:"Probe calibration is locked; unlock it before re-probing",cnc:st});
+              if(act==="probe_stock"&&setup.probeLocked) return res.status(409).json({error:"Probe calibration is locked; re-probe the bed first to replace it",cnc:st});
+              if(act==="probe_bed"&&setup.probeLocked&&b.confirmReprobe!==true) return res.status(400).json({error:"Explicit confirmation is required to replace the locked Z calibration",cnc:st});
               if(act==="lock_probe"&&(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady)) return res.status(409).json({error:"Probe both the bed and stock before locking calibration",cnc:st});
               if(act==="zero_z"&&(!setup.probeLocked||!setup.stockProbeReady)) return res.status(409).json({error:"Lock a measured stock calibration before setting physical stock Z zero",cnc:st});
               if(act==="zero_z"&&b.confirm!==true) return res.status(400).json({error:"Explicit stock Z-zero confirmation is required",cnc:st});
@@ -2803,6 +2804,7 @@ if(action==="email_recipients"){
               if(prior&&act!=="stop") return res.status(409).json({error:"Another CNC command is still pending",cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
               if(act==="probe_bed"||act==="probe_stock")cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
+              if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
               if(act==="start"){cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);}
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="zero_z")cmd.confirm=b.confirm===true;

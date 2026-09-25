@@ -82,7 +82,7 @@ async function execute(command) {
         }
         result = { ...result, requestedDistanceMm: Number(command.distanceMm), completedSegments: segments.length };
       } else {
-        const payload = (command.action === "probe_bed" || command.action === "probe_stock") ? { thicknessMm: command.probeThickness }
+        const payload = (command.action === "probe_bed" || command.action === "probe_stock") ? { thicknessMm: command.probeThickness, confirmReprobe: command.confirmReprobe === true }
           : (command.action === "unlock_probe" || command.action === "zero_z") ? { confirm: command.confirm === true }
           : command.action === "start" ? { jobId: command.jobId, gcode: command.gcode, stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm, stockReserveMm: command.stockReserveMm } : {};
         result = await localRequest(path, payload);
