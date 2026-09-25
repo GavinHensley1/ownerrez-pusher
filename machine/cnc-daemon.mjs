@@ -2,6 +2,7 @@ import http from "node:http";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { GrblTcpController, coordinates, parseStatus, VirtualWorkspace } from "./cnc-controller.mjs";
 import { measuredStockProtection, validateProgramEnvelope } from "./cnc-program.mjs";
+import { cameraBridgeFresh } from "./cnc-camera-diagnostics.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
@@ -24,12 +25,18 @@ const ensureCameraMonitor = async () => {
   if (status.state !== "ready") throw new Error(`Camera not ready: ${status.state}`);
   if (!status.monitoring) { const response = await fetch(`${CAMERA}/monitor/start`, { method: "POST", signal: AbortSignal.timeout(3000) }); if (!response.ok) throw new Error(`Camera monitor start HTTP ${response.status}`); }
   const deadline = Date.now() + 25_000;
-  do { status = await cameraStatus(); if (status.monitoring && Date.now() - Number(status.lastFrameAt || 0) <= CAMERA_MAX_AGE_MS) return status; await sleep(250); } while (Date.now() < deadline);
+  do {
+    status = await cameraStatus();
+    if (cameraBridgeFresh(status, Date.now(), CAMERA_MAX_AGE_MS)) return status;
+    await sleep(250);
+  } while (Date.now() < deadline);
   throw new Error("Camera monitor did not produce a fresh frame");
 };
 const assertCameraFresh = async () => {
   const status = await cameraStatus(), age = Date.now() - Number(status.lastFrameAt || 0);
-  if (status.state !== "ready" || !status.monitoring || age > CAMERA_MAX_AGE_MS) throw new Error(`Camera interlock open: state=${status.state} monitoring=${status.monitoring} ageMs=${age}`);
+  if (!cameraBridgeFresh(status, Date.now(), CAMERA_MAX_AGE_MS)) {
+    throw new Error(`Camera interlock open: state=${status.state} fresh=${status.fresh} monitoring=${status.monitoring} ageMs=${age}`);
+  }
   return status;
 };
 const motionGuard = async () => {
@@ -63,7 +70,16 @@ const readStatus = async () => (lastControllerStatus = parseStatus(await control
 const health = async () => {
   if (!controller.connected && !moving && !incident) { try { await readStatus(); } catch (error) { incident = `CONNECT_FAILED:${error.message}`; } }
   let camera;
-  try { const status = await cameraStatus(); camera = { state: status.state, monitoring: Boolean(status.monitoring), lastFrameAt: status.lastFrameAt || null, fresh: status.state === "ready" && status.monitoring && Date.now() - Number(status.lastFrameAt || 0) <= CAMERA_MAX_AGE_MS }; }
+  try {
+    const status = await cameraStatus();
+    camera = {
+      state: status.state,
+      monitoring: Boolean(status.monitoring),
+      lastFrameAt: status.lastFrameAt || null,
+      fresh: cameraBridgeFresh(status, Date.now(), CAMERA_MAX_AGE_MS),
+      diagnostics: status.diagnostics || null,
+    };
+  }
   catch (error) { camera = { state: "error", monitoring: false, fresh: false, error: error.message }; }
   camera.required = CAMERA_REQUIRED;
   return { ok: true, connected: controller.connected, moving, incident, lastControllerStatus, camera, workspace: workspace.snapshot(), setup: { ...setup }, job: { ...job } };

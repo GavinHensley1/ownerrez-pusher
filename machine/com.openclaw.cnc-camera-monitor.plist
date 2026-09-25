@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openclaw.cnc-camera-monitor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/gavinsclaude/Projects/ownerrez-pusher/machine/cnc-camera-monitor.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>EUFY_CLIENT_ROOT</key>
+    <string>/Users/gavinsclaude/.openclaw/tools/eufy-security-client</string>
+    <key>CNC_CAMERA_OP_USERNAME_REF</key>
+    <string>op://Boxer/Eufy Cloud Account/username</string>
+    <key>CNC_CAMERA_OP_PASSWORD_REF</key>
+    <string>op://Boxer/Eufy Cloud Account/password</string>
+    <key>CNC_CAMERA_OP_TOKEN_SERVICE</key>
+    <string>com.openclaw.1password.service-account</string>
+    <key>CNC_CAMERA_OP_TOKEN_ACCOUNT</key>
+    <string>token</string>
+    <key>CNC_CAMERA_FPS</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/gavinsclaude/.openclaw/logs/cnc-camera-monitor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/gavinsclaude/.openclaw/logs/cnc-camera-monitor.error.log</string>
+</dict>
+</plist>
