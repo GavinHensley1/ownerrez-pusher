@@ -75,6 +75,17 @@ export function validateProgramEnvelope(analysis, { widthMm = 360, heightMm = 36
   return true;
 }
 
+export function validateProgramStockEnvelope(analysis, { widthMm, heightMm, reserveMm = 0 } = {}) {
+  if (!analysis?.bounds) throw new Error("Program analysis is required");
+  const width = Number(widthMm), height = Number(heightMm), reserve = Math.max(0, Number(reserveMm) || 0);
+  if (!(width > 0 && height > 0)) throw new Error("Actual stock X/Y dimensions are required");
+  const { X, Y } = analysis.bounds;
+  if (X.min < -0.001 || Y.min < -0.001) throw new Error(`Program begins outside the stock-corner zero: X ${X.min} mm, Y ${Y.min} mm`);
+  if (X.max > width - reserve + 0.001) throw new Error(`Program X maximum ${X.max} mm exceeds usable stock ${width - reserve} mm`);
+  if (Y.max > height - reserve + 0.001) throw new Error(`Program Y maximum ${Y.max} mm exceeds usable stock ${height - reserve} mm`);
+  return true;
+}
+
 export function measuredStockProtection(bedSurfaceMPos, stockSurfaceMPos) {
   const bed = Number(bedSurfaceMPos), stock = Number(stockSurfaceMPos), thickness = stock - bed;
   if (!Number.isFinite(thickness) || thickness < 1 || thickness > 70) throw new Error(`Measured stock thickness ${Number.isFinite(thickness) ? thickness.toFixed(3) : "invalid"} mm is outside the safe 1-70 mm range`);

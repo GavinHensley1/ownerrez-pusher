@@ -3,7 +3,7 @@ import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, VirtualWorkspace } from "./cnc-controller.mjs";
-import { measuredStockProtection, validateProgramEnvelope } from "./cnc-program.mjs";
+import { measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 import { cameraBridgeFresh } from "./cnc-camera-diagnostics.mjs";
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 import { applyXyLock, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
@@ -53,7 +53,7 @@ const motionGuard = async () => {
   try { return await cameraStatus(); } catch { return { state: "unavailable", monitoring: false, optional: true }; }
 };
 
-const programGuard = async ({ analysis }) => {
+const programGuard = async ({ analysis, programContext }) => {
   const snap = workspace.snapshot();
   if (!snap.calibrated) throw new Error("Virtual boundaries are not calibrated");
   if (!setup.xyReady) throw new Error("Set X/Y zero before starting");
@@ -61,6 +61,7 @@ const programGuard = async ({ analysis }) => {
   if (!setup.probeLocked) throw new Error("Lock the probe calibration before starting");
   if (!Number.isFinite(setup.maxCutDepthMm) || setup.maxCutDepthMm <= 0) throw new Error("Measured stock depth is unavailable");
   validateProgramEnvelope(analysis, { widthMm: 360, heightMm: 360, maxDepthMm: setup.maxCutDepthMm, maxSafeZMm: 6 });
+  validateProgramStockEnvelope(analysis, { widthMm: programContext?.stockWidthMm, heightMm: programContext?.stockHeightMm, reserveMm: programContext?.stockReserveMm });
   const origins = { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos };
   for (const axis of ["X", "Y", "Z"]) {
     if (!Number.isFinite(origins[axis])) throw new Error(`${axis} work origin is unavailable`);
@@ -267,10 +268,10 @@ const unlockProbeCalibration = async (payload) => {
   workspace.clear();
   return { ok: true, setup: { ...setup } };
 };
-const startProgram = async ({ jobId, gcode }) => {
+const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm }) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
-  try { const result = await controller.runProgram(gcode, { onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
+  try { const result = await controller.runProgram(gcode, { programContext: { stockWidthMm, stockHeightMm, stockReserveMm }, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); throw error; } finally { moving = false; }
 };
 const bodyJson = async (req) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY_BYTES) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };

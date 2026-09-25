@@ -2792,11 +2792,16 @@ if(action==="email_recipients"){
                 if(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady) return res.status(409).json({error:"Probe both the bed and stock before Start",cnc:st});
                 if(!setup.probeLocked) return res.status(409).json({error:"Lock the probe calibration before Start",cnc:st});
                 if(!(Number(setup.maxCutDepthMm)>0)) return res.status(409).json({error:"Measured no-cut-through depth is unavailable",cnc:st});
+                const stockWidthMm=Number(st.config.machX), stockHeightMm=Number(st.config.machY), stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);
+                const designWidthMm=Number(job.sizeMM)||0, designHeightMm=Number(job.pieceH)||Math.round(designWidthMm*(Number(job.imgAR)||0.75));
+                if(!(stockWidthMm>0&&stockHeightMm>0)) return res.status(409).json({error:"Enter the actual stock X/Y dimensions before Start",cnc:st});
+                if(designWidthMm>stockWidthMm-stockReserveMm+0.001||designHeightMm>stockHeightMm-stockReserveMm+0.001) return res.status(409).json({error:"The complete toolpath does not fit inside the entered stock dimensions",cnc:st});
               }
               let prior=null; try{const raw=await redis.get("parkside:cnc:command"); prior=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null);}catch(e){}
               if(prior&&act!=="stop") return res.status(409).json({error:"Another CNC command is still pending",cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
               if(act==="probe_bed"||act==="probe_stock")cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
+              if(act==="start"){cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);}
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="jog"){
                 const axis=String(b.axis||"").toUpperCase(), distance=Number(b.distanceMm), feed=Number(b.feedMmPerMin);

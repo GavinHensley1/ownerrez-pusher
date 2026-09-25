@@ -84,7 +84,7 @@ async function execute(command) {
       } else {
         const payload = (command.action === "probe_bed" || command.action === "probe_stock") ? { thicknessMm: command.probeThickness }
           : command.action === "unlock_probe" ? { confirm: command.confirm === true }
-          : command.action === "start" ? { jobId: command.jobId, gcode: command.gcode } : {};
+          : command.action === "start" ? { jobId: command.jobId, gcode: command.gcode, stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm, stockReserveMm: command.stockReserveMm } : {};
         result = await localRequest(path, payload);
       }
       const finalState = command.action === "start" ? "done" : command.action === "pause" ? "paused" : command.action === "resume" ? "running" : command.action === "stop" ? "stopped" : "ready";

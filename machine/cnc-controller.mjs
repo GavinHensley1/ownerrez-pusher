@@ -382,7 +382,7 @@ export class GrblTcpController extends EventEmitter {
     });
   }
 
-  runProgram(source, { onProgress } = {}) {
+  runProgram(source, { onProgress, programContext } = {}) {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for programs");
       if (typeof this.programGuard !== "function") throw new Error("Program guard is required");
@@ -393,7 +393,7 @@ export class GrblTcpController extends EventEmitter {
       const [feed, spindle] = feedAndSpindle(before);
       if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before program: ${before.FS}`);
       if (before.Pn) throw new Error(`Active input pins before program: ${before.Pn}`);
-      await this.programGuard({ before, analysis });
+      await this.programGuard({ before, analysis, programContext });
       this.programRunning = true;
       this.pauseRequested = false;
       this.abortRequested = false;

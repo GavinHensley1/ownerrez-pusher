@@ -527,13 +527,13 @@
   </div>
 
   <div class="card">
-    <h2 style="margin:.1em 0">&#128208; Size &amp; panels</h2>
-    <div class="legend">If your finished piece is bigger than the machine, the design is automatically split into machine-sized <b>panels</b> you carve one at a time and glue edge-to-edge. Set your machine's work area once (saved for next time). The plan below updates from the <b>Finished width/height</b> in Job setup.</div>
+    <h2 style="margin:.1em 0">&#128208; Stock size &amp; panels</h2>
+    <div class="legend">Enter the dimensions of the <b>actual stock</b>, not the CNC base. X/Y zero is the stock's front-left carve corner, and the design extends X+ right and Y+ back. Start is locked unless the complete toolpath fits inside this stock envelope. Larger designs are split into stock-sized panels.</div>
     <div style="margin-top:10px;display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
-      <label class="muted" style="font-size:12px">Machine work area X (mm)<br><input id="cncMachX" type="number" step="1" style="width:95px" onchange="cncSaveMachine()"></label>
-      <label class="muted" style="font-size:12px">Y (mm)<br><input id="cncMachY" type="number" step="1" style="width:85px" onchange="cncSaveMachine()"></label>
+      <label class="muted" style="font-size:12px">Stock width X (mm)<br><input id="cncMachX" type="number" step="0.1" style="width:95px" onchange="cncSaveMachine()"></label>
+      <label class="muted" style="font-size:12px">Stock depth Y (mm)<br><input id="cncMachY" type="number" step="0.1" style="width:95px" onchange="cncSaveMachine()"></label>
       <label class="muted" style="font-size:12px">Max Z travel (mm)<br><input id="cncMachZ" type="number" step="1" style="width:105px" onchange="cncSaveMachine()"></label>
-      <label class="muted" style="font-size:12px">Safe margin per side (mm)<br><input id="cncMachMargin" type="number" step="0.5" style="width:130px" onchange="cncSaveMachine()"></label>
+      <label class="muted" style="font-size:12px">Reserve at far X/Y edges (mm)<br><input id="cncMachMargin" type="number" step="0.5" style="width:145px" onchange="cncSaveMachine()"></label>
       <span id="cncMachStatus" class="muted" style="font-size:12px"></span>
     </div>
     <div id="cncPanelPlan" style="margin-top:14px" class="muted">Set a Finished width to see the panel plan.</div>
@@ -1604,7 +1604,8 @@ async function cncRenderActive(){
 function cncRenderAgent(job){
   var as=document.getElementById('cncAgentStatus'), box=document.getElementById('cncReadiness');
   var h=(CNC.agent&&CNC.agent.health)||{}, cam=h.camera||{}, ws=h.workspace||{}, su=h.setup||{};
-  var checks=[['Bridge',!!CNC.agent],['Controller',!!h.connected],['Boundaries',!!ws.calibrated],['X/Y zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked]];
+  var fit=cncStockFit(job);
+  var checks=[['Bridge',!!CNC.agent],['Controller',!!h.connected],['Machine boundaries',!!ws.calibrated],['Stock fit',!!fit.ok],['X/Y stock zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked]];
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
   var ready=checks.every(function(c){return c[1];});
   var state=job&&job.agentState||'';
@@ -1629,7 +1630,9 @@ function cncRenderOriginFootprint(job,su){
   var el=document.getElementById('cncOriginFootprint'); if(!el)return;
   var f=cncFinished(job);
   if(!f){el.innerHTML='<span class="muted">Generate the design to calculate its required X/Y footprint.</span>';return;}
-  var msg='<b>Required carve footprint:</b> '+Number(f.W).toFixed(1)+' × '+Number(f.H).toFixed(1)+' mm, extending <b>X+ right</b> and <b>Y+ back</b> from the selected front-left origin.';
+  var fit=cncStockFit(job), msg='<b>Required carve footprint:</b> '+Number(f.W).toFixed(1)+' × '+Number(f.H).toFixed(1)+' mm, extending <b>X+ right</b> and <b>Y+ back</b> from the stock front-left origin.';
+  if(fit.ok) msg+=' <span style="color:#7ee0ac">✓ Fits inside '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm stock; remaining far-edge clearance '+fit.clearX.toFixed(1)+' mm X and '+fit.clearY.toFixed(1)+' mm Y.</span>';
+  else msg+=' <span style="color:#ff9a9a">× '+cncEsc(fit.reason)+'</span>';
   msg+=su&&su.xyReady?' <span style="color:#7ee0ac">✓ X/Y origin set.</span>':' <span style="color:#ffcf79">Move the black bit to the front-left carve origin, verify this full rectangle fits on stock, then set X/Y zero.</span>';
   el.innerHTML=msg;
 }
@@ -1777,15 +1780,19 @@ function cncFinished(job){ if(!job) return null;
   var H=Number(job.pieceH)||0; if(!H){ H=Math.round(W*cncJobAR(job)); }
   var depth=Number(job.reliefDepth)||((CNC_MATS[job.material]||CNC_MATS['Other']).depth);
   return {W:W,H:H,depth:depth}; }
+function cncStockFit(job){ var f=cncFinished(job), m=cncMach(); if(!f)return {ok:false,reason:'Generate the design to calculate its stock footprint.',f:null,m:m};
+  var reserve=Math.max(0,Number(m.M)||0), usableX=Math.max(0,m.X-reserve), usableY=Math.max(0,m.Y-reserve);
+  var ok=f.W<=usableX+0.001&&f.H<=usableY+0.001;
+  return {ok:ok,f:f,m:m,usableX:usableX,usableY:usableY,clearX:usableX-f.W,clearY:usableY-f.H,reason:ok?'':('Toolpath '+f.W.toFixed(1)+' × '+f.H.toFixed(1)+' mm exceeds usable stock '+usableX.toFixed(1)+' × '+usableY.toFixed(1)+' mm.')}; }
 function cncPanels(job){ var f=cncFinished(job); if(!f) return null; var m=cncMach();
-  var uX=Math.max(20,m.X-2*m.M), uY=Math.max(20,m.Y-2*m.M);
+  var uX=Math.max(20,m.X-m.M), uY=Math.max(20,m.Y-m.M);
   var cols=Math.max(1,Math.ceil(f.W/uX)), rows=Math.max(1,Math.ceil(f.H/uY));
   return {cols:cols,rows:rows,total:cols*rows,panelW:f.W/cols,panelH:f.H/rows,uX:uX,uY:uY,f:f,m:m}; }
 function cncRenderPanelPlan(){ var el=document.getElementById('cncPanelPlan'); if(!el) return;
   var job=cncCurrentJob(), pl=cncPanels(job);
   if(!pl){ el.className='muted'; el.textContent='Set a Finished width (in Job setup) to see the panel plan.'; return; }
   el.className=''; var f=pl.f, depthOK=f.depth<=pl.m.Z, summary;
-  if(pl.total===1){ summary='<b>Fits in one panel</b> &mdash; '+f.W+'&times;'+f.H+' mm, relief depth '+f.depth+' mm. Carve in one go with Load &rarr; Start above, or Generate a panel file below for a high-detail .nc.'; }
+  if(pl.total===1){ summary='<b>Fits on this stock</b> &mdash; '+f.W+'&times;'+f.H+' mm inside '+pl.m.X+'&times;'+pl.m.Y+' mm stock, relief depth '+f.depth+' mm. X/Y zero is the stock front-left carve corner.'; }
   else { summary='<b>'+pl.total+' panels</b> ('+pl.cols+' across &times; '+pl.rows+' down) &mdash; finished piece '+f.W+'&times;'+f.H+' mm. Each panel &asymp; <b>'+pl.panelW.toFixed(0)+'&times;'+pl.panelH.toFixed(0)+' mm</b>, inside your '+pl.uX.toFixed(0)+'&times;'+pl.uY.toFixed(0)+' mm usable area. Carve each, then glue edge-to-edge.'; }
   var maxW=320, sc=Math.min(maxW/f.W, 240/f.H), gw=f.W*sc, gh=f.H*sc, svg='<svg viewBox="0 0 '+gw.toFixed(0)+' '+gh.toFixed(0)+'" width="'+gw.toFixed(0)+'" style="max-width:100%;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:rgba(0,0,0,.25)">';
   for(var r=0;r<pl.rows;r++)for(var c=0;c<pl.cols;c++){ var x=c*pl.panelW*sc,y=r*pl.panelH*sc,w=pl.panelW*sc,h=pl.panelH*sc;
@@ -1941,9 +1948,10 @@ async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add 
 }
 async function cncStart(){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
   if(!job.hasGcode){ alert('Generate and preview the design before you Start.'); return; }
+  var fit=cncStockFit(job); if(!fit.ok){ alert('Start is locked: '+fit.reason); return; }
   var h=(CNC.agent&&CNC.agent.health)||{}, w=h.workspace||{}, s=h.setup||{};
   if(!CNC.agent||!h.connected||!w.calibrated||!s.xyReady||!s.bedProbeReady||!s.stockProbeReady||!s.probeReady||!s.probeLocked){ alert('Start is locked until Bridge, Controller, Boundaries, X/Y zero, Bed probe, Stock probe, and Probe lock are all green.'); return; }
-  if(!confirm('Start the carve for “'+(job.project||'job')+'”?\nConfirm the glue is fully cured, the stock cannot move, the probe plate and clip are removed, the path is clear, and the e-stop is reachable.')) return;
+  if(!confirm('Start the carve for “'+(job.project||'job')+'”?\n\nStock: '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm\nToolpath: '+fit.f.W.toFixed(1)+' × '+fit.f.H.toFixed(1)+' mm from the locked stock-corner zero\n\nConfirm the stock cannot move, the probe plate and clip are removed, the full path is clear, and the e-stop is reachable.')) return;
   var st=document.getElementById('cncRunStatus'); if(st) st.textContent='Starting…';
   var j=await cncPost({jobId:job.id, machineAction:'start'});
   if(j&&j.cnc){ CNC=j.cnc; renderCncJobs(); await cncRenderActive(); if(st) st.textContent='Start queued — the Mac bridge is running preflight checks.'; }

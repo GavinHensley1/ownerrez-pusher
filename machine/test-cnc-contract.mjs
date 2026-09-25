@@ -20,6 +20,8 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /lock_probe/);
   assert.match(html, /unlock_probe/);
   assert.match(html, /Required carve footprint/);
+  assert.match(html, /Stock fit/);
+  assert.match(html, /Stock width X/);
   assert.match(html, /X\+ right/);
   assert.match(html, /Y\+ back/);
   assert.match(html, /recover_probe/);
@@ -38,6 +40,7 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /Virtual machine boundaries are not ready/);
   assert.match(api, /Probe both the bed and stock before Start/);
   assert.match(api, /Lock the probe calibration before Start/);
+  assert.match(api, /complete toolpath does not fit inside the entered stock dimensions/);
   assert.match(api, /Probe calibration is locked; unlock it before re-probing/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
   assert.match(api, /const maxStep=axis==="Z"\?5:100/);
@@ -52,6 +55,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /manualPositioning: true/);
   assert.match(agent, /splitJogDistance/);
   assert.match(agent, /completedSegments/);
+  assert.match(agent, /stockWidthMm/);
   assert.match(agent, /recover_probe: "\/probe\/recover"/);
   assert.match(agent, /lock_probe: "\/probe\/lock"/);
   assert.match(agent, /unlock_probe: "\/probe\/unlock"/);

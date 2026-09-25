@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeProgram, cleanProgramLine, measuredStockProtection, validateProgramEnvelope } from "./cnc-program.mjs";
+import { analyzeProgram, cleanProgramLine, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 
 const safe = `; sample\nG21\nG90\nG17\nG0 Z2\nM3 S9000\nG0 X0 Y0\nG1 Z-1 F100\nG1 X100 Y80 F200\nG0 Z2\nM5\nM2`;
 
@@ -30,6 +30,13 @@ test("permits a small negative profile offset but not an unbounded one", () => {
 test("rejects a program outside the software travel envelope", () => {
   assert.throws(() => validateProgramEnvelope(analyzeProgram(safe.replace("X100", "X361")), { widthMm: 360, heightMm: 360, maxDepthMm: 68, maxSafeZMm: 5 }), /exceeds/);
   assert.throws(() => validateProgramEnvelope(analyzeProgram(safe.replace("Z-1", "Z-69")), { widthMm: 360, heightMm: 360, maxDepthMm: 68, maxSafeZMm: 5 }), /depth/);
+});
+
+test("requires the complete program to fit actual stock from stock-corner zero", () => {
+  const analysis = analyzeProgram(safe);
+  assert.equal(validateProgramStockEnvelope(analysis, { widthMm: 304.8, heightMm: 304.8, reserveMm: 5 }), true);
+  assert.throws(() => validateProgramStockEnvelope(analysis, { widthMm: 99, heightMm: 304.8 }), /X maximum/);
+  assert.throws(() => validateProgramStockEnvelope(analyzeProgram(safe.replace("X0", "X-1")), { widthMm: 304.8, heightMm: 304.8 }), /outside the stock-corner zero/);
 });
 
 test("derives a protected no-cut-through depth from two measured surfaces", () => {
