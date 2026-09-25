@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import net from "node:net";
 import test from "node:test";
-import { GrblTcpController, parseStatus, VirtualWorkspace } from "./cnc-controller.mjs";
+import { GrblTcpController, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
 
 const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, startProbeAlarm = false, startDoor = false } = {}) => {
   let connections = 0, statusQueries = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm, door = startDoor, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true;
@@ -76,6 +76,11 @@ test("keeps one socket and retries ignored status", async () => {
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25 });
   assert.equal(parseStatus(await c.status({ attempts: 3 })).state, "Idle"); assert.equal(mock.connections, 1); assert.equal(mock.statusQueries, 2);
   await c.close(); await mock.close();
+});
+
+test("parses the persistent G54 work origin", () => {
+  assert.deepEqual(parseWorkOffset(["[G54:-207.685,-25.000,-46.780,0.000]", "ok"]), { X: -207.685, Y: -25, Z: -46.78 });
+  assert.throws(() => parseWorkOffset(["ok"]), /G54 work offset is unavailable/);
 });
 
 test("parses CR-only records and serializes queries", async () => {

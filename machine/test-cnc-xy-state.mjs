@@ -23,7 +23,20 @@ test("X/Y lock persists privately and survives Z-only changes", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("X/Y lock restores after ordinary machine movement when G54 origin is unchanged", () => {
+  const lock = xyLockFromSetup(setup, status);
+  const target = { xyReady: false };
+  applyXyLock(target, lock, { MPos: "-154.410,108.923,-41.698,0.000" }, 0.05, { X: -207.685, Y: -25, Z: -41.6 });
+  assert.equal(target.xyReady, true);
+  assert.deepEqual({ X: target.xyOriginMPos.X, Y: target.xyOriginMPos.Y }, { X: -207.685, Y: -25 });
+});
+
+test("X/Y lock rejects a changed G54 origin even if the cutter is elsewhere", () => {
+  const lock = xyLockFromSetup(setup, status);
+  assert.throws(() => applyXyLock({}, lock, { MPos: "-154.410,108.923,-41.698,0.000" }, 0.05, { X: -200, Y: -25, Z: -41.6 }), /origin does not match/);
+});
+
 test("X/Y lock rejects a coordinate reset", () => {
   const lock = xyLockFromSetup(setup, status);
-  assert.throws(() => applyXyLock({}, lock, { MPos: "0.000,0.000,-22.759,0.000" }), /do not match this controller session/);
+  assert.throws(() => applyXyLock({}, lock, { MPos: "0.000,0.000,-22.759,0.000" }), /origin does not match this controller session/);
 });

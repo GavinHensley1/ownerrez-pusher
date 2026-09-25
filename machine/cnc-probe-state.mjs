@@ -80,9 +80,13 @@ export function calibrationFromSetup(setup, status, now = new Date().toISOString
   });
 }
 
-export function applyProbeLock(setup, raw, status, toleranceMm = 0.05) {
+export function applyProbeLock(setup, raw, status, toleranceMm = 0.05, workOffset) {
   const lock = validateProbeLock(raw), current = machinePosition(status);
-  if (!positionContinuous(lock.lastKnownMPos, current, toleranceMm)) {
+  const offsetZ = Number(workOffset?.Z);
+  if (workOffset && (!Number.isFinite(offsetZ) || Math.abs(lock.zOriginMPos - offsetZ) > toleranceMm)) {
+    throw new Error(`Saved probe Z origin does not match this controller session (saved ${lock.zOriginMPos}; current ${Number.isFinite(offsetZ) ? offsetZ : "?"})`);
+  }
+  if (!workOffset && !positionContinuous(lock.lastKnownMPos, current, toleranceMm)) {
     const saved = lock.lastKnownMPos, actual = current || {};
     throw new Error(`Saved probe coordinates do not match this controller session (saved ${saved.X},${saved.Y},${saved.Z}; current ${actual.X ?? "?"},${actual.Y ?? "?"},${actual.Z ?? "?"})`);
   }

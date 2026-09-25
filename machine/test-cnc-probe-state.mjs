@@ -32,6 +32,19 @@ test("probe lock rejects power-cycle coordinate discontinuity and malformed dept
   assert.throws(() => validateProbeLock({ ...lock, maxCutDepthMm: 6 }), /maximum cut depth is invalid/);
 });
 
+test("probe lock restores after ordinary movement when G54 Z origin is unchanged", () => {
+  const lock = calibrationFromSetup(setup, status);
+  const target = {};
+  applyProbeLock(target, lock, { MPos: "-154.410,108.923,-14.900,0.000" }, 0.05, { X: -207.685, Y: -25, Z: -14.859 });
+  assert.equal(target.probeLocked, true);
+  assert.equal(target.zOriginMPos, -14.859);
+});
+
+test("probe lock rejects a changed G54 Z origin", () => {
+  const lock = calibrationFromSetup(setup, status);
+  assert.throws(() => applyProbeLock({}, lock, { MPos: "-154.410,108.923,-14.900,0.000" }, 0.05, { X: -207.685, Y: -25, Z: -20 }), /Z origin does not match/);
+});
+
 test("locked probe rejects Z motion below the protected floor", () => {
   const locked = { ...setup, probeLocked: true };
   assert.deepEqual(assertLockedProbeZJog(locked, { MPos: "-116.685,0.000,-14.859,0.000" }, -5).target, -19.859);

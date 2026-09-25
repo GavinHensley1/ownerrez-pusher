@@ -2,7 +2,7 @@ import http from "node:http";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { GrblTcpController, coordinates, parseStatus, VirtualWorkspace } from "./cnc-controller.mjs";
+import { GrblTcpController, coordinates, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
 import { measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 import { cameraBridgeFresh } from "./cnc-camera-diagnostics.mjs";
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
@@ -86,10 +86,10 @@ const persistLockedXy = (status) => {
   setup.xyLockedAt = lock.lockedAt;
   return lock;
 };
-const restoreLockedXy = (status) => {
+const restoreLockedXy = (status, workOffset) => {
   const raw = readXyLock(XY_STATE_PATH);
   if (!raw) return null;
-  try { return applyXyLock(setup, raw, status); }
+  try { return applyXyLock(setup, raw, status, 0.05, workOffset); }
   catch (error) {
     setup.xyReady = false;
     setup.xyLockStatus = `rejected: ${error.message}`;
@@ -105,10 +105,10 @@ const persistLockedProbe = (status) => {
   setup.probeLockedAt = lock.lockedAt;
   return lock;
 };
-const restoreLockedProbe = (status) => {
+const restoreLockedProbe = (status, workOffset) => {
   const raw = readProbeLock(PROBE_STATE_PATH);
   if (!raw) return null;
-  try { return applyProbeLock(setup, raw, status); }
+  try { return applyProbeLock(setup, raw, status, 0.05, workOffset); }
   catch (error) {
     setup.probeLocked = false;
     setup.probeLockStatus = `rejected: ${error.message}`;
@@ -144,8 +144,16 @@ const recoverIdleConnection = async () => {
     const startupStatus = await readStatus();
     await restoreHardLimitsOnStartup(startupStatus);
     if (!controller.connected) throw new Error("Controller disconnected during startup safety check");
-    restoreLockedXy(startupStatus);
-    restoreLockedProbe(startupStatus);
+    if (startupStatus.state !== "Idle") {
+      setup.xyLockStatus = `rejected: controller startup state ${startupStatus.state} requires explicit recovery`;
+      setup.probeLockStatus = `rejected: controller startup state ${startupStatus.state} requires explicit recovery`;
+      workspace.clear();
+      incident = undefined;
+      return;
+    }
+    const workOffset = parseWorkOffset(await controller.query("$#"));
+    restoreLockedXy(startupStatus, workOffset);
+    restoreLockedProbe(startupStatus, workOffset);
     rebuildWorkspaceFromSetup();
     incident = undefined;
   })().catch((error) => {

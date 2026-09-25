@@ -37,11 +37,15 @@ export function xyLockFromSetup(setup, status, now = new Date().toISOString()) {
   });
 }
 
-export function applyXyLock(setup, raw, status, toleranceMm = 0.05) {
+export function applyXyLock(setup, raw, status, toleranceMm = 0.05, workOffset) {
   const lock = validateXyLock(raw), current = machinePosition(status);
-  if (!xyContinuous(lock.lastKnownMPos, current, toleranceMm)) {
-    const saved = lock.lastKnownMPos, actual = current || {};
-    throw new Error(`Saved X/Y coordinates do not match this controller session (saved ${saved.X},${saved.Y}; current ${actual.X ?? "?"},${actual.Y ?? "?"})`);
+  const reference = workOffset && finite(workOffset.X) && finite(workOffset.Y)
+    ? { X: Number(workOffset.X), Y: Number(workOffset.Y) }
+    : current;
+  const expected = workOffset ? lock.xyOriginMPos : lock.lastKnownMPos;
+  if (!xyContinuous(expected, reference, toleranceMm)) {
+    const actual = reference || {};
+    throw new Error(`Saved X/Y origin does not match this controller session (saved ${expected.X},${expected.Y}; current ${actual.X ?? "?"},${actual.Y ?? "?"})`);
   }
   Object.assign(setup, {
     xyReady: true,

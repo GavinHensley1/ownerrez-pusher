@@ -5,6 +5,15 @@ import { analyzeProgram } from "./cnc-program.mjs";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = () => Date.now();
 
+export function parseWorkOffset(lines, name = "G54") {
+  const prefix = String(name || "G54").toUpperCase();
+  const match = (Array.isArray(lines) ? lines : []).map((line) => String(line).match(new RegExp(`^\\[${prefix}:([^\\]]+)\\]$`))).find(Boolean);
+  if (!match) throw new Error(`${prefix} work offset is unavailable`);
+  const values = match[1].split(",").slice(0, 3).map(Number);
+  if (values.length !== 3 || values.some((value) => !Number.isFinite(value))) throw new Error(`${prefix} work offset is invalid`);
+  return { X: values[0], Y: values[1], Z: values[2] };
+}
+
 export class GrblTcpController extends EventEmitter {
   constructor({ host, port = 10086, connectTimeoutMs = 5000, statusTimeoutMs = 800, commandTimeoutMs = 4000, motionGuard, workspaceGuard, programGuard, maxJogMm = 25, maxJogFeed = 500, maxSessionTravelMm = 2000, maxSpindleTestRpm = 2000, maxSpindleTestMs = 5000 } = {}) {
     super();
