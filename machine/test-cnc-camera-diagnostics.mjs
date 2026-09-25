@@ -23,8 +23,8 @@ test("publisher selects only the exact analyzed frame", () => {
   parseDiagnosticLine(state, "frame:1 pblack:100 pts:1 t:1", 200);
   parseDiagnosticLine(state, "[Parsed_showinfo_4 @ 0x1] n: 1 pts:1", 200);
   const candidate = selectAnalyzedCandidate([{ sequence: 1 }, { sequence: 2 }], state);
-  assert.equal(candidate.sequence, 2);
-  assert.equal(state.blackFrames.includes(candidate.sequence - 1), true);
+  assert.equal(candidate.sequence, 1);
+  assert.equal(state.blackFrames.includes(candidate.sequence), true);
 });
 
 test("tracks scene changes", () => {

@@ -17,6 +17,8 @@
     <string>op://Boxer/Eufy Cloud Account/username</string>
     <key>CNC_CAMERA_OP_PASSWORD_REF</key>
     <string>op://Boxer/Eufy Cloud Account/password</string>
+    <key>CNC_CAMERA_KEYCHAIN_HELPER</key>
+    <string>/Users/gavinsclaude/.openclaw/tools/cnc-keychain-helper</string>
     <key>CNC_CAMERA_OP_TOKEN_SERVICE</key>
     <string>com.openclaw.1password.service-account</string>
     <key>CNC_CAMERA_OP_TOKEN_ACCOUNT</key>
@@ -25,6 +27,10 @@
     <string>1</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>/Users/gavinsclaude</string>
+    <key>TMPDIR</key>
+    <string>/var/folders/jt/b9sx3x156lg1bnhf52wb1v500000gn/T/</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

@@ -1,6 +1,6 @@
 import http from "node:http";
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, openSync, closeSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, openSync, closeSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { cameraFresh, consumeDiagnosticChunk, createDiagnostics, selectAnalyzedCandidate } from "./cnc-camera-diagnostics.mjs";
@@ -19,6 +19,7 @@ const RUN_DIR = process.env.CNC_CAMERA_RUN_DIR || "/Users/gavinsclaude/.openclaw
 const FRAME_PATH = path.join(RUN_DIR, "latest.jpg");
 const FFMPEG = process.env.FFMPEG_PATH || "/opt/homebrew/bin/ffmpeg";
 const OP = process.env.OP_PATH || "/opt/homebrew/bin/op";
+const KEYCHAIN_HELPER = process.env.CNC_CAMERA_KEYCHAIN_HELPER || "/Users/gavinsclaude/.openclaw/tools/cnc-keychain-helper";
 const TARGET_FPS = Number(process.env.CNC_CAMERA_FPS || 1);
 const MAX_FRAME_AGE_MS = 3000;
 
@@ -41,14 +42,18 @@ ensurePrivateDirectory(PERSISTENT_DIR);
 ensurePrivateDirectory(RUN_DIR);
 
 const stripCommandNewline = (value) => String(value).replace(/\r?\n$/, "");
-const keychainRead = (service, account) => stripCommandNewline(execFileSync("/usr/bin/security", [
-  "find-generic-password", "-s", service, "-a", account, "-w",
-], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 }));
+const keychainRead = (service, account) => stripCommandNewline(execFileSync(
+  existsSync(KEYCHAIN_HELPER) ? KEYCHAIN_HELPER : "/usr/bin/security",
+  existsSync(KEYCHAIN_HELPER)
+    ? ["get", service, account]
+    : ["find-generic-password", "-s", service, "-a", account, "-w"],
+  { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 },
+));
 
 const opRead = (ref, token) => stripCommandNewline(execFileSync(OP, ["read", ref, "--no-newline"], {
   encoding: "utf8",
   stdio: ["ignore", "pipe", "ignore"],
-  timeout: 10_000,
+  timeout: 5_000,
   env: {
     HOME: process.env.HOME,
     TMPDIR: process.env.TMPDIR,
@@ -58,6 +63,7 @@ const opRead = (ref, token) => stripCommandNewline(execFileSync(OP, ["read", ref
 }));
 
 const credentials = () => {
+  let serviceAccountFailed = false;
   try {
     if (OP_USERNAME_REF && OP_PASSWORD_REF) {
       const token = keychainRead(OP_TOKEN_SERVICE, OP_TOKEN_ACCOUNT);
@@ -66,13 +72,19 @@ const credentials = () => {
       if (!username || !password) throw new Error("empty service-account result");
       return { username, password, source: "1password-service-account" };
     }
+  } catch {
+    serviceAccountFailed = true;
+  }
+  try {
     const username = keychainRead(DIRECT_KEYCHAIN_SERVICE, "username");
     const password = keychainRead(DIRECT_KEYCHAIN_SERVICE, "password");
     if (!username || !password) throw new Error("empty Keychain result");
-    return { username, password, source: "macos-keychain" };
+    return { username, password, source: serviceAccountFailed ? "macos-keychain-cache" : "macos-keychain" };
   } catch {
     state = "awaiting_credentials";
-    detail = OP_USERNAME_REF ? "Missing or unusable 1Password service-account token" : `Missing macOS Keychain items for ${DIRECT_KEYCHAIN_SERVICE}`;
+    detail = serviceAccountFailed
+      ? "1Password service account unavailable and no cached camera credentials"
+      : `Missing macOS Keychain items for ${DIRECT_KEYCHAIN_SERVICE}`;
     return null;
   }
 };
@@ -121,7 +133,7 @@ const publishFrames = (ownedGeneration, generationDir, ownedDiagnostics) => {
       .sort((a, b) => a.sequence - b.sequence);
     const candidate = selectAnalyzedCandidate(candidates, ownedDiagnostics);
     if (!candidate) return;
-    const analyzedFrame = candidate.sequence - 1;
+    const analyzedFrame = candidate.sequence;
     const source = path.join(generationDir, candidate.name);
     try {
       const sourceProducedAt = statSync(source).mtimeMs;

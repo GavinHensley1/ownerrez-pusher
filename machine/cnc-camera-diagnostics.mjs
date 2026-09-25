@@ -37,7 +37,7 @@ export const consumeDiagnosticChunk = (diagnostics, remainder, chunk, now = Date
 
 export const selectAnalyzedCandidate = (candidates, diagnostics) => {
   if (!Number.isFinite(diagnostics?.lastAnalyzedFrame)) return null;
-  return candidates.find((entry) => entry.sequence - 1 === diagnostics.lastAnalyzedFrame) || null;
+  return candidates.find((entry) => entry.sequence === diagnostics.lastAnalyzedFrame) || null;
 };
 
 export const cameraFresh = ({ state, monitoring, lastFrameAt, frameAgeMs, diagnostics }, now = Date.now(), maxAgeMs = 3000) => {
