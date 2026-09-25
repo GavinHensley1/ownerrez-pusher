@@ -2801,8 +2801,8 @@ if(action==="email_recipients"){
               if(act==="jog"){
                 const axis=String(b.axis||"").toUpperCase(), distance=Number(b.distanceMm), feed=Number(b.feedMmPerMin);
                 if(["X","Y","Z"].indexOf(axis)===-1) return res.status(400).json({error:"Jog axis must be X, Y, or Z",cnc:st});
-                const maxStep=100;
-                if(!Number.isFinite(distance)||distance===0||Math.abs(distance)>maxStep) return res.status(400).json({error:"Jog step is outside the safe per-click limit",cnc:st});
+                const maxStep=axis==="Z"?5:100;
+                if(!Number.isFinite(distance)||distance===0||Math.abs(distance)>maxStep) return res.status(400).json({error:axis==="Z"?"Z jogs are limited to 5 mm per click":"Jog step is outside the safe per-click limit",cnc:st});
                 if(!Number.isFinite(feed)||feed<20||feed>(axis==="Z"?150:400)) return res.status(400).json({error:"Jog feed is outside the safe range",cnc:st});
                 cmd.axis=axis; cmd.distanceMm=Number(distance.toFixed(3)); cmd.feedMmPerMin=Math.round(feed);
               }

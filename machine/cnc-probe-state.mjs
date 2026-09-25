@@ -43,6 +43,23 @@ export function positionContinuous(saved, current, toleranceMm = 0.05) {
   return ["X", "Y", "Z"].every((axis) => Math.abs(Number(saved[axis]) - Number(current[axis])) <= toleranceMm);
 }
 
+export function lockedProbeZRange(setup) {
+  if (!setup?.probeLocked) return null;
+  const stock = Number(setup.stockSurfaceMPos), depth = Number(setup.maxCutDepthMm);
+  if (!Number.isFinite(stock) || !Number.isFinite(depth) || depth <= 0) throw new Error("Locked probe Z limits are unavailable");
+  return { min: stock - depth, max: stock + 6 };
+}
+
+export function assertLockedProbeZJog(setup, status, distanceMm) {
+  const range = lockedProbeZRange(setup);
+  if (!range) return null;
+  const current = machinePosition(status), distance = Number(distanceMm);
+  if (!current || !Number.isFinite(distance)) throw new Error("Cannot validate the locked Z move");
+  const target = current.Z + distance;
+  if (target < range.min - 0.001 || target > range.max + 0.001) throw new Error(`Z target ${target.toFixed(3)} exceeds locked probe range ${range.min.toFixed(3)}..${range.max.toFixed(3)}`);
+  return { current: current.Z, target, ...range };
+}
+
 export function calibrationFromSetup(setup, status, now = new Date().toISOString()) {
   const lastKnownMPos = machinePosition(status);
   if (!lastKnownMPos) throw new Error("Cannot lock probe calibration without a valid machine position");

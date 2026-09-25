@@ -14,6 +14,7 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   for (const id of ["cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
   assert.match(html, /machineAction:'jog'/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
+  assert.match(html, /Z is limited to 5 mm per click/);
   assert.match(html, /probe_bed/);
   assert.match(html, /probe_stock/);
   assert.match(html, /lock_probe/);
@@ -35,7 +36,8 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /Lock the probe calibration before Start/);
   assert.match(api, /Probe calibration is locked; unlock it before re-probing/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
-  assert.match(api, /const maxStep=100/);
+  assert.match(api, /const maxStep=axis==="Z"\?5:100/);
+  assert.match(api, /Z jogs are limited to 5 mm per click/);
   assert.doesNotMatch(api, /fetch\(murl/);
 });
 

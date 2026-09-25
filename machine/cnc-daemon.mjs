@@ -5,13 +5,15 @@ import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, VirtualWorkspace } from "./cnc-controller.mjs";
 import { measuredStockProtection, validateProgramEnvelope } from "./cnc-program.mjs";
 import { cameraBridgeFresh } from "./cnc-camera-diagnostics.mjs";
-import { applyProbeLock, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
+import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
+import { applyXyLock, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
 const CAMERA = process.env.CNC_CAMERA_BRIDGE || "http://127.0.0.1:47831";
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
 const PROBE_STATE_PATH = process.env.CNC_PROBE_STATE || join(homedir(), ".openclaw", "state", "cnc-probe-calibration.json");
+const XY_STATE_PATH = process.env.CNC_XY_STATE || join(homedir(), ".openclaw", "state", "cnc-xy-origin.json");
 const CAMERA_MAX_AGE_MS = 3000;
 const CAMERA_REQUIRED = /^(1|true|yes)$/i.test(process.env.CNC_CAMERA_REQUIRED || "1");
 const MAX_BODY_BYTES = 900_000;
@@ -21,7 +23,7 @@ let reconnectPromise;
 let nextReconnectAt = 0;
 const RECONNECT_BACKOFF_MS = 10_000;
 const workspace = new VirtualWorkspace();
-const setup = { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
+const setup = { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
 const job = { state: "idle", jobId: null, progress: 0, message: "", updatedAt: null };
 
 const json = (res, status, value) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
@@ -69,7 +71,31 @@ const programGuard = async ({ analysis }) => {
 
 controller = new GrblTcpController({ host: HOST, port: PORT, statusTimeoutMs: 600, commandTimeoutMs: 15_000, motionGuard, workspaceGuard: (request) => workspace.assertJog(request), programGuard, maxJogMm: 25, maxJogFeed: 500, maxSessionTravelMm: 2000, maxSpindleTestRpm: 2000 });
 controller.on("programProgress", (value) => Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() }));
-const clearSetup = () => Object.assign(setup, { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const clearSetup = () => Object.assign(setup, { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const clearProbeSetup = (status = "unlocked_reprobe_required") => Object.assign(setup, { bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: status, probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const rebuildWorkspaceFromSetup = () => {
+  if (!setup.xyReady || !setup.probeReady || !Number.isFinite(setup.xyOriginMPos?.X) || !Number.isFinite(setup.xyOriginMPos?.Y) || !Number.isFinite(setup.zOriginMPos) || !Number.isFinite(setup.maxCutDepthMm)) { workspace.clear(); return null; }
+  return workspace.setBounds({ X: { min: setup.xyOriginMPos.X, max: setup.xyOriginMPos.X + 360 }, Y: { min: setup.xyOriginMPos.Y, max: setup.xyOriginMPos.Y + 360 }, Z: { min: setup.zOriginMPos - setup.maxCutDepthMm, max: setup.zOriginMPos + 6 } });
+};
+const persistLockedXy = (status) => {
+  if (!setup.xyReady) return null;
+  const lock = xyLockFromSetup(setup, status);
+  writeXyLock(XY_STATE_PATH, lock);
+  setup.xyLockStatus = "locked";
+  setup.xyLockedAt = lock.lockedAt;
+  return lock;
+};
+const restoreLockedXy = (status) => {
+  const raw = readXyLock(XY_STATE_PATH);
+  if (!raw) return null;
+  try { return applyXyLock(setup, raw, status); }
+  catch (error) {
+    setup.xyReady = false;
+    setup.xyLockStatus = `rejected: ${error.message}`;
+    setup.updatedAt = new Date().toISOString();
+    return null;
+  }
+};
 const persistLockedProbe = (status) => {
   if (!setup.probeLocked) return null;
   const lock = calibrationFromSetup(setup, status);
@@ -117,7 +143,9 @@ const recoverIdleConnection = async () => {
     const startupStatus = await readStatus();
     await restoreHardLimitsOnStartup(startupStatus);
     if (!controller.connected) throw new Error("Controller disconnected during startup safety check");
+    restoreLockedXy(startupStatus);
     restoreLockedProbe(startupStatus);
+    rebuildWorkspaceFromSetup();
     incident = undefined;
   })().catch((error) => {
     incident = `CONNECT_FAILED:${error?.message || "unknown"}`;
@@ -149,10 +177,14 @@ const jog = async (axis, payload) => {
   moving = true; incident = undefined;
   try {
     await motionGuard();
+    const distance = Number(payload.distanceMm);
+    if (axis === "Z" && (!Number.isFinite(distance) || Math.abs(distance) > 5)) throw new Error("Z jogs are limited to 5 mm per Project command");
+    if (axis === "Z" && setup.probeLocked) assertLockedProbeZJog(setup, await assertIdle(), distance);
     const manualPositioning = Boolean(payload.manualPositioning);
     const calibration = manualPositioning && !workspace.snapshot().calibrated;
     const result = await controller.jog(axis, payload.distanceMm, payload.feedMmPerMin, { calibration });
     lastControllerStatus = result.after;
+    persistLockedXy(result.after);
     persistLockedProbe(result.after);
     return result;
   }
@@ -168,11 +200,9 @@ const setXyZero = async () => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   await motionGuard(); const before = await assertIdle(); await controller.setWorkOffset({ x: 0, y: 0 });
   setup.xyOriginMPos = coordinates(before); setup.xyReady = true; setup.updatedAt = new Date().toISOString();
-  const p=setup.xyOriginMPos, prior=workspace.snapshot().bounds;
-  const zBounds=setup.probeReady&&Number.isFinite(setup.zOriginMPos)&&Number.isFinite(setup.maxCutDepthMm)
-    ?{min:setup.zOriginMPos-setup.maxCutDepthMm,max:setup.zOriginMPos+6}
-    :(prior?.Z||{min:p.Z-68,max:p.Z+6});
-  workspace.setBounds({ X:{min:p.X,max:p.X+360}, Y:{min:p.Y,max:p.Y+360}, Z:zBounds });
+  setup.xyLockStatus = "locked";
+  persistLockedXy(before);
+  rebuildWorkspaceFromSetup();
   persistLockedProbe(before);
   return { setup: { ...setup }, status: before };
 };
@@ -211,12 +241,8 @@ const probeSurface = async (kind, payload) => {
       setup.probeLockStatus = "ready_to_lock";
     }
     setup.updatedAt = new Date().toISOString(); lastControllerStatus = result.after;
-    if (setup.xyReady) {
-      const p=setup.xyOriginMPos||coordinates(result.after), prior=workspace.snapshot().bounds;
-      const zOrigin = Number.isFinite(setup.zOriginMPos) ? setup.zOriginMPos : surfaceZ;
-      const zDepth = Number.isFinite(setup.maxCutDepthMm) ? setup.maxCutDepthMm : 5;
-      workspace.setBounds({ X:prior?.X||{min:p.X,max:p.X+360}, Y:prior?.Y||{min:p.Y,max:p.Y+360}, Z:{min:zOrigin-zDepth,max:zOrigin+6} });
-    }
+    rebuildWorkspaceFromSetup();
+    persistLockedXy(result.after);
     return { ...result, setup: { ...setup } };
   } catch (error) { incident = error?.message || "PROBE_FAILED"; throw error; } finally { moving = false; }
 };
@@ -237,16 +263,14 @@ const unlockProbeCalibration = async (payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   await assertIdle();
   removeProbeLock(PROBE_STATE_PATH);
-  setup.probeLocked = false;
-  setup.probeLockStatus = "unlocked";
-  setup.probeLockedAt = null;
-  setup.updatedAt = new Date().toISOString();
+  clearProbeSetup();
+  workspace.clear();
   return { ok: true, setup: { ...setup } };
 };
 const startProgram = async ({ jobId, gcode }) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
-  try { const result = await controller.runProgram(gcode, { onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
+  try { const result = await controller.runProgram(gcode, { onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); throw error; } finally { moving = false; }
 };
 const bodyJson = async (req) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY_BYTES) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
@@ -257,7 +281,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/observe") return json(res, 200, await observe());
     if (req.method === "POST" && req.url === "/query") { const { command } = await bodyJson(req); return json(res, 200, { command, lines: await controller.query(command) }); }
     if (req.method === "POST" && /^\/jog\/[xyz]$/.test(req.url)) return json(res, 200, await jog(req.url.at(-1).toUpperCase(), await bodyJson(req)));
-    if (req.method === "POST" && req.url === "/workspace/set") { setup.xyReady = false; setup.xyOriginMPos = null; setup.updatedAt = new Date().toISOString(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
+    if (req.method === "POST" && req.url === "/workspace/set") { removeXyLock(XY_STATE_PATH); setup.xyReady = false; setup.xyLockStatus = "unlocked"; setup.xyLockedAt = null; setup.xyOriginMPos = null; setup.updatedAt = new Date().toISOString(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
     if (req.method === "POST" && req.url === "/zero/xy") return json(res, 200, await setXyZero());
     if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));
