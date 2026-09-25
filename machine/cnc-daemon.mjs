@@ -90,8 +90,8 @@ const recoverIdleConnection = async () => {
   nextReconnectAt = Date.now() + RECONNECT_BACKOFF_MS;
   reconnectPromise = (async () => {
     await controller.resetConnection();
-    await readStatus();
-    await restoreHardLimitsOnStartup();
+    const startupStatus = await readStatus();
+    await restoreHardLimitsOnStartup(startupStatus);
     if (!controller.connected) throw new Error("Controller disconnected during startup safety check");
     incident = undefined;
   })().catch((error) => {
@@ -215,14 +215,27 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/job/stop") { await controller.stopProgramNow(); Object.assign(job, { state: "stopped", message: "Stopped", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
     if (req.method === "POST" && req.url === "/spindle/test") return json(res, 200, await spindleTest());
     if (req.method === "POST" && req.url === "/spindle/stop") { const lines = await controller.spindleOff(); lastControllerStatus = await readStatus(); return json(res, 200, { lines, status: lastControllerStatus }); }
+    if (req.method === "POST" && req.url === "/controller/acknowledge-power-on") {
+      const payload = await bodyJson(req);
+      if (payload.powerCycleConfirmed !== true) throw new Error("Power-cycle confirmation is required");
+      if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
+      const result = await controller.acknowledgePowerOnDoor();
+      lastControllerStatus = result.after;
+      await restoreHardLimitsOnStartup(result.after);
+      incident = undefined;
+      return json(res, 200, result);
+    }
     return json(res, 404, { ok: false, error: "Not found" });
   } catch (error) { return json(res, 500, { ok: false, error: error?.message || "Error" }); }
 });
 
-const restoreHardLimitsOnStartup = async () => {
+const restoreHardLimitsOnStartup = async (knownStatus) => {
   try {
+    const state = knownStatus?.state || (await readStatus()).state;
+    if (new Set(["Door", "Hold"]).has(String(state).split(":")[0])) return { skipped: true, state };
     const lines = await controller.query("$$");
     if (lines.some((line) => /^\$21=0(?:\s|$)/.test(line))) await controller.setBooleanSetting(21, true);
+    return { skipped: false, state };
   } catch (error) {
     incident = `STARTUP_SAFETY_CHECK_FAILED:${error?.message || "unknown"}`;
   }

@@ -215,6 +215,40 @@ export class GrblTcpController extends EventEmitter {
 
   spindleOff() { return this.#enqueue(() => this.#lineCommandUnlocked("M5", true)); }
 
+  acknowledgePowerOnDoor() {
+    return this.#enqueue(async () => {
+      if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for controller readiness");
+      if (this.programRunning) throw new Error("Cannot acknowledge the safety door while a program is active");
+      await this.motionGuard();
+      const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      if (before.state === "Idle") return { alreadyIdle: true, before, after: before };
+      if (before.state !== "Door:0") throw new Error(`Controller must be Door:0 or Idle, got ${before.state}`);
+      const [feed, spindle] = feedAndSpindle(before);
+      if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before door acknowledgment: ${before.FS}`);
+      if (before.Pn) throw new Error(`Active input pins before door acknowledgment: ${before.Pn}`);
+
+      this.socket.write("~");
+      const deadline = now() + 5_000;
+      const samples = [];
+      while (now() < deadline) {
+        await this.motionGuard();
+        const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
+        samples.push(status.raw);
+        if (status.state === "Idle") {
+          const [afterFeed, afterSpindle] = feedAndSpindle(status);
+          if (afterFeed !== 0 || afterSpindle !== 0) throw new Error(`Non-zero feed/spindle after door acknowledgment: ${status.FS}`);
+          return { before, after: status, samples };
+        }
+        if (!new Set(["Door", "Hold"]).has(status.state.split(":")[0])) {
+          await this.#emergencyStop(`UNEXPECTED_DOOR_ACK_STATE:${status.raw}`);
+          throw this.fault;
+        }
+        await sleep(150);
+      }
+      throw new Error("Controller did not become Idle after door acknowledgment");
+    });
+  }
+
   async #booleanSettingUnlocked(setting) {
     const lines = await this.#lineCommandUnlocked("$$", false);
     const match = lines.map((line) => line.match(new RegExp(`^\\$${Number(setting)}=(0|1)(?:\\s|$)`))).find(Boolean);

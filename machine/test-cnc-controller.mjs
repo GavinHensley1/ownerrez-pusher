@@ -3,8 +3,8 @@ import net from "node:net";
 import test from "node:test";
 import { GrblTcpController, parseStatus, VirtualWorkspace } from "./cnc-controller.mjs";
 
-const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, startProbeAlarm = false } = {}) => {
-  let connections = 0, statusQueries = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true;
+const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, startProbeAlarm = false, startDoor = false } = {}) => {
+  let connections = 0, statusQueries = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm, door = startDoor, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true;
   const writes = [];
   const server = net.createServer((socket) => {
     connections += 1;
@@ -13,11 +13,12 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
       writes.push(Buffer.from(chunk));
       for (const byte of chunk) {
         const char = String.fromCharCode(byte);
-        if (byte === 0x85 || byte === 0x9e || byte === 0x18 || char === "!" || char === "~") { jogging = false; continue; }
+        if (byte === 0x85 || byte === 0x9e || byte === 0x18 || char === "!") { jogging = false; continue; }
+        if (char === "~") { jogging = false; door = false; continue; }
         if (char === "?") {
           statusQueries += 1;
           if (ignoreFirstStatus && statusQueries === 1) continue;
-          let state = alarmed ? "Alarm" : "Idle";
+          let state = alarmed ? "Alarm" : door ? "Door:0" : "Idle";
           if (jogging) { state = "Jog"; jogPolls += 1; if (!jogNeverIdles && jogPolls >= 2) { jogging = false; state = "Idle"; } }
           if (homing) {
             state = "Home"; homePolls += 1;
@@ -28,7 +29,7 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
             }
           }
           const pins = `${probeActive ? "P" : ""}${zLimitActive ? "Z" : ""}`;
-          socket.write(`<${state}|MPos:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}|FS:${state === "Idle" || state === "Alarm" ? `0,${spindle}` : "100,0"}${pins ? `|Pn:${pins}` : ""}>${delimiter}`);
+          socket.write(`<${state}|MPos:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}|FS:${state === "Idle" || state === "Alarm" || state.startsWith("Door") ? `0,${spindle}` : "100,0"}${pins ? `|Pn:${pins}` : ""}>${delimiter}`);
         } else {
           buffer += char;
           if (char === "\r") {
@@ -165,6 +166,15 @@ test("spindle test is camera-guarded, capped, timed, and verifies stop", async (
   const result = await c.spindleTest(1000, 250);
   assert.equal(result.running.FS, "0,1000"); assert.equal(result.after.FS, "0,0"); assert(guardCalls >= 3);
   await assert.rejects(() => c.spindleTest(1501, 250), /1-1500/);
+  await c.close(); await mock.close();
+});
+
+test("power-on door acknowledgment is camera-guarded and cannot start motion", async () => {
+  const mock = await makeMock({ startDoor: true }); let guards = 0;
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
+  const result = await c.acknowledgePowerOnDoor();
+  assert.equal(result.before.state, "Door:0"); assert.equal(result.after.state, "Idle"); assert.equal(result.after.FS, "0,0"); assert(guards >= 2);
+  assert(mock.bytes.includes("~".charCodeAt(0))); assert(!mock.bytes.includes(Buffer.from("$J="))); assert(!mock.bytes.includes(Buffer.from("M3")));
   await c.close(); await mock.close();
 });
 
