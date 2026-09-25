@@ -25,6 +25,8 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /recover_probe/);
   assert.match(html, /budget:30000/);
   assert.match(html, /cncGenReliefRegion\(img/);
+  assert.match(html, /job\.reliefSource==='depth'&&job\.hasDepth/);
+  assert.match(html, /artwork source/);
   assert.doesNotMatch(html, /G38\.2/);
   assert.doesNotMatch(html, /rpm:\s*(?:10000|12000|24000)/);
 });
