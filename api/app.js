@@ -2778,22 +2778,26 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","probe_bed","probe_stock","recover_probe","zero_xy","start","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["jog","probe_bed","probe_stock","lock_probe","unlock_probe","recover_probe","zero_xy","start","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, camera=health.camera||{}, ws=health.workspace||{}, setup=health.setup||{};
               if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
               if(act==="probe_stock"&&!setup.bedProbeReady) return res.status(409).json({error:"Probe the exposed bed before probing the stock",cnc:st});
+              if((act==="probe_bed"||act==="probe_stock")&&setup.probeLocked) return res.status(409).json({error:"Probe calibration is locked; unlock it before re-probing",cnc:st});
+              if(act==="lock_probe"&&(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady)) return res.status(409).json({error:"Probe both the bed and stock before locking calibration",cnc:st});
               if(act==="start"){
                 if(!job.hasGcode) return res.status(409).json({error:"Generate the design before Start",cnc:st});
                 if(!ws.calibrated) return res.status(409).json({error:"Virtual machine boundaries are not ready",cnc:st});
                 if(!setup.xyReady) return res.status(409).json({error:"Set X/Y zero before Start",cnc:st});
                 if(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady) return res.status(409).json({error:"Probe both the bed and stock before Start",cnc:st});
+                if(!setup.probeLocked) return res.status(409).json({error:"Lock the probe calibration before Start",cnc:st});
                 if(!(Number(setup.maxCutDepthMm)>0)) return res.status(409).json({error:"Measured no-cut-through depth is unavailable",cnc:st});
               }
               let prior=null; try{const raw=await redis.get("parkside:cnc:command"); prior=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null);}catch(e){}
               if(prior&&act!=="stop") return res.status(409).json({error:"Another CNC command is still pending",cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
               if(act==="probe_bed"||act==="probe_stock")cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
+              if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="jog"){
                 const axis=String(b.axis||"").toUpperCase(), distance=Number(b.distanceMm), feed=Number(b.feedMmPerMin);
                 if(["X","Y","Z"].indexOf(axis)===-1) return res.status(400).json({error:"Jog axis must be X, Y, or Z",cnc:st});

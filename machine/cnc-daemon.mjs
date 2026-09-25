@@ -1,13 +1,17 @@
 import http from "node:http";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, VirtualWorkspace } from "./cnc-controller.mjs";
 import { measuredStockProtection, validateProgramEnvelope } from "./cnc-program.mjs";
 import { cameraBridgeFresh } from "./cnc-camera-diagnostics.mjs";
+import { applyProbeLock, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
 const CAMERA = process.env.CNC_CAMERA_BRIDGE || "http://127.0.0.1:47831";
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
+const PROBE_STATE_PATH = process.env.CNC_PROBE_STATE || join(homedir(), ".openclaw", "state", "cnc-probe-calibration.json");
 const CAMERA_MAX_AGE_MS = 3000;
 const CAMERA_REQUIRED = /^(1|true|yes)$/i.test(process.env.CNC_CAMERA_REQUIRED || "1");
 const MAX_BODY_BYTES = 900_000;
@@ -17,7 +21,7 @@ let reconnectPromise;
 let nextReconnectAt = 0;
 const RECONNECT_BACKOFF_MS = 10_000;
 const workspace = new VirtualWorkspace();
-const setup = { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
+const setup = { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
 const job = { state: "idle", jobId: null, progress: 0, message: "", updatedAt: null };
 
 const json = (res, status, value) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
@@ -52,6 +56,7 @@ const programGuard = async ({ analysis }) => {
   if (!snap.calibrated) throw new Error("Virtual boundaries are not calibrated");
   if (!setup.xyReady) throw new Error("Set X/Y zero before starting");
   if (!setup.bedProbeReady || !setup.stockProbeReady || !setup.probeReady) throw new Error("Probe the bed and stock before starting");
+  if (!setup.probeLocked) throw new Error("Lock the probe calibration before starting");
   if (!Number.isFinite(setup.maxCutDepthMm) || setup.maxCutDepthMm <= 0) throw new Error("Measured stock depth is unavailable");
   validateProgramEnvelope(analysis, { widthMm: 360, heightMm: 360, maxDepthMm: setup.maxCutDepthMm, maxSafeZMm: 6 });
   const origins = { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos };
@@ -64,7 +69,26 @@ const programGuard = async ({ analysis }) => {
 
 controller = new GrblTcpController({ host: HOST, port: PORT, statusTimeoutMs: 600, commandTimeoutMs: 15_000, motionGuard, workspaceGuard: (request) => workspace.assertJog(request), programGuard, maxJogMm: 25, maxJogFeed: 500, maxSessionTravelMm: 2000, maxSpindleTestRpm: 2000 });
 controller.on("programProgress", (value) => Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() }));
-const clearSetup = () => Object.assign(setup, { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const clearSetup = () => Object.assign(setup, { xyReady: false, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const persistLockedProbe = (status) => {
+  if (!setup.probeLocked) return null;
+  const lock = calibrationFromSetup(setup, status);
+  writeProbeLock(PROBE_STATE_PATH, lock);
+  setup.probeLockStatus = "locked";
+  setup.probeLockedAt = lock.lockedAt;
+  return lock;
+};
+const restoreLockedProbe = (status) => {
+  const raw = readProbeLock(PROBE_STATE_PATH);
+  if (!raw) return null;
+  try { return applyProbeLock(setup, raw, status); }
+  catch (error) {
+    setup.probeLocked = false;
+    setup.probeLockStatus = `rejected: ${error.message}`;
+    setup.updatedAt = new Date().toISOString();
+    return null;
+  }
+};
 const hazardousOperationActive = () => moving || ["running", "paused"].includes(job.state);
 const scheduleRestart = () => { if (restartScheduled) return; restartScheduled = true; setTimeout(() => process.exit(1), 750).unref(); };
 controller.on("fault", (error) => {
@@ -93,6 +117,7 @@ const recoverIdleConnection = async () => {
     const startupStatus = await readStatus();
     await restoreHardLimitsOnStartup(startupStatus);
     if (!controller.connected) throw new Error("Controller disconnected during startup safety check");
+    restoreLockedProbe(startupStatus);
     incident = undefined;
   })().catch((error) => {
     incident = `CONNECT_FAILED:${error?.message || "unknown"}`;
@@ -128,6 +153,7 @@ const jog = async (axis, payload) => {
     const calibration = manualPositioning && !workspace.snapshot().calibrated;
     const result = await controller.jog(axis, payload.distanceMm, payload.feedMmPerMin, { calibration });
     lastControllerStatus = result.after;
+    persistLockedProbe(result.after);
     return result;
   }
   catch (error) { incident = error?.message || "JOG_FAILED"; throw error; } finally { moving = false; }
@@ -147,11 +173,13 @@ const setXyZero = async () => {
     ?{min:setup.zOriginMPos-setup.maxCutDepthMm,max:setup.zOriginMPos+6}
     :(prior?.Z||{min:p.Z-68,max:p.Z+6});
   workspace.setBounds({ X:{min:p.X,max:p.X+360}, Y:{min:p.Y,max:p.Y+360}, Z:zBounds });
+  persistLockedProbe(before);
   return { setup: { ...setup }, status: before };
 };
 const probeSurface = async (kind, payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (!new Set(["bed", "stock"]).has(kind)) throw new Error("Unknown probe surface");
+  if (setup.probeLocked) throw new Error("Probe calibration is locked; unlock it before re-probing");
   if (kind === "stock" && !setup.bedProbeReady) throw new Error("Probe the exposed bed before probing the stock");
   moving = true; incident = undefined;
   try {
@@ -165,6 +193,7 @@ const probeSurface = async (kind, payload) => {
       setup.bedProbeReady = true;
       setup.stockProbeReady = false;
       setup.probeReady = false;
+      setup.probeLockStatus = "unlocked";
       setup.stockSurfaceMPos = null;
       setup.stockThicknessMm = null;
       setup.safetyFloorMm = null;
@@ -179,6 +208,7 @@ const probeSurface = async (kind, payload) => {
       setup.zOriginMPos = surfaceZ;
       setup.stockProbeReady = true;
       setup.probeReady = true;
+      setup.probeLockStatus = "ready_to_lock";
     }
     setup.updatedAt = new Date().toISOString(); lastControllerStatus = result.after;
     if (setup.xyReady) {
@@ -190,10 +220,33 @@ const probeSurface = async (kind, payload) => {
     return { ...result, setup: { ...setup } };
   } catch (error) { incident = error?.message || "PROBE_FAILED"; throw error; } finally { moving = false; }
 };
+const lockProbeCalibration = async () => {
+  if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
+  if (!setup.bedProbeReady || !setup.stockProbeReady || !setup.probeReady) throw new Error("Probe both the bed and stock before locking calibration");
+  await motionGuard();
+  const status = await assertIdle();
+  setup.probeLocked = true;
+  setup.probeLockStatus = "locked";
+  setup.probeLockedAt = new Date().toISOString();
+  setup.updatedAt = setup.probeLockedAt;
+  const lock = persistLockedProbe(status);
+  return { ok: true, setup: { ...setup }, lock: { lockedAt: lock.lockedAt, lastKnownMPos: lock.lastKnownMPos } };
+};
+const unlockProbeCalibration = async (payload) => {
+  if (payload.confirm !== true) throw new Error("Explicit unlock confirmation is required");
+  if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
+  await assertIdle();
+  removeProbeLock(PROBE_STATE_PATH);
+  setup.probeLocked = false;
+  setup.probeLockStatus = "unlocked";
+  setup.probeLockedAt = null;
+  setup.updatedAt = new Date().toISOString();
+  return { ok: true, setup: { ...setup } };
+};
 const startProgram = async ({ jobId, gcode }) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
-  try { const result = await controller.runProgram(gcode, { onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
+  try { const result = await controller.runProgram(gcode, { onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); throw error; } finally { moving = false; }
 };
 const bodyJson = async (req) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY_BYTES) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
@@ -204,10 +257,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/observe") return json(res, 200, await observe());
     if (req.method === "POST" && req.url === "/query") { const { command } = await bodyJson(req); return json(res, 200, { command, lines: await controller.query(command) }); }
     if (req.method === "POST" && /^\/jog\/[xyz]$/.test(req.url)) return json(res, 200, await jog(req.url.at(-1).toUpperCase(), await bodyJson(req)));
-    if (req.method === "POST" && req.url === "/workspace/set") { clearSetup(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
+    if (req.method === "POST" && req.url === "/workspace/set") { setup.xyReady = false; setup.xyOriginMPos = null; setup.updatedAt = new Date().toISOString(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
     if (req.method === "POST" && req.url === "/zero/xy") return json(res, 200, await setXyZero());
     if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/probe/lock") return json(res, 200, await lockProbeCalibration());
+    if (req.method === "POST" && req.url === "/probe/unlock") return json(res, 200, await unlockProbeCalibration(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/recover") return json(res, 200, await controller.recoverProbeContact(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/job/start") return json(res, 200, await startProgram(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/job/pause") { controller.pauseProgramNow(); Object.assign(job, { state: "paused", message: "Paused", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }

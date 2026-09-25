@@ -488,7 +488,7 @@
       <div style="font-weight:600;margin-bottom:7px">Position tool</div>
       <div class="muted" style="font-size:11.5px;margin-bottom:8px">Choose a distance up to 100 mm while watching the machine. Project divides large moves into guarded short segments. X−/X+ move left/right, Y−/Y+ move front/back, and Z−/Z+ move down/up.</div>
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
-        <label class="muted" style="font-size:12px">Move distance<br><select id="cncJogStep" style="width:92px"><option value="1">1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option><option value="25" selected>25 mm</option><option value="50">50 mm</option><option value="100">100 mm</option></select></label>
+        <label class="muted" style="font-size:12px">Move distance<br><select id="cncJogStep" style="width:92px"><option value="1" selected>1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option><option value="25">25 mm</option><option value="50">50 mm</option><option value="100">100 mm</option></select></label>
         <div style="display:grid;grid-template-columns:repeat(3,minmax(52px,1fr));gap:6px;max-width:220px;width:100%">
           <span></span><button class="cncJogBtn" onclick="cncJog('Y',1)">Y+<br><small>back</small></button><span></span>
           <button class="cncJogBtn" onclick="cncJog('X',-1)">X−<br><small>left</small></button><span></span><button class="cncJogBtn" onclick="cncJog('X',1)">X+<br><small>right</small></button>
@@ -502,13 +502,16 @@
       </div>
       <div style="font-weight:600;margin-bottom:7px">Set origin and measure wood</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-        <button id="cncZeroBtn" onclick="cncMachineAction('zero_xy')">Set X/Y zero here</button>
+        <button id="cncZeroBtn" onclick="cncSetXyZero()">Set X/Y zero here</button>
         <button id="cncProbeBedBtn" onclick="cncProbe('bed')">1. Probe bed</button>
         <button id="cncProbeStockBtn" onclick="cncProbe('stock')">2. Probe stock</button>
+        <button id="cncProbeLockBtn" onclick="cncLockProbe()">3. Lock probe calibration</button>
+        <button id="cncProbeUnlockBtn" onclick="cncUnlockProbe()">Unlock calibration</button>
         <button id="cncProbeRecoverBtn" onclick="cncMachineAction('recover_probe')">Retract from probe</button>
         <span id="cncMeasuredStock" class="muted" style="font-size:11.5px">Thickness not measured.</span>
       </div>
-      <div class="muted" style="font-size:11.5px;margin-top:8px">Probe the exposed spoilboard first, then the top of the wood with the same plate and clip. Project calculates thickness and locks out every cut that could reach the bottom.</div>
+      <div id="cncOriginFootprint" style="font-size:12px;margin-top:10px;padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.16)"></div>
+      <div class="muted" style="font-size:11.5px;margin-top:8px">Probe the exposed spoilboard first, then the top of the wood with the same plate and clip. Lock the measurements before removing the plate. X/Y zero is separate: place the bit at the front-left carve origin; the design extends X+ right and Y+ back.</div>
     </div>
     <div style="margin-top:14px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.09);border-radius:10px;padding:13px">
       <div style="font-weight:600;margin-bottom:9px">4 &middot; Run</div>
@@ -1601,7 +1604,7 @@ async function cncRenderActive(){
 function cncRenderAgent(job){
   var as=document.getElementById('cncAgentStatus'), box=document.getElementById('cncReadiness');
   var h=(CNC.agent&&CNC.agent.health)||{}, cam=h.camera||{}, ws=h.workspace||{}, su=h.setup||{};
-  var checks=[['Bridge',!!CNC.agent],['Controller',!!h.connected],['Boundaries',!!ws.calibrated],['X/Y zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady]];
+  var checks=[['Bridge',!!CNC.agent],['Controller',!!h.connected],['Boundaries',!!ws.calibrated],['X/Y zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked]];
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
   var ready=checks.every(function(c){return c[1];});
   var state=job&&job.agentState||'';
@@ -1611,12 +1614,24 @@ function cncRenderAgent(job){
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!['queued','accepted','running','paused'].includes(state);
   var motionBlocked=!CNC.agent||!h.connected||!!h.moving||['queued','accepted','running','paused'].includes(state);
   document.querySelectorAll('.cncJogBtn').forEach(function(btn){btn.disabled=motionBlocked;});
-  var bed=document.getElementById('cncProbeBedBtn'); if(bed) bed.disabled=motionBlocked;
-  var stock=document.getElementById('cncProbeStockBtn'); if(stock) stock.disabled=motionBlocked||!su.bedProbeReady;
-  var measured=document.getElementById('cncMeasuredStock'); if(measured) measured.textContent=su.stockProbeReady?('Measured '+Number(su.stockThicknessMm).toFixed(2)+' mm; protected floor '+Number(su.safetyFloorMm).toFixed(2)+' mm; max cut '+Number(su.maxCutDepthMm).toFixed(2)+' mm.'):'Thickness not measured.';
+  var bed=document.getElementById('cncProbeBedBtn'); if(bed) bed.disabled=motionBlocked||!!su.probeLocked;
+  var stock=document.getElementById('cncProbeStockBtn'); if(stock) stock.disabled=motionBlocked||!su.bedProbeReady||!!su.probeLocked;
+  var lock=document.getElementById('cncProbeLockBtn'); if(lock) lock.disabled=motionBlocked||!!su.probeLocked||!su.bedProbeReady||!su.stockProbeReady;
+  var unlock=document.getElementById('cncProbeUnlockBtn'); if(unlock) unlock.disabled=motionBlocked||!su.probeLocked;
+  var probeInput=document.getElementById('cncProbeThickness'); if(probeInput) probeInput.disabled=!!su.probeLocked;
+  var measured=document.getElementById('cncMeasuredStock'); if(measured) measured.textContent=su.stockProbeReady?((su.probeLocked?'🔒 Locked · ':'Ready to lock · ')+'measured '+Number(su.stockThicknessMm).toFixed(3)+' mm; protected floor '+Number(su.safetyFloorMm).toFixed(3)+' mm; max cut '+Number(su.maxCutDepthMm).toFixed(3)+' mm.'):'Thickness not measured.';
+  cncRenderOriginFootprint(job,su);
   if(!as) return;
   if(job&&state){ var m={queued:'⏳ Command queued',accepted:'⏳ Machine preparing',running:'▶ Machine running'+((job.progress!=null)?(' — '+Math.round(job.progress)+'%'):''),paused:'⏸ Machine paused',stopped:'■ Machine stopped',done:'✅ Carve complete',error:'⚠ Machine error'}[state]||state; as.innerHTML=m+(job.agentMsg?(' <span style="opacity:.7">— '+cncEsc(job.agentMsg)+'</span>'):''); }
   else as.textContent=ready?'Machine is ready. Operator must watch the CNC during the full run.':'Start is locked until every required readiness check is green.';
+}
+function cncRenderOriginFootprint(job,su){
+  var el=document.getElementById('cncOriginFootprint'); if(!el)return;
+  var f=cncFinished(job);
+  if(!f){el.innerHTML='<span class="muted">Generate the design to calculate its required X/Y footprint.</span>';return;}
+  var msg='<b>Required carve footprint:</b> '+Number(f.W).toFixed(1)+' × '+Number(f.H).toFixed(1)+' mm, extending <b>X+ right</b> and <b>Y+ back</b> from the selected front-left origin.';
+  msg+=su&&su.xyReady?' <span style="color:#7ee0ac">✓ X/Y origin set.</span>':' <span style="color:#ffcf79">Move the black bit to the front-left carve origin, verify this full rectangle fits on stock, then set X/Y zero.</span>';
+  el.innerHTML=msg;
 }
 var CNC_POLL=null;
 function cncMaybePoll(){
@@ -1919,13 +1934,16 @@ async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add 
 async function cncStart(){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
   if(!job.hasGcode){ alert('Generate and preview the design before you Start.'); return; }
   var h=(CNC.agent&&CNC.agent.health)||{}, w=h.workspace||{}, s=h.setup||{};
-  if(!CNC.agent||!h.connected||!w.calibrated||!s.xyReady||!s.bedProbeReady||!s.stockProbeReady||!s.probeReady){ alert('Start is locked until Bridge, Controller, Boundaries, X/Y zero, Bed probe, and Stock probe are all green.'); return; }
+  if(!CNC.agent||!h.connected||!w.calibrated||!s.xyReady||!s.bedProbeReady||!s.stockProbeReady||!s.probeReady||!s.probeLocked){ alert('Start is locked until Bridge, Controller, Boundaries, X/Y zero, Bed probe, Stock probe, and Probe lock are all green.'); return; }
   if(!confirm('Start the carve for “'+(job.project||'job')+'”?\nConfirm the glue is fully cured, the stock cannot move, the probe plate and clip are removed, the path is clear, and the e-stop is reachable.')) return;
   var st=document.getElementById('cncRunStatus'); if(st) st.textContent='Starting…';
   var j=await cncPost({jobId:job.id, machineAction:'start'});
   if(j&&j.cnc){ CNC=j.cnc; renderCncJobs(); await cncRenderActive(); if(st) st.textContent='Start queued — the Mac bridge is running preflight checks.'; }
 }
 async function cncMachineAction(action){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; } var st=document.getElementById('cncRunStatus'); if(st) st.textContent=action.replace('_',' ')+'…'; var j=await cncPost({jobId:job.id,machineAction:action}); if(j&&j.cnc){CNC=j.cnc;renderCncJobs();await cncRenderActive();if(st)st.textContent=action.replace('_',' ')+' queued.';} }
+async function cncSetXyZero(){ var job=cncCurrentJob(); if(!job){alert('Pick a job first.');return;} var f=cncFinished(job), footprint=f?(Number(f.W).toFixed(1)+' × '+Number(f.H).toFixed(1)+' mm'):'the generated design'; if(!confirm('Set X/Y zero at the current bit position?\n\nThe current point becomes the FRONT-LEFT carve origin. '+footprint+' will extend X+ right and Y+ back. Confirm that full rectangle fits on the stock and avoids clamps.'))return; return cncMachineAction('zero_xy'); }
+async function cncLockProbe(){ if(!confirm('Lock the measured bed and stock calibration?\n\nThis preserves stock thickness and maximum cut depth across page refreshes and daemon restarts while the controller coordinate session remains continuous. A CNC power cycle or coordinate jump will reject the saved lock.'))return; return cncMachineAction('lock_probe'); }
+async function cncUnlockProbe(){ var job=cncCurrentJob(); if(!job){alert('Pick a job first.');return;} if(!confirm('Unlock the saved probe calibration?\n\nStart will be disabled until the calibration is locked again. Unlock only when you intend to re-probe.'))return; var st=document.getElementById('cncRunStatus'); if(st)st.textContent='Unlocking probe calibration…'; var j=await cncPost({jobId:job.id,machineAction:'unlock_probe',confirm:true}); if(j&&j.cnc){CNC=j.cnc;renderCncJobs();await cncRenderActive();if(st)st.textContent='Unlock queued.';} }
 async function cncJog(axis,dir){
   var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
   axis=String(axis||'').toUpperCase(); var step=cncClamp((document.getElementById('cncJogStep')||{}).value||1,1,100);
