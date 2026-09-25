@@ -145,6 +145,17 @@ test("virtual workspace permits inside jog and rejects barrier crossing", async 
   await c.close(); await mock.close();
 });
 
+test("probe-staging margin extends only the negative X/Y boundary", () => {
+  const workspace = new VirtualWorkspace();
+  workspace.setBounds({ X: { min: -20, max: 20 }, Y: { min: -20, max: 20 }, Z: { min: -10, max: 10 } });
+  const origin = { MPos: "0.000,0.000,0.000,0.000" };
+  assert.equal(workspace.assertJog({ before: origin, axis: "X", distanceMm: -25, negativeMarginMm: 10 }).min, -30);
+  assert.equal(workspace.assertJog({ before: origin, axis: "Y", distanceMm: -25, negativeMarginMm: 10 }).target, -25);
+  assert.throws(() => workspace.assertJog({ before: origin, axis: "X", distanceMm: 21, negativeMarginMm: 10 }), /barrier rejects/);
+  assert.throws(() => workspace.assertJog({ before: origin, axis: "Z", distanceMm: -11, negativeMarginMm: 10 }), /Invalid probe-staging margin/);
+  assert.throws(() => workspace.assertJog({ before: origin, axis: "X", distanceMm: -25, negativeMarginMm: 61 }), /Invalid probe-staging margin/);
+});
+
 test("safe retract bypasses only the upper workspace ceiling for positive Z", async () => {
   const mock = await makeMock();
   const workspace = new VirtualWorkspace();

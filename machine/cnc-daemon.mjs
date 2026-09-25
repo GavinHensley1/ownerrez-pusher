@@ -192,7 +192,8 @@ const jog = async (axis, payload) => {
     const manualPositioning = Boolean(payload.manualPositioning);
     const calibration = manualPositioning && !workspace.snapshot().calibrated;
     const safeRetract = manualPositioning && axis === "Z" && distance > 0;
-    const result = await controller.jog(axis, payload.distanceMm, payload.feedMmPerMin, { calibration, safeRetract });
+    const negativeWorkspaceMarginMm = manualPositioning && new Set(["X", "Y"]).has(axis) ? 60 : 0;
+    const result = await controller.jog(axis, payload.distanceMm, payload.feedMmPerMin, { calibration, safeRetract, negativeWorkspaceMarginMm });
     lastControllerStatus = result.after;
     persistLockedXy(result.after);
     persistLockedProbe(result.after);

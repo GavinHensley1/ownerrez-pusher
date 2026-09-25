@@ -112,7 +112,7 @@ export class GrblTcpController extends EventEmitter {
     return this.#enqueue(() => this.#lineCommandUnlocked(`G10 L20 P1 ${words.join(" ")}`, false));
   }
 
-  jog(axis, distanceMm, feedMmPerMin, { calibration = false, safeRetract = false } = {}) {
+  jog(axis, distanceMm, feedMmPerMin, { calibration = false, safeRetract = false, negativeWorkspaceMarginMm = 0 } = {}) {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for jogging");
       const normalizedAxis = String(axis).toUpperCase();
@@ -121,9 +121,11 @@ export class GrblTcpController extends EventEmitter {
       const formattedFeed = Number(feedMmPerMin).toFixed(0);
       const distance = Number(formattedDistance);
       const feed = Number(formattedFeed);
+      const negativeMargin = Number(negativeWorkspaceMarginMm);
       if (!Number.isFinite(distance) || distance === 0 || Math.abs(distance) > this.maxJogMm) throw new Error(`Jog distance must round to non-zero and be no more than ${this.maxJogMm} mm`);
       if (!Number.isFinite(feed) || feed < 1 || feed > this.maxJogFeed) throw new Error(`Jog feed must round to 1-${this.maxJogFeed} mm/min`);
       if (safeRetract && !(normalizedAxis === "Z" && distance > 0)) throw new Error("Safe retract is only allowed for positive Z motion");
+      if (!Number.isFinite(negativeMargin) || negativeMargin < 0 || negativeMargin > 60 || (negativeMargin > 0 && !new Set(["X", "Y"]).has(normalizedAxis))) throw new Error("Probe-staging margin must be 0-60 mm on X or Y");
       if (this.sessionTravelMm + Math.abs(distance) > this.maxSessionTravelMm) throw new Error(`Session jog envelope of ${this.maxSessionTravelMm} mm would be exceeded`);
       await this.motionGuard();
       const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
@@ -134,7 +136,7 @@ export class GrblTcpController extends EventEmitter {
       const beforeCoordinate = coordinateAxis(before, normalizedAxis);
       if (!calibration && !safeRetract) {
         if (typeof this.workspaceGuard !== "function") throw new Error("Virtual workspace is not calibrated");
-        await this.workspaceGuard({ before, axis: normalizedAxis, distanceMm: distance });
+        await this.workspaceGuard({ before, axis: normalizedAxis, distanceMm: distance, negativeMarginMm: negativeMargin });
       }
       const reply = await this.#lineCommandUnlocked(`$J=G91 G21 ${normalizedAxis}${formattedDistance} F${formattedFeed}`, true);
       const expectedMs = (Math.abs(distance) / feed) * 60_000;
@@ -702,15 +704,18 @@ export class VirtualWorkspace {
     return this.snapshot();
   }
 
-  assertJog({ before, axis, distanceMm }) {
+  assertJog({ before, axis, distanceMm, negativeMarginMm = 0 }) {
     if (!this.bounds) throw new Error("Virtual workspace is not calibrated");
     const current = coordinateAxis(before, axis);
     const target = current + Number(distanceMm);
     const { min, max } = this.bounds[axis];
-    if (target < min - 0.001 || target > max + 0.001) {
-      throw new Error(`Virtual ${axis} barrier rejects target ${target.toFixed(3)}; allowed ${min.toFixed(3)}..${max.toFixed(3)}`);
+    const margin = Number(negativeMarginMm);
+    if (!Number.isFinite(margin) || margin < 0 || margin > 60 || (margin > 0 && !new Set(["X", "Y"]).has(axis))) throw new Error("Invalid probe-staging margin");
+    const allowedMin = min - margin;
+    if (target < allowedMin - 0.001 || target > max + 0.001) {
+      throw new Error(`Virtual ${axis} barrier rejects target ${target.toFixed(3)}; allowed ${allowedMin.toFixed(3)}..${max.toFixed(3)}`);
     }
-    return { axis, current, target, min, max };
+    return { axis, current, target, min: allowedMin, max, probeStagingMarginMm: margin };
   }
 
   snapshot() { return { calibrated: Boolean(this.bounds), createdAt: this.createdAt, bounds: this.bounds }; }

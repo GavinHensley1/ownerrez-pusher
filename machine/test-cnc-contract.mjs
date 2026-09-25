@@ -68,3 +68,9 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /if \(!isHealth\) req\.write\(data\)/);
   assert.doesNotMatch(agent, /console\.log\(token\)|process\.stdout\.write\(token/);
 });
+
+test("local daemon separates manual probe staging from the carve envelope", () => {
+  const daemon = readFileSync(new URL("machine/cnc-daemon.mjs", root), "utf8");
+  assert.match(daemon, /negativeWorkspaceMarginMm/);
+  assert.match(daemon, /new Set\(\["X", "Y"\]\)\.has\(axis\) \? 60 : 0/);
+});
