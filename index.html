@@ -1640,7 +1640,13 @@ function cncRenderOriginFootprint(job,su){
 }
 var CNC_POLL=null;
 function cncMaybePoll(){
-  if(!CNC_POLL){ CNC_POLL=setInterval(function(){ var m=document.getElementById('cncMain'); if(m&&m.style.display!=='none') loadCnc(); else { clearInterval(CNC_POLL); CNC_POLL=null; } },3000); }
+  if(CNC_POLL)return;
+  var current=cncCurrentJob(), active=current&&['queued','accepted','running','paused'].includes(String(current.agentState||''));
+  CNC_POLL=setTimeout(async function(){
+    var m=document.getElementById('cncMain');
+    if(!m||m.style.display==='none'){CNC_POLL=null;return;}
+    try{await loadCnc();}finally{CNC_POLL=null;cncMaybePoll();}
+  },active?5000:60000);
 }
 function cncRenderRelief(dataURL, sizeLabel){
   var prev=document.getElementById('cncGcodePrev'), meta=document.getElementById('cncGcodeMeta'); if(!prev) return;

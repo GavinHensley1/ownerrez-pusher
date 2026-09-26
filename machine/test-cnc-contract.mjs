@@ -92,6 +92,8 @@ test("CNC agent is low-frequency while idle and accepted programs persist locall
   assert.match(api, /agentKey,JSON\.stringify\(rec\),\{ex:180\}/);
   assert.match(daemon, /saveProgram\(PROGRAM_STATE_PATH/);
   assert.match(daemon, /\/job\/last/);
+  assert.match(html, /active\?5000:60000/);
+  assert.doesNotMatch(html, /setInterval\(function\(\)\{ var m=document\.getElementById\('cncMain'\)/);
 });
 
 test("bed re-probe atomically replaces only the locked Z calibration", () => {
