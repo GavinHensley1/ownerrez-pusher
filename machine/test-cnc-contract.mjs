@@ -15,6 +15,7 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.doesNotThrow(() => new Function(scripts[0]));
   for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
   assert.match(html, /cncQueueMachineAction\('jog'/);
+  assert.match(html, /if\(action==='jog'\)return 'Move'/);
   assert.match(html, /One press sends one command/);
   assert.match(html, /aria-live="assertive"/);
   assert.match(html, /zero\.disabled=motionBlocked/);

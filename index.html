@@ -1647,7 +1647,8 @@ async function cncOpenPlan(src,job){job=job||cncCurrentJob();if(!job||!src)retur
 function cncClosePlan(){var m=document.getElementById('cncPlanModal');if(m)m.classList.remove('open');document.body.style.overflow='';CNC_PLAN_SELECTION=null;CNC_PLAN_DRAG=null;}
 function cncCurrentJob(){ return (CNC.jobs||[]).filter(function(j){return j&&j.id===CNC_CUR;})[0]||null; }
 function cncActionLabel(action,extra){
-  if(action==='jog'&&extra){ var d=Number(extra.distanceMm)||0; return 'Move '+String(extra.axis||'').toUpperCase()+(d>=0?'+':'−')+Math.abs(d)+' mm'; }
+  if(action==='jog'&&extra&&extra.axis&&Number.isFinite(Number(extra.distanceMm))){ var d=Number(extra.distanceMm); return 'Move '+String(extra.axis).toUpperCase()+(d>=0?'+':'−')+Math.abs(d)+' mm'; }
+  if(action==='jog')return 'Move';
   return CNC_ACTION_LABELS[action]||String(action||'Command').replace(/_/g,' ');
 }
 function cncCommandBanner(state,title,detail){
