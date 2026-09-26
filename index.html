@@ -72,6 +72,22 @@
   .cnc-command-detail{font:11px/1.4 "IBM Plex Mono",ui-monospace,monospace;color:#94a3b8;word-break:break-word}
   .cnc-control-busy{filter:saturate(.65);cursor:wait!important}
   #cncControllerReadout{font:11px/1.45 "IBM Plex Mono",ui-monospace,monospace;color:#a9b8ca;margin:7px 0 12px;padding:8px 10px;border:1px solid rgba(255,255,255,.08);border-radius:8px;background:rgba(0,0,0,.18)}
+  .cnc-plan-modal{position:fixed;inset:0;z-index:90;background:rgba(3,8,14,.9);display:none;align-items:flex-start;justify-content:center;padding:24px;overflow:auto}
+  .cnc-plan-modal.open{display:flex}
+  .cnc-plan-shell{width:min(1120px,100%);background:#0f1928;border:1px solid #314158;border-radius:14px;box-shadow:0 24px 80px rgba(0,0,0,.55);overflow:hidden}
+  .cnc-plan-head{display:flex;gap:14px;align-items:flex-start;padding:18px 20px;border-bottom:1px solid #25344a;background:#111d2d}
+  .cnc-plan-head h3{margin:0 0 4px;font-size:20px}.cnc-plan-head p{margin:0;color:#93a2b8;font-size:12px}.cnc-plan-head .sp{flex:1}
+  .cnc-plan-body{display:grid;grid-template-columns:minmax(320px,1.2fr) minmax(300px,.8fr);gap:18px;padding:18px 20px}
+  .cnc-plan-canvas-wrap{position:relative;min-height:330px;border:1px solid #26374e;border-radius:10px;background:linear-gradient(45deg,#101927 25%,#0c1420 25%,#0c1420 50%,#101927 50%,#101927 75%,#0c1420 75%);background-size:18px 18px;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none}
+  #cncPlanCanvas{display:block;max-width:100%;max-height:540px;cursor:crosshair}.cnc-plan-note{font:11px/1.45 "IBM Plex Mono",monospace;color:#93a2b8;margin-top:8px}
+  .cnc-plan-section{border:1px solid #26374e;border-radius:10px;padding:12px;margin-bottom:10px;background:#0c1522}.cnc-plan-section h4{margin:0 0 9px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#a9b8ca}
+  .cnc-plan-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.cnc-plan-grid label{font-size:11px;color:#93a2b8}.cnc-plan-grid input,.cnc-plan-grid select{width:100%;margin-top:3px}
+  .cnc-depth-bands{display:grid;grid-template-columns:1fr 78px;gap:6px;align-items:center}.cnc-depth-bands label{font-size:11px;color:#a9b8ca}.cnc-depth-bands input{width:100%;text-align:right}
+  .cnc-region-item{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:7px;align-items:center;padding:6px 0;border-top:1px solid rgba(255,255,255,.06);font-size:11px}.cnc-region-item:first-child{border-top:0}
+  .cnc-plan-warning{border:1px solid #7b5d22;background:#1c180f;color:#ffd781;border-radius:8px;padding:9px 10px;font-size:11.5px;margin-top:9px}
+  .cnc-plan-ok{border:1px solid #2d6f53;background:#0e2119;color:#8be8bc;border-radius:8px;padding:9px 10px;font-size:11.5px;margin-top:9px}
+  .cnc-plan-foot{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:14px 20px;border-top:1px solid #25344a;background:#0c1522}.cnc-plan-foot .sp{flex:1}.cnc-plan-foot button{padding:10px 16px}
+  .cnc-stage-list{display:grid;gap:7px;margin-top:8px}.cnc-stage{display:flex;gap:10px;align-items:center;border:1px solid #2a3a50;border-radius:8px;padding:8px 10px;background:#0b1420;font-size:11.5px}.cnc-stage b{min-width:62px}
   @media (max-width:640px){
     .wrap{padding:12px 10px} header{padding:10px 12px;gap:8px 10px} h1{font-size:15px}
     .card{padding:12px 11px;margin-bottom:14px} .card h2{font-size:12px}
@@ -87,6 +103,7 @@
     #cncMain label{min-width:0;max-width:100%}
     #cncRelSrc{width:100%;max-width:100%}
     .cnc-command-panel{padding:10px 11px}
+    .cnc-plan-modal{padding:0}.cnc-plan-shell{min-height:100%;border-radius:0;border:0}.cnc-plan-body{grid-template-columns:1fr;padding:12px}.cnc-plan-head,.cnc-plan-foot{padding:12px}.cnc-plan-canvas-wrap{min-height:250px}.cnc-plan-grid{grid-template-columns:1fr 1fr}
   }
 .roster{width:100%;border-collapse:collapse}
 .roster th,.roster td{border:1px solid var(--line);padding:9px 12px;font-size:15px;text-align:center;white-space:normal;vertical-align:top}
@@ -485,8 +502,8 @@
         <input type="file" id="cncCreative" accept="image/*" onchange="cncUploadCreative(event)">
       </div>
       <div style="background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:14px;text-align:center">
-        <div style="font-weight:600;margin-bottom:8px">2 &middot; Generate &amp; preview <span class="muted" style="font-weight:400">&mdash; turns your image into guarded G-code</span></div>
-        <button onclick="cncLoad()" style="font-size:15px;padding:12px 22px">Generate &amp; preview</button>
+        <div style="font-weight:600;margin-bottom:8px">2 &middot; Review machining plan <span class="muted" style="font-weight:400">&mdash; approve dimensions, depth, cutout, and tools before G-code</span></div>
+        <button onclick="cncLoad()" style="font-size:15px;padding:12px 22px">Review plan &amp; generate</button>
       </div>
     </div>
 
@@ -495,7 +512,7 @@
         <div id="cncCreativePrev" style="min-height:170px;border:1px solid rgba(255,255,255,.08);border-radius:10px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.2);overflow:hidden"><span class="muted">No image yet</span></div></div>
       <div><div class="muted" style="font-size:12px;margin-bottom:4px">3 &middot; Design populates here <span style="opacity:.7">(what will cut)</span></div>
         <div id="cncGcodePrev" style="min-height:170px;border:1px solid rgba(255,255,255,.08);border-radius:10px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.2)"><span class="muted">Hit Load to populate the design</span></div>
-        <div class="muted" id="cncGcodeMeta" style="font-size:11px;margin-top:4px"></div></div>
+        <div class="muted" id="cncGcodeMeta" style="font-size:11px;margin-top:4px"></div><div id="cncGeneratedStages" class="cnc-stage-list"></div></div>
     </div>
 
     <div style="margin-top:16px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.09);border-radius:10px;padding:13px">
@@ -609,6 +626,62 @@
     <h2 style="margin:.1em 0">Job tracker</h2>
     <div class="legend">Every carving job and its stage: Design &rarr; Relief/G-code &rarr; Carving &rarr; Finishing &rarr; Done. Saved for everyone.</div>
     <div id="cncJobs" style="margin-top:14px">Loading&hellip;</div>
+  </div>
+</div>
+
+<div id="cncPlanModal" class="cnc-plan-modal" role="dialog" aria-modal="true" aria-labelledby="cncPlanTitle" onkeydown="if(event.key==='Escape')cncClosePlan()">
+  <div class="cnc-plan-shell">
+    <div class="cnc-plan-head">
+      <div><h3 id="cncPlanTitle">Approve the machining plan</h3><p>The artwork is not the toolpath. Review the subject boundary, physical dimensions, depth in millimeters, cutout, and tools before Project creates any G-code.</p></div>
+      <span class="sp"></span><button class="ghost" onclick="cncClosePlan()" aria-label="Close machining plan">Close</button>
+    </div>
+    <div class="cnc-plan-body">
+      <div>
+        <div class="cnc-plan-canvas-wrap"><canvas id="cncPlanCanvas" width="640" height="420" aria-label="Editable color depth map"></canvas></div>
+        <div class="cnc-plan-note">Color is commanded depth, not artwork shading: <span style="color:#7dd3fc">cyan = surface</span>, <span style="color:#fbbf24">gold = medium</span>, <span style="color:#fb7185">red = deepest</span>. Hatched/transparent area will not be cut. Drag a box over a feature to give it an exact depth.</div>
+        <div id="cncPlanFit"></div>
+      </div>
+      <div>
+        <div class="cnc-plan-section"><h4>1 · Finished geometry</h4><div class="cnc-plan-grid">
+          <label>Width (mm)<input id="cncPlanW" type="number" min="10" max="2000" step="0.1" oninput="cncPlanChanged()"></label>
+          <label>Height (mm)<input id="cncPlanH" type="number" min="10" max="2000" step="0.1" oninput="cncPlanChanged()"></label>
+          <label>Maximum relief depth (mm)<input id="cncPlanMaxD" type="number" min="0.1" max="60" step="0.1" oninput="cncPlanChanged()"></label>
+          <label>Outside the detected subject<select id="cncPlanBg" onchange="cncPlanChanged(true)"><option value="mask">Leave uncut (recommended)</option><option value="rectangle">Carve the entire image rectangle</option></select></label>
+          <label>Background detection<input id="cncPlanMask" type="range" min="5" max="100" step="1" value="32" oninput="cncPlanChanged(true)"></label>
+          <label>Outer profile / cutout<select id="cncPlanCutout" onchange="cncPlanChanged()"><option value="none">No outer profile</option><option value="silhouette">Detected silhouette · leave protected bottom</option><option value="rectangle">Finished rectangle · leave protected bottom</option></select></label>
+          <label>Cutout thickness (mm)<input id="cncPlanCutThick" type="number" min="0" max="120" step="0.1" value="0" oninput="cncPlanChanged()"></label>
+          <label>Tabs<select id="cncPlanTabs" onchange="cncPlanChanged()"><option value="0">No tabs</option><option value="4">4 tabs</option><option value="6" selected>6 tabs</option><option value="8">8 tabs</option></select></label>
+        </div></div>
+        <div class="cnc-plan-section"><h4>2 · Proposed depth bands</h4><div class="cnc-depth-bands">
+          <label>Surface / highlights</label><input id="cncBand0" type="number" min="0" step="0.1" oninput="cncPlanChanged(true)">
+          <label>Light detail</label><input id="cncBand1" type="number" min="0" step="0.1" oninput="cncPlanChanged(true)">
+          <label>Medium detail</label><input id="cncBand2" type="number" min="0" step="0.1" oninput="cncPlanChanged(true)">
+          <label>Dark / deepest detail</label><input id="cncBand3" type="number" min="0" step="0.1" oninput="cncPlanChanged(true)">
+        </div></div>
+        <div class="cnc-plan-section"><h4>3 · Exact feature depths</h4>
+          <div class="cnc-plan-grid"><label>Feature name<input id="cncRegionName" placeholder="e.g. corn"></label><label>Depth (mm)<input id="cncRegionDepth" type="number" min="0" step="0.1" placeholder="4.0"></label></div>
+          <div style="display:flex;gap:7px;margin-top:8px"><button class="ghost" onclick="cncAddDepthRegion()">Add selected feature</button><button class="ghost" onclick="cncClearSelection()">Clear selection</button></div>
+          <div id="cncRegionList" style="margin-top:8px"><span class="muted" style="font-size:11px">Drag a box on the image to select a feature.</span></div>
+        </div>
+        <div class="cnc-plan-section"><h4>4 · Tool sequence</h4><div class="cnc-plan-grid">
+          <label>Wood species<input id="cncPlanWood" placeholder="e.g. walnut, maple, cherry" oninput="cncPlanChanged()"></label>
+          <label>Workflow<select id="cncPlanTools" onchange="cncPlanChanged()"><option value="staged">Two-bit relief · rough then finish</option><option value="single">One installed bit · one program</option></select></label>
+          <label>Start / roughing bit<select id="cncPlanRoughBit" onchange="cncPlanChanged()"><option>Whiteside RU2100 · 1/4″ upcut</option><option>Genmitsu 1/8″ flat end mill</option><option>3.175mm flat end mill</option></select></label>
+          <label>End / finishing bit<select id="cncPlanFinishBit" onchange="cncPlanChanged()"><option>SpeTool W01015-SPE-X · 1/32″ radius tapered ball nose</option><option>3.175mm ball nose</option><option>30° V-bit 0.1mm</option></select></label>
+          <label>Rough depth per pass (mm)<input id="cncPlanRoughPass" type="number" min="0.2" max="6" step="0.1" oninput="cncPlanChanged()"></label>
+          <label>Rough stepover (mm)<input id="cncPlanRoughStep" type="number" min="0.2" max="6" step="0.1" oninput="cncPlanChanged()"></label>
+          <label>Rough feed (mm/min)<input id="cncPlanRoughFeed" type="number" min="50" max="4000" step="10" oninput="cncPlanChanged()"></label>
+          <label>Rough plunge (mm/min)<input id="cncPlanRoughPlunge" type="number" min="20" max="1000" step="10" oninput="cncPlanChanged()"></label>
+          <label>Rough spindle target (RPM)<input id="cncPlanRoughRpm" type="number" min="6500" max="30000" step="500" oninput="cncPlanChanged()"></label>
+          <label>Finish stepover (mm)<input id="cncPlanFinishStep" type="number" min="0.05" max="3" step="0.05" oninput="cncPlanChanged()"></label>
+          <label>Finish feed (mm/min)<input id="cncPlanFinishFeed" type="number" min="50" max="3000" step="10" oninput="cncPlanChanged()"></label>
+          <label>Finish plunge (mm/min)<input id="cncPlanFinishPlunge" type="number" min="20" max="1000" step="10" oninput="cncPlanChanged()"></label>
+          <label>Finish spindle target (RPM)<input id="cncPlanFinishRpm" type="number" min="6500" max="30000" step="500" oninput="cncPlanChanged()"></label>
+          <label>Profile bit<select id="cncPlanProfileBit" onchange="cncPlanChanged()"><option>Whiteside RU2100 · 1/4″ upcut</option><option>Genmitsu 1/8″ flat end mill</option><option>3.175mm flat end mill</option></select></label>
+        </div><div id="cncToolSequence" class="cnc-stage-list"></div><div class="cnc-plan-warning" style="margin-top:8px">The Genmitsu 710W is a manual AC router. Project records the target RPM and verifies the tool sequence, but it cannot switch this router on or off. Turn it on before Start and off after completion or Stop.</div></div>
+      </div>
+    </div>
+    <div class="cnc-plan-foot"><span id="cncPlanStatus" class="muted">No G-code will be created until this plan is approved.</span><span class="sp"></span><button class="ghost" onclick="cncClosePlan()">Cancel</button><button id="cncPlanGenerateBtn" onclick="cncApprovePlanAndGenerate()">Approve plan &amp; generate G-code</button></div>
   </div>
 </div>
 
@@ -1526,6 +1599,7 @@ function switchView(v){
 // ===== CNC Studio (shared staff tab) — everything the operator needs is here. Persists to parkside:cnc. =====
 var CNC={jobs:[],config:{}}; var CNC_CUR=null;
 var CNC_COMMAND_IN_FLIGHT=false, CNC_COMMAND_BUTTON=null, CNC_COMMAND_BUTTON_HTML='', CNC_LAST_COMMAND_ID='';
+var CNC_PLAN=null, CNC_PLAN_IMG=null, CNC_PLAN_PIXELS=null, CNC_PLAN_MASK=null, CNC_PLAN_SELECTION=null, CNC_PLAN_DRAG=null, CNC_PLAN_SOURCE='';
 var CNC_ACTION_LABELS={jog:'Move',probe_bed:'Probe bed',probe_stock:'Probe stock',lock_probe:'Lock calibration',unlock_probe:'Unlock calibration',recover_probe:'Retract probe',recover_controller:'Recover controller',zero_xy:'Set X/Y zero',zero_z:'Set stock Z zero',start:'Start carve',pause:'Pause',resume:'Resume',stop:'Stop'};
 var CNC_MATS={
  'C752 nickel silver':{feed:250,plunge:80,step:0.08,depth:0.8,rpm:9000},
@@ -1537,6 +1611,33 @@ var CNC_MATS={
 };
 function cncClamp(v,a,b){ v=Number(v); if(!isFinite(v)) v=a; return Math.max(a,Math.min(b,v)); }
 function cncEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+function cncPlanHash(plan){ var copy=JSON.parse(JSON.stringify(plan||{})); delete copy.hash; delete copy.status; var s=JSON.stringify(copy),h=2166136261; for(var i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);} return 'mp1-'+(h>>>0).toString(16); }
+function cncPlanDefault(job,img){ var w=Number(job.sizeMM)||100, ar=(img&&img.width)?img.height/img.width:cncJobAR(job), h=Number(job.pieceH)||Math.round(w*ar*10)/10, d=Number(job.reliefDepth)||((CNC_MATS[job.material]||CNC_MATS.Other).depth); return {version:1,status:'draft',widthMm:w,heightMm:h,maxDepthMm:d,background:'mask',maskThreshold:32,depthBands:[0,Math.max(.1,d*.28),Math.max(.2,d*.62),d].map(function(v){return Math.round(v*10)/10;}),regions:[],cutout:{mode:'none',thicknessMm:0,tabs:6,tabHeightMm:1.5},tools:{strategy:'staged',woodSpecies:(job.material&&/wood/i.test(job.material))?job.material:'',roughBit:'Whiteside RU2100 · 1/4″ upcut',finishBit:'SpeTool W01015-SPE-X · 1/32″ radius tapered ball nose',profileBit:'Whiteside RU2100 · 1/4″ upcut',roughPassDepthMm:1.5,roughStepoverMm:2.5,roughFeedMmMin:900,roughPlungeMmMin:180,roughRpm:18000,finishStepoverMm:.5,finishFeedMmMin:700,finishPlungeMmMin:150,finishRpm:18000}}; }
+function cncPlanField(id,val){ var el=document.getElementById(id); if(!el)return; if(val!==undefined)el.value=val; }
+function cncPlanReadFields(){ if(!CNC_PLAN)return null; var p=CNC_PLAN;
+  p.widthMm=cncClamp((document.getElementById('cncPlanW')||{}).value,10,2000); p.heightMm=cncClamp((document.getElementById('cncPlanH')||{}).value,10,2000); p.maxDepthMm=cncClamp((document.getElementById('cncPlanMaxD')||{}).value,.1,60);
+  p.background=(document.getElementById('cncPlanBg')||{}).value||'mask'; p.maskThreshold=cncClamp((document.getElementById('cncPlanMask')||{}).value,5,100);
+  p.depthBands=[0,1,2,3].map(function(i){return cncClamp((document.getElementById('cncBand'+i)||{}).value,0,p.maxDepthMm);});
+  p.cutout=p.cutout||{}; p.cutout.mode=(document.getElementById('cncPlanCutout')||{}).value||'none'; p.cutout.thicknessMm=cncClamp((document.getElementById('cncPlanCutThick')||{}).value,0,120); p.cutout.tabs=Math.max(0,parseInt((document.getElementById('cncPlanTabs')||{}).value,10)||0); p.cutout.tabHeightMm=Math.max(.3,Math.min(6,Number(p.cutout.tabHeightMm)||1.5));
+  p.tools=p.tools||{}; p.tools.woodSpecies=String((document.getElementById('cncPlanWood')||{}).value||'').trim().slice(0,80); p.tools.strategy=(document.getElementById('cncPlanTools')||{}).value||'staged'; p.tools.finishBit=(document.getElementById('cncPlanFinishBit')||{}).value||'SpeTool W01015-SPE-X · 1/32″ radius tapered ball nose'; p.tools.roughBit=(document.getElementById('cncPlanRoughBit')||{}).value||'Whiteside RU2100 · 1/4″ upcut'; p.tools.profileBit=(document.getElementById('cncPlanProfileBit')||{}).value||p.tools.roughBit; p.tools.roughPassDepthMm=cncClamp((document.getElementById('cncPlanRoughPass')||{}).value,.2,6); p.tools.roughStepoverMm=cncClamp((document.getElementById('cncPlanRoughStep')||{}).value,.2,6); p.tools.roughFeedMmMin=cncClamp((document.getElementById('cncPlanRoughFeed')||{}).value,50,4000); p.tools.roughPlungeMmMin=cncClamp((document.getElementById('cncPlanRoughPlunge')||{}).value,20,1000); p.tools.roughRpm=cncClamp((document.getElementById('cncPlanRoughRpm')||{}).value,6500,30000); p.tools.finishStepoverMm=cncClamp((document.getElementById('cncPlanFinishStep')||{}).value,.05,3); p.tools.finishFeedMmMin=cncClamp((document.getElementById('cncPlanFinishFeed')||{}).value,50,3000); p.tools.finishPlungeMmMin=cncClamp((document.getElementById('cncPlanFinishPlunge')||{}).value,20,1000); p.tools.finishRpm=cncClamp((document.getElementById('cncPlanFinishRpm')||{}).value,6500,30000); p.status='draft'; p.hash=cncPlanHash(p); return p; }
+function cncPlanPopulate(p){ CNC_PLAN=p; p.tools=p.tools||{}; cncPlanField('cncPlanW',p.widthMm);cncPlanField('cncPlanH',p.heightMm);cncPlanField('cncPlanMaxD',p.maxDepthMm);cncPlanField('cncPlanBg',p.background||'mask');cncPlanField('cncPlanMask',p.maskThreshold||32); for(var i=0;i<4;i++)cncPlanField('cncBand'+i,(p.depthBands||[])[i]||0); cncPlanField('cncPlanCutout',(p.cutout||{}).mode||'none');cncPlanField('cncPlanCutThick',(p.cutout||{}).thicknessMm||0);cncPlanField('cncPlanTabs',String((p.cutout||{}).tabs||0));cncPlanField('cncPlanWood',p.tools.woodSpecies||'');cncPlanField('cncPlanTools',p.tools.strategy||'staged');cncPlanField('cncPlanFinishBit',p.tools.finishBit||'SpeTool W01015-SPE-X · 1/32″ radius tapered ball nose');cncPlanField('cncPlanRoughBit',p.tools.roughBit||'Whiteside RU2100 · 1/4″ upcut');cncPlanField('cncPlanProfileBit',p.tools.profileBit||'Whiteside RU2100 · 1/4″ upcut');cncPlanField('cncPlanRoughPass',p.tools.roughPassDepthMm||1.5);cncPlanField('cncPlanRoughStep',p.tools.roughStepoverMm||2.5);cncPlanField('cncPlanRoughFeed',p.tools.roughFeedMmMin||900);cncPlanField('cncPlanRoughPlunge',p.tools.roughPlungeMmMin||180);cncPlanField('cncPlanRoughRpm',p.tools.roughRpm||18000);cncPlanField('cncPlanFinishStep',p.tools.finishStepoverMm||.5);cncPlanField('cncPlanFinishFeed',p.tools.finishFeedMmMin||700);cncPlanField('cncPlanFinishPlunge',p.tools.finishPlungeMmMin||150);cncPlanField('cncPlanFinishRpm',p.tools.finishRpm||18000); cncRenderPlanRegions(); cncPlanChanged(true); }
+function cncPlanBuildMask(data,w,h,threshold,forceRectangle){ var out=new Uint8Array(w*h); if(forceRectangle){out.fill(1);return out;} var pts=[[1,1],[w-2,1],[1,h-2],[w-2,h-2]],br=0,bg=0,bb=0; pts.forEach(function(p){var i=(p[1]*w+p[0])*4;br+=data[i];bg+=data[i+1];bb+=data[i+2];});br/=4;bg/=4;bb/=4; var seen=new Uint8Array(w*h),q=new Int32Array(w*h),head=0,tail=0;
+  function near(i){var k=i*4,dr=data[k]-br,dg=data[k+1]-bg,db=data[k+2]-bb;return data[k+3]<20||Math.sqrt(dr*dr+dg*dg+db*db)<=threshold;}
+  function push(i){if(i<0||i>=w*h||seen[i]||!near(i))return;seen[i]=1;q[tail++]=i;}
+  for(var x=0;x<w;x++){push(x);push((h-1)*w+x);}for(var y=0;y<h;y++){push(y*w);push(y*w+w-1);}while(head<tail){var n=q[head++],xx=n%w,yy=(n/w)|0;if(xx)push(n-1);if(xx<w-1)push(n+1);if(yy)push(n-w);if(yy<h-1)push(n+w);}for(var i=0;i<out.length;i++)out[i]=seen[i]?0:1;return out; }
+function cncPlanDepthAt(nx,ny,lum){ var p=CNC_PLAN||{}, bands=p.depthBands||[0,.5,1,1.5], dark=1-lum, idx=Math.min(3,Math.max(0,Math.floor(dark*4))); var d=Number(bands[idx])||0; (p.regions||[]).forEach(function(r){if(nx>=r.x&&nx<=r.x+r.w&&ny>=r.y&&ny<=r.y+r.h)d=Number(r.depthMm)||0;}); return Math.min(Number(p.maxDepthMm)||d,d); }
+function cncPlanAnalyze(){ if(!CNC_PLAN_IMG||!CNC_PLAN)return; var c=document.getElementById('cncPlanCanvas'),maxW=680,maxH=520,sc=Math.min(maxW/CNC_PLAN_IMG.width,maxH/CNC_PLAN_IMG.height,1); c.width=Math.max(120,Math.round(CNC_PLAN_IMG.width*sc));c.height=Math.max(100,Math.round(CNC_PLAN_IMG.height*sc));var x=c.getContext('2d');x.drawImage(CNC_PLAN_IMG,0,0,c.width,c.height);var im=x.getImageData(0,0,c.width,c.height);CNC_PLAN_PIXELS=im;CNC_PLAN_MASK=cncPlanBuildMask(im.data,c.width,c.height,Number(CNC_PLAN.maskThreshold)||32,CNC_PLAN.background==='rectangle'); cncPlanRender(); }
+function cncPlanRender(){ var c=document.getElementById('cncPlanCanvas');if(!c||!CNC_PLAN_PIXELS||!CNC_PLAN_MASK)return;var x=c.getContext('2d'),src=CNC_PLAN_PIXELS.data,out=x.createImageData(c.width,c.height),d=out.data,mn=255,mx=0,i;for(i=0;i<CNC_PLAN_MASK.length;i++)if(CNC_PLAN_MASK[i]){var k=i*4,l=.299*src[k]+.587*src[k+1]+.114*src[k+2];if(l<mn)mn=l;if(l>mx)mx=l;}var rng=Math.max(1,mx-mn),max=Math.max(.1,Number(CNC_PLAN.maxDepthMm)||1);
+  for(i=0;i<CNC_PLAN_MASK.length;i++){var k=i*4;if(!CNC_PLAN_MASK[i]){d[k]=18;d[k+1]=26;d[k+2]=38;d[k+3]=70;continue;}var lum=((.299*src[k]+.587*src[k+1]+.114*src[k+2])-mn)/rng,px=i%c.width,py=(i/c.width)|0,dep=cncPlanDepthAt(px/c.width,py/c.height,lum),t=Math.min(1,dep/max);d[k]=Math.round(60+195*t);d[k+1]=Math.round(205-105*t);d[k+2]=Math.round(235-125*t);d[k+3]=210;}x.putImageData(out,0,0);x.globalAlpha=.28;x.drawImage(CNC_PLAN_IMG,0,0,c.width,c.height);x.globalAlpha=1;(CNC_PLAN.regions||[]).forEach(function(r){x.strokeStyle='#f8fafc';x.lineWidth=2;x.strokeRect(r.x*c.width,r.y*c.height,r.w*c.width,r.h*c.height);x.fillStyle='rgba(4,10,18,.8)';x.fillRect(r.x*c.width,r.y*c.height,Math.min(r.w*c.width,140),18);x.fillStyle='#fff';x.font='11px system-ui';x.fillText((r.name||'feature')+' '+Number(r.depthMm).toFixed(1)+'mm',r.x*c.width+4,r.y*c.height+13);});if(CNC_PLAN_SELECTION){var s=CNC_PLAN_SELECTION;x.strokeStyle='#fbbf24';x.lineWidth=2;x.setLineDash([6,4]);x.strokeRect(s.x*c.width,s.y*c.height,s.w*c.width,s.h*c.height);x.setLineDash([]);} }
+function cncPlanPointer(e){ var c=document.getElementById('cncPlanCanvas'),r=c.getBoundingClientRect();return{x:cncClamp((e.clientX-r.left)/r.width,0,1),y:cncClamp((e.clientY-r.top)/r.height,0,1)}; }
+function cncPlanBindCanvas(){ var c=document.getElementById('cncPlanCanvas');if(!c||c.dataset.bound)return;c.dataset.bound='1';c.addEventListener('pointerdown',function(e){CNC_PLAN_DRAG=cncPlanPointer(e);CNC_PLAN_SELECTION={x:CNC_PLAN_DRAG.x,y:CNC_PLAN_DRAG.y,w:0,h:0};c.setPointerCapture(e.pointerId);cncPlanRender();});c.addEventListener('pointermove',function(e){if(!CNC_PLAN_DRAG)return;var p=cncPlanPointer(e),x=Math.min(p.x,CNC_PLAN_DRAG.x),y=Math.min(p.y,CNC_PLAN_DRAG.y);CNC_PLAN_SELECTION={x:x,y:y,w:Math.abs(p.x-CNC_PLAN_DRAG.x),h:Math.abs(p.y-CNC_PLAN_DRAG.y)};cncPlanRender();});c.addEventListener('pointerup',function(){CNC_PLAN_DRAG=null;cncPlanRender();}); }
+function cncRenderPlanRegions(){ var el=document.getElementById('cncRegionList'),rs=(CNC_PLAN&&CNC_PLAN.regions)||[];if(!el)return;if(!rs.length){el.innerHTML='<span class="muted" style="font-size:11px">Drag a box on the image to select a feature.</span>';return;}el.innerHTML=rs.map(function(r,i){return '<div class="cnc-region-item"><span><b>'+cncEsc(r.name||('Feature '+(i+1)))+'</b> · '+Number(r.depthMm).toFixed(1)+' mm</span><span class="muted">'+Math.round(r.w*100)+'×'+Math.round(r.h*100)+'%</span><button class="seg-x" onclick="cncRemoveDepthRegion('+i+')">Remove</button></div>';}).join(''); }
+function cncAddDepthRegion(){if(!CNC_PLAN_SELECTION||CNC_PLAN_SELECTION.w<.01||CNC_PLAN_SELECTION.h<.01){alert('Drag a box over the feature first.');return;}var name=String((document.getElementById('cncRegionName')||{}).value||'Feature').trim(),dep=Number((document.getElementById('cncRegionDepth')||{}).value);if(!isFinite(dep)||dep<0||dep>Number(CNC_PLAN.maxDepthMm)){alert('Enter a feature depth between 0 and the maximum relief depth.');return;}CNC_PLAN.regions=CNC_PLAN.regions||[];CNC_PLAN.regions.push({id:'r'+Date.now().toString(36),name:name,x:+CNC_PLAN_SELECTION.x.toFixed(4),y:+CNC_PLAN_SELECTION.y.toFixed(4),w:+CNC_PLAN_SELECTION.w.toFixed(4),h:+CNC_PLAN_SELECTION.h.toFixed(4),depthMm:+dep.toFixed(3)});CNC_PLAN_SELECTION=null;cncRenderPlanRegions();cncPlanChanged(true);}
+function cncRemoveDepthRegion(i){if(!CNC_PLAN)return;CNC_PLAN.regions.splice(i,1);cncRenderPlanRegions();cncPlanChanged(true);}function cncClearSelection(){CNC_PLAN_SELECTION=null;cncPlanRender();}
+function cncPlanProjectedStep(w,h,requested,budget){var cols=cncClamp(Math.round(w/requested),40,900),rows=cncClamp(Math.round(cols*h/w),20,900),cells=cols*rows;if(cells>budget){var scale=Math.sqrt(budget/cells);cols=Math.max(60,Math.floor(cols*scale));rows=Math.max(20,Math.floor(rows*scale));while(cols*rows>budget&&cols>60){if(cols/rows>w/h)cols--;else rows--;}}return {cols:cols,rows:rows,step:w/cols};}
+function cncPlanChanged(reanalyze){ if(!CNC_PLAN)return;cncPlanReadFields(); var h=(CNC.agent&&CNC.agent.health)||{},su=h.setup||{},safe=Number(su.maxCutDepthMm)||0,fit=cncStockFit({sizeMM:String(CNC_PLAN.widthMm),pieceH:String(CNC_PLAN.heightMm),material:'Other',reliefDepth:String(CNC_PLAN.maxDepthMm),imgAR:1}),problems=[];if(safe>0&&CNC_PLAN.maxDepthMm>safe+.001)problems.push('Relief depth exceeds the probed safe maximum of '+safe.toFixed(2)+' mm.');if(CNC_PLAN.cutout.mode!=='none'&&!(CNC_PLAN.cutout.thicknessMm>0))problems.push('Enter the material thickness for the profile stage.');if(CNC_PLAN.cutout.mode!=='none'&&safe>0&&CNC_PLAN.cutout.thicknessMm>safe+.001)problems.push('Profile depth crosses Project’s protected bottom; lower it or change the protected-floor policy deliberately.');if(!fit.ok)problems.push(fit.reason);var el=document.getElementById('cncPlanFit');if(el)el.className=problems.length?'cnc-plan-warning':'cnc-plan-ok',el.textContent=problems.length?problems.join(' '):('Plan fits the entered stock. Deepest commanded cut '+CNC_PLAN.maxDepthMm.toFixed(1)+' mm'+(safe?(' · probed safe maximum '+safe.toFixed(2)+' mm'):'')+'.');var btn=document.getElementById('cncPlanGenerateBtn');if(btn)btn.disabled=!!problems.length;var seq=document.getElementById('cncToolSequence');if(seq){var t=CNC_PLAN.tools,passes=Math.max(1,Math.ceil(CNC_PLAN.maxDepthMm/t.roughPassDepthMm)),fp=cncPlanProjectedStep(CNC_PLAN.widthMm,CNC_PLAN.heightMm,t.finishStepoverMm,38000),finishStep=(fp.step>t.finishStepoverMm*1.05?('target '+t.finishStepoverMm.toFixed(2)+' mm; generated ≈'+fp.step.toFixed(2)+' mm at this size'):(t.finishStepoverMm.toFixed(2)+' mm stepover')),stages=t.strategy==='staged'?[['Rough',t.roughBit,passes+' pass'+(passes===1?'':'es')+' × '+t.roughPassDepthMm.toFixed(1)+' mm · '+t.roughStepoverMm.toFixed(2)+' mm stepover · '+Math.round(t.roughRpm)+' RPM'],['Finish',t.finishBit,'change bit + re-probe Z · '+finishStep+' · '+Math.round(t.finishRpm)+' RPM']]:[['Relief',t.finishBit,'one program · '+finishStep+' · '+Math.round(t.finishRpm)+' RPM']];if(CNC_PLAN.cutout.mode!=='none')stages.push(['Profile',t.profileBit,'optional final stage · reuse roughing bit + re-probe Z']);seq.innerHTML=stages.map(function(s){return '<div class="cnc-stage"><b>'+s[0]+'</b><span>'+cncEsc(s[1])+'</span><span class="muted" style="margin-left:auto">'+s[2]+'</span></div>';}).join('');}if(reanalyze)cncPlanAnalyze();else cncPlanRender(); }
+async function cncOpenPlan(src,job){job=job||cncCurrentJob();if(!job||!src)return;CNC_PLAN_SOURCE=src;var img=new Image();img.onload=async function(){CNC_PLAN_IMG=img;var p=null,raw=await cncFetchFile(job.id,'plan');try{p=raw?JSON.parse(raw):null;}catch(e){}if(!p||p.version!==1)p=cncPlanDefault(job,img);document.getElementById('cncPlanModal').classList.add('open');document.body.style.overflow='hidden';cncPlanBindCanvas();cncPlanPopulate(p);setTimeout(function(){document.getElementById('cncPlanW').focus();},50);};img.onerror=function(){alert('Could not open the uploaded artwork.');};img.src=src;}
+function cncClosePlan(){var m=document.getElementById('cncPlanModal');if(m)m.classList.remove('open');document.body.style.overflow='';CNC_PLAN_SELECTION=null;CNC_PLAN_DRAG=null;}
 function cncCurrentJob(){ return (CNC.jobs||[]).filter(function(j){return j&&j.id===CNC_CUR;})[0]||null; }
 function cncActionLabel(action,extra){
   if(action==='jog'&&extra){ var d=Number(extra.distanceMm)||0; return 'Move '+String(extra.axis||'').toUpperCase()+(d>=0?'+':'−')+Math.abs(d)+' mm'; }
@@ -1639,7 +1740,7 @@ async function cncSaveSetup(){
   var su=(document.getElementById('cncSizeUnit')||{}).value||'mm';
   var mm=(su==='in')? sv*25.4 : sv;
   cncSetupHint(); cncCutoutHint();
-  var b={updateJob:{ id:job.id,
+  var b={updateJob:{ id:job.id, invalidatePlan:true,
     material:(document.getElementById('cncMat')||{}).value,
     carveType:(document.getElementById('cncType')||{}).value,
     bit:(document.getElementById('cncBit')||{}).value,
@@ -1667,8 +1768,8 @@ async function cncRenderActive(){
   if(!job){ if(cp)cp.innerHTML='<span class="muted">No image yet</span>'; if(gp)gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm)gm.textContent=''; return; }
   if(job.hasCreative){ var img=await cncFetchFile(job.id,'img'); if(cp) cp.innerHTML=img?('<img src="'+img+'" style="max-width:100%;max-height:220px;object-fit:contain">'):'<span class="muted">No image yet</span>'; }
   else if(cp){ cp.innerHTML='<span class="muted">No image yet</span>'; }
-  if(job.hasGcode){ var src=null, usingDepth=(job.reliefSource==='depth'&&job.hasDepth); if(usingDepth){ src=await cncFetchFile(job.id,'depth'); } else if(job.hasCreative){ src=await cncFetchFile(job.id,'img'); } if(src){ cncRenderRelief(src,(Number(job.sizeMM)||100)+' mm wide · '+(usingDepth?'AI depth source':'artwork source')); } else { var gc=await cncFetchFile(job.id,'gc'); if(gc) cncRenderToolpath(gc); else if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; } }
-  else { if(gp) gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm) gm.textContent=''; }
+  if(job.hasGcode){ var gc=await cncFetchFile(job.id,'gc'); if(gc) cncRenderToolpath(gc); else if(gp) gp.innerHTML='<span class="muted">Generated G-code is unavailable</span>'; cncRenderStages(job); }
+  else { if(gp) gp.innerHTML='<span class="muted">Approve the machining plan to create G-code</span>'; if(gm) gm.textContent=''; cncRenderStages(job); }
 }
 function cncRenderAgent(job){
   var as=document.getElementById('cncAgentStatus'), box=document.getElementById('cncReadiness');
@@ -1679,7 +1780,7 @@ function cncRenderAgent(job){
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
   var ready=checks.every(function(c){return c[1];});
   var state=job&&job.agentState||'';
-  var start=document.getElementById('cncStartBtn'); if(start) start.disabled=!(ready&&job&&job.hasGcode&&state!=='running'&&state!=='queued');
+  var start=document.getElementById('cncStartBtn'); if(start) start.disabled=!(ready&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&state!=='running'&&state!=='queued');
   var pause=document.getElementById('cncPauseBtn'); if(pause) pause.disabled=state!=='running';
   var resume=document.getElementById('cncResumeBtn'); if(resume) resume.disabled=state!=='paused';
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!['queued','accepted','running','paused'].includes(state);
@@ -1785,6 +1886,9 @@ function cncRenderToolpath(text){
     +(cutP?'<path d="'+cutP+'" fill="none" stroke="var(--accent)" stroke-width="0.9"/>':'')+'</svg>';
   if(meta) meta.textContent=nc+' cut moves · '+w.toFixed(1)+'×'+h.toFixed(1)+' mm';
 }
+function cncStageLabel(s){return s==='all'?'Relief':s.charAt(0).toUpperCase()+s.slice(1);}
+function cncRenderStages(job){var el=document.getElementById('cncGeneratedStages');if(!el)return;var stages=[],tools={};try{stages=JSON.parse(job&&job.gcodeStages||'[]');tools=JSON.parse(job&&job.planTools||'{}');}catch(e){}if(!stages.length){el.innerHTML='';return;}el.innerHTML='<div class="muted" style="font-size:10.5px;margin-top:7px">GENERATED MACHINE STAGES · MANUAL ROUTER</div>'+stages.map(function(s,i){var active=job.activeStage===s,rough=(s==='rough'||s==='profile'),tool=rough?tools.roughBit:tools.finishBit,rpm=rough?tools.roughRpm:tools.finishRpm,note=i===0?'run first':(s==='finish'?'change bit + re-probe Z':'reuse roughing bit + re-probe Z'),rpmNote=rpm?('set '+Math.round(rpm)+' RPM'+(Math.round(rpm)===18000?' / gear 4':'')):'set router speed';return '<div class="cnc-stage"><b>'+cncStageLabel(s)+'</b><span>'+cncEsc(tool||'selected bit')+'</span><span class="muted">'+note+' · '+rpmNote+' · turn router on manually</span><span style="margin-left:auto">'+(active?'<span style="color:#7ee0ac">Loaded</span>':'<button class="ghost" onclick="cncActivateStage(\''+s+'\',this)">Load stage</button>')+'</span></div>';}).join('')+'<div class="cnc-plan-warning" style="margin-top:7px">Project cannot start or stop the Genmitsu 710W AC router. Switch it off manually after completion or any Stop.</div>';}
+async function cncActivateStage(stage,button){var job=cncCurrentJob();if(!job)return;var warning=stage==='rough'?'Load the roughing stage?':'Load the '+stage+' stage?\n\nConfirm the previous stage is complete, the correct bit is installed, and Z has been re-probed and locked after any bit change.';if(!confirm(warning))return;button.disabled=true;button.textContent='Loading…';try{var j=await cncPost({jobId:job.id,activateStage:stage});if(!j||!j.cnc||j.error)throw Error((j&&j.error)||'Could not load stage');CNC=j.cnc;job=cncCurrentJob();var gc=await cncFetchFile(job.id,'gc');if(gc)cncRenderToolpath(gc);cncRenderStages(job);cncRenderAgent(job);var st=document.getElementById('cncRunStatus');if(st)st.textContent=cncStageLabel(stage)+' stage loaded. Verify the correct bit and probe lock before Start.';}catch(e){alert(e.message||e);button.disabled=false;button.textContent='Load stage';}}
 function cncCompressImage(file, cb){
   try{ var img=new Image(); var url=URL.createObjectURL(file);
     img.onload=function(){ var maxD=1400, w=img.width||1, h=img.height||1, sc=Math.min(1,maxD/Math.max(w,h));
@@ -1804,9 +1908,9 @@ async function cncUploadCreative(ev){ var f=ev.target.files&&ev.target.files[0];
     if(!url){ if(st) st.textContent=''; alert('Could not read that image — try a PNG or JPG.'); return; }
     if(st) st.textContent='Saving image…';
     var j=await cncPost({jobId:job.id, creativeImage:url});
-    if(j&&j.cnc){ CNC=j.cnc; var cp=document.getElementById('cncCreativePrev'); if(cp) cp.innerHTML='<img src="'+url+'" style="max-width:100%;max-height:220px;object-fit:contain">'; if(st) st.textContent='Image saved. Now hit Load.'; renderCncActiveSelect();
-      var _ai=new Image(); _ai.onload=async function(){ var ar=(_ai.height||1)/(_ai.width||1); CNC_AR[job.id]=ar; try{ var jr=await cncPost({updateJob:{id:job.id, imgAR:String(ar.toFixed(4))}}); if(jr&&jr.cnc) CNC=jr.cnc; }catch(e){} cncRenderPanelPlan(); }; _ai.src=url;
-      setTimeout(function(){if(st)st.textContent='';},1600);} else { if(st) st.textContent='Error saving.'; }
+    if(j&&j.cnc){ CNC=j.cnc; var cp=document.getElementById('cncCreativePrev'); if(cp) cp.innerHTML='<img src="'+url+'" style="max-width:100%;max-height:220px;object-fit:contain">'; if(st) st.textContent='Image saved. Review the machining plan before G-code.'; renderCncActiveSelect();
+      var _ai=new Image(); _ai.onload=async function(){ var ar=(_ai.height||1)/(_ai.width||1); CNC_AR[job.id]=ar; try{ var jr=await cncPost({updateJob:{id:job.id, imgAR:String(ar.toFixed(4))}}); if(jr&&jr.cnc) CNC=jr.cnc; }catch(e){} cncRenderPanelPlan(); cncOpenPlan(url,cncCurrentJob()||job); }; _ai.src=url;
+    } else { if(st) st.textContent='Error saving.'; }
   });
 }
 async function cncUploadGcode(ev){ var f=ev.target.files&&ev.target.files[0]; if(!f) return;
@@ -1902,16 +2006,17 @@ function cncGlobalRange(img){ try{ var W=200, ar=(img.height||1)/(img.width||1),
   var c=document.createElement('canvas'); c.width=W;c.height=H; var x=c.getContext('2d'); x.drawImage(img,0,0,W,H);
   var d=x.getImageData(0,0,W,H).data, mn=1e9,mx=-1e9; for(var i=0;i<W*H;i++){ var v=0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2]; if(v<mn)mn=v; if(v>mx)mx=v; }
   return {mn:mn,mx:mx}; }catch(e){ return {mn:0,mx:255}; } }
-function cncBitStepover(job){ var b=String(job&&job.bit||'').toLowerCase(); if(b.indexOf('ball')>=0) return 0.4; if(b.indexOf('flat')>=0||b.indexOf('end mill')>=0) return 1.0; return 0.5; }
-function cncBitRadius(job){ var b=String(job&&job.bit||'').toLowerCase(); var m=b.match(/([\d.]+)\s*mm/); if(m){ return (parseFloat(m[1])||3.175)/2; } if(b.indexOf('v-bit')>=0||b.indexOf('vbit')>=0) return 0.5; return 1.5875; }
+function cncBitStepover(job){ var b=String(job&&job.bit||'').toLowerCase(); if(b.indexOf('w01015')>=0||b.indexOf('tapered ball')>=0)return .5;if(b.indexOf('ru2100')>=0||b.indexOf('1/4″ upcut')>=0)return 2.5;if(b.indexOf('ball')>=0) return 0.4; if(b.indexOf('flat')>=0||b.indexOf('end mill')>=0) return 1.0; return 0.5; }
+function cncBitRadius(job){ var b=String(job&&job.bit||'').toLowerCase(); if(b.indexOf('ru2100')>=0||b.indexOf('1/4″ upcut')>=0)return 3.175;if(b.indexOf('w01015')>=0||b.indexOf('1/32″ radius')>=0)return .79375;var m=b.match(/([\d.]+)\s*mm/); if(m){ return (parseFloat(m[1])||3.175)/2; } if(b.indexOf('v-bit')>=0||b.indexOf('vbit')>=0) return 0.5; return 1.5875; }
 function cncCutoutHint(){}
+function cncMaskOutline(mask,cols,rows,W,H,offset){ var left=[],right=[],minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;for(var y=0;y<rows;y++){var lo=-1,hi=-1;for(var x=0;x<cols;x++)if(mask[y*cols+x]){if(lo<0)lo=x;hi=x;}if(lo>=0){var yy=H-y/Math.max(1,rows-1)*H,lx=lo/Math.max(1,cols-1)*W,rx=hi/Math.max(1,cols-1)*W;left.push([lx,yy]);right.push([rx,yy]);minX=Math.min(minX,lx);maxX=Math.max(maxX,rx);minY=Math.min(minY,yy);maxY=Math.max(maxY,yy);}}if(left.length<3)return null;var pts=left.concat(right.reverse()),cx=(minX+maxX)/2,cy=(minY+maxY)/2,off=Math.max(0,Number(offset)||0);if(off)pts=pts.map(function(p){var dx=p[0]-cx,dy=p[1]-cy,n=Math.sqrt(dx*dx+dy*dy)||1;return[p[0]+dx/n*off,p[1]+dy/n*off];});pts.push(pts[0].slice());return pts;}
 function cncAppendCutout(g, W, H, o){
   if(!o||!o.cutout||o.cutout==='none') return;
   var thick=cncClamp(o.matThick||0,0.5,120); if(!(thick>0)) return;
   var bitR=o.bitR||1.5875, feed=o.feed||300, plunge=o.plunge||100, safeZ=o.safeZ||3, passDepth=cncClamp(o.passDepth||1.2,0.3,4);
   var withTabs=(o.cutout==='tabs'), nTabs=withTabs?Math.max(2,Math.min(24,o.tabs||6)):0, tabH=withTabs?cncClamp(o.tabHeight||1.5,0.3,6):0, tabW=7;
-  var full=-(thick+0.6), x0=-bitR, y0=-bitR, x1=W+bitR, y1=H+bitR;
-  var pts=[[x0,y0],[x1,y0],[x1,y1],[x0,y1],[x0,y0]], segs=[], total=0, i;
+  var full=-(thick+(o.noOvercut?0:0.6)), x0=-bitR, y0=-bitR, x1=W+bitR, y1=H+bitR;
+  var pts=(o.points&&o.points.length>3)?o.points:[[x0,y0],[x1,y0],[x1,y1],[x0,y1],[x0,y0]], segs=[], total=0, i;
   for(i=0;i<pts.length-1;i++){ var ax=pts[i][0],ay=pts[i][1],bx=pts[i+1][0],by=pts[i+1][1], len=Math.sqrt((bx-ax)*(bx-ax)+(by-ay)*(by-ay)); segs.push({ax:ax,ay:ay,bx:bx,by:by,len:len,start:total}); total+=len; }
   var centers=[]; for(var t=0;t<nTabs;t++) centers.push((t+0.5)/nTabs*total);
   function inTab(d){ for(var k=0;k<centers.length;k++){ var dd=Math.abs(d-centers[k]); dd=Math.min(dd,total-dd); if(dd<tabW/2) return true; } return false; }
@@ -1929,18 +2034,22 @@ function cncAppendCutout(g, W, H, o){
 function cncGenReliefRegion(img, reg, o, cb){ try{
   var panelW=cncClamp(o.panelW||100,10,2000), panelH=cncClamp(o.panelH||100,10,2000),
     maxDepth=cncClamp(o.maxDepth||1.5,0.1,60), feed=cncClamp(o.feed||300,50,4000), plunge=cncClamp(o.plunge||100,20,1500),
-    rpm=cncClamp(o.rpm||9000,3000,9000), passDepth=cncClamp(o.passDepth||0.4,0.05,6), stepover=cncClamp(o.stepover||0.6,0.1,4),
+    rpm=cncClamp(o.rpm||9000,3000,30000), passDepth=cncClamp(o.passDepth||0.4,0.05,6), stepover=cncClamp(o.stepover||0.6,0.05,6),
     three=!/2D/i.test(o.carveType||'3D'), invert=!!o.invert, flatten=!!o.flatten,
     gMn=(o.gMn!=null?o.gMn:0), gMx=(o.gMx!=null?o.gMx:255), budget=o.budget||1200000, safeZ=Math.max(2,Math.min(6,maxDepth*0.4+2)),
-    contrast=cncClamp(o.contrast||1,0.5,2.5), doSmooth=(o.smooth!==false);
+    contrast=cncClamp(o.contrast||1,0.5,2.5), doSmooth=(o.smooth!==false), stage=o.stage||'all', plan=o.plan||null, manualRouter=!!o.manualRouter;
   var passes=Math.max(1,Math.ceil(maxDepth/passDepth)); if(passes>28){ passDepth=+(maxDepth/28).toFixed(3); passes=28; }
   var cols=cncClamp(Math.round(panelW/stepover),40,900), ar=panelH/panelW, rows=cncClamp(Math.round(cols*ar),20,900);
-  while(((passes-1)*rows*Math.ceil(cols/2)+rows*cols)>budget && cols>60){ cols=Math.round(cols*0.85); rows=Math.round(rows*0.85); }
+  function moveBudget(){if(stage==='finish')return rows*cols;if(stage==='profile')return rows*2;var roughPasses=stage==='rough'?passes:Math.max(0,passes-1);return roughPasses*rows*cols+(stage==='all'?rows*cols:0);}
+  if(moveBudget()>budget){ var gridScale=Math.sqrt(budget/moveBudget()); cols=Math.max(60,Math.floor(cols*gridScale)); rows=Math.max(20,Math.floor(rows*gridScale)); while(moveBudget()>budget&&cols>60){if(cols/rows>panelW/panelH)cols--;else rows--;} }
   var cv=document.createElement('canvas'); cv.width=cols; cv.height=rows; var cx=cv.getContext('2d');
   cx.drawImage(img, reg.sx,reg.sy,reg.sw,reg.sh, 0,0, cols,rows); var data=cx.getImageData(0,0,cols,rows).data;
-  var hm=new Float32Array(cols*rows), rng=(gMx-gMn)||1, i,ix,iy,x,y,dx,dy;
+  var hm=new Float32Array(cols*rows), rng=(gMx-gMn)||1, i,ix,iy,x,y,dx,dy, planMask=plan?cncPlanBuildMask(data,cols,rows,Number(plan.maskThreshold)||32,plan.background==='rectangle'):null;
+  if(planMask){gMn=1e9;gMx=-1e9;for(iy=0;iy<rows;iy++)for(ix=0;ix<cols;ix++){var li=(iy*cols+ix)*4;if(!planMask[iy*cols+ix])continue;var lv=.299*data[li]+.587*data[li+1]+.114*data[li+2];if(lv<gMn)gMn=lv;if(lv>gMx)gMx=lv;}if(!(gMx>gMn)){gMn=0;gMx=255;}rng=gMx-gMn;}
   for(iy=0;iy<rows;iy++)for(ix=0;ix<cols;ix++){ i=(iy*cols+ix)*4; var a=data[i+3];
-    var lum=(a<10)?gMx:(0.299*data[i]+0.587*data[i+1]+0.114*data[i+2]); var h=(lum-gMn)/rng; if(h<0)h=0; if(h>1)h=1; if(invert) h=1-h; hm[iy*cols+ix]=h; }
+    var lum=(a<10)?gMx:(0.299*data[i]+0.587*data[i+1]+0.114*data[i+2]); var h=(lum-gMn)/rng; if(h<0)h=0; if(h>1)h=1; if(invert) h=1-h;
+    if(plan){if(!planMask[iy*cols+ix])h=1;else{var bands=plan.depthBands||[0,maxDepth*.3,maxDepth*.65,maxDepth],dark=1-h,bi=Math.min(3,Math.max(0,Math.floor(dark*4))),dep=Number(bands[bi])||0;(plan.regions||[]).forEach(function(r){var nx=ix/Math.max(1,cols-1),ny=iy/Math.max(1,rows-1);if(nx>=r.x&&nx<=r.x+r.w&&ny>=r.y&&ny<=r.y+r.h)dep=Number(r.depthMm)||0;});h=1-Math.min(maxDepth,dep)/maxDepth;}}
+    hm[iy*cols+ix]=h; }
   if(flatten){ var thr=0.12; for(var k=0;k<hm.length;k++){ hm[k]=(hm[k]<thr)?0:((hm[k]-thr)/(1-thr)); } }
   if(contrast!==1){ for(var kc=0;kc<hm.length;kc++){ var hv=(hm[kc]-0.5)*contrast+0.5; hm[kc]=hv<0?0:(hv>1?1:hv); } }
   if(doSmooth){ var sm=new Float32Array(cols*rows);
@@ -1948,21 +2057,23 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
     hm=sm; }
   var dxmm=panelW/((cols-1)||1), dymm=panelH/((rows-1)||1);
   function targ(px,py){ var h=hm[py*cols+px]; if(!three) return (h<0.5)?-maxDepth:0; return -maxDepth*(1-h); }
+  function rowRuns(py,ltr){var runs=[],run=[];for(var px=0;px<cols;px++){if(!planMask||planMask[py*cols+px])run.push(px);else if(run.length){runs.push(run);run=[];}}if(run.length)runs.push(run);if(!ltr){runs.reverse();for(var rr=0;rr<runs.length;rr++)runs[rr].reverse();}return runs;}
   var g=['; CNC Studio panel '+(o.label||'')+' ('+(three?'3D relief':'2D outline')+')',
-    '; '+panelW.toFixed(1)+'x'+panelH.toFixed(1)+' mm, depth '+maxDepth+' mm, '+cols+'x'+rows+' grid, ~'+(panelW/cols).toFixed(2)+' mm stepover, '+passes+' rough passes @ '+passDepth+' mm',
+    '; '+panelW.toFixed(1)+'x'+panelH.toFixed(1)+' mm, depth '+maxDepth+' mm, '+cols+'x'+rows+' grid, ~'+(panelW/cols).toFixed(2)+' mm stepover, stage '+stage+(stage==='finish'?'':(', '+passes+' rough passes @ '+passDepth+' mm')),
+    '; TOOL: '+String(o.tool||'selected bit')+(o.woodSpecies?(' | WOOD: '+String(o.woodSpecies)):'') ,
+    '; SPINDLE: Set the Genmitsu 710W router manually to '+Math.round(rpm)+' RPM'+(Math.round(rpm)===18000?' (gear 4)':''),
     '; ZERO X0 Y0 Z0 AT THE FRONT-LEFT TOP CORNER OF THIS PANEL BEFORE RUNNING','G21','G90','G17'];
-  g.push('G0 Z'+safeZ.toFixed(2),'M3 S'+rpm,'G4 P2');
+  g.push('G0 Z'+safeZ.toFixed(2));if(!manualRouter)g.push('M3 S'+Math.min(9000,rpm));g.push('G4 P2');
   var pz,ry,kk,seq,cxi,cc,z,yy;
-  for(pz=1; pz<passes; pz++){ var level=-Math.min(maxDepth, passDepth*pz);
-    for(ry=0; ry<rows; ry++){ yy=(panelH-ry*dymm).toFixed(3); var ltr=(ry%2===0); seq=[]; for(cxi=0;cxi<cols;cxi+=2) seq.push(ltr?cxi:(cols-1-cxi));
-      if(!seq.length) continue; var z0=Math.max(targ(seq[0],ry),level);
+  if(stage==='all'||stage==='rough') for(pz=1; pz<=(stage==='rough'?passes:passes-1); pz++){ var level=-Math.min(maxDepth, passDepth*pz);
+    for(ry=0; ry<rows; ry++){ yy=(panelH-ry*dymm).toFixed(3); var roughRuns=rowRuns(ry,ry%2===0);for(var rri=0;rri<roughRuns.length;rri++){seq=roughRuns[rri];if(!seq.length)continue;var z0=Math.max(targ(seq[0],ry),level);
       g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+(seq[0]*dxmm).toFixed(3)+' Y'+yy,'G1 Z'+z0.toFixed(3)+' F'+plunge);
-      for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; z=Math.max(targ(cc,ry),level); g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+z.toFixed(3)+(kk===0?(' F'+feed):'')); } } }
-  for(ry=0; ry<rows; ry++){ yy=(panelH-ry*dymm).toFixed(3); var ltrf=(ry%2===0); seq=[]; for(cxi=0;cxi<cols;cxi++) seq.push(ltrf?cxi:(cols-1-cxi));
+      for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; z=Math.max(targ(cc,ry),level); g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+z.toFixed(3)+(kk===0?(' F'+feed):'')); } } } }
+  if(stage==='all'||stage==='finish') for(ry=0; ry<rows; ry++){ yy=(panelH-ry*dymm).toFixed(3);var finishRuns=rowRuns(ry,ry%2===0);for(var fri=0;fri<finishRuns.length;fri++){seq=finishRuns[fri];if(!seq.length)continue;
     g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+(seq[0]*dxmm).toFixed(3)+' Y'+yy,'G1 Z'+targ(seq[0],ry).toFixed(3)+' F'+plunge);
-    for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+targ(cc,ry).toFixed(3)+(kk===0?(' F'+feed):'')); } }
-  cncAppendCutout(g, panelW, panelH, {matThick:0, cutout:'none', tabs:0, tabHeight:0, bitR:o.bitR||1.5875, feed:feed, plunge:plunge, safeZ:safeZ, passDepth:Math.max(passDepth,1.2)});
-  g.push('G0 Z'+safeZ.toFixed(2),'M5','G0 X0 Y0','M2'); cb(g.join('\n'));
+    for(kk=0;kk<seq.length;kk++){ cc=seq[kk]; g.push('G1 X'+(cc*dxmm).toFixed(3)+' Z'+targ(cc,ry).toFixed(3)+(kk===0?(' F'+feed):'')); } } }
+  if(stage==='profile'&&plan&&plan.cutout&&plan.cutout.mode!=='none'){var outline=plan.cutout.mode==='silhouette'?cncMaskOutline(planMask,cols,rows,panelW,panelH,o.bitR||1.5875):null;cncAppendCutout(g,panelW,panelH,{matThick:Number(plan.cutout.thicknessMm)||0,cutout:Number(plan.cutout.tabs)>0?'tabs':'profile',tabs:Number(plan.cutout.tabs)||0,tabHeight:Number(plan.cutout.tabHeightMm)||1.5,bitR:o.bitR||1.5875,feed:feed,plunge:plunge,safeZ:safeZ,passDepth:Math.max(passDepth,1.2),points:outline,noOvercut:true});}
+  g.push('G0 Z'+safeZ.toFixed(2));if(!manualRouter)g.push('M5');g.push('G0 X0 Y0','M2'); cb(g.join('\n'));
 }catch(e){ cb(null); } }
 function cncPatchesFor(job){ var f=cncFinished(job); var mm=f?Math.max(f.W,f.H):200; return Math.max(48,Math.min(72,Math.round(mm/16))); }
 async function cncEnsureReliefSource(job, st){
@@ -2011,42 +2122,44 @@ function cncDownloadPanel(jobId,r,c){ var ctx=CNC_PANEL_CTX[jobId]; if(!ctx){ al
 async function cncDownloadAllPanels(jobId){ var ctx=CNC_PANEL_CTX[jobId]; if(!ctx) return; for(var r=0;r<ctx.rows;r++)for(var c=0;c<ctx.cols;c++){ cncDownloadPanel(jobId,r,c); await new Promise(function(res){setTimeout(res,1100);}); } }
 
 function cncLoadMsg(){ return 'Design generated. Review the preview, then set X/Y zero and complete both probes.'; }
-async function cncGenFromImage(job, srcDataURL){
+async function cncGenFromImage(job, srcDataURL, plan, stage, bit){
   var mat=job.material||'C752 nickel silver', preset=CNC_MATS[mat]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||'');
   return new Promise(function(resolve){ var img=new Image();
-    img.onload=function(){ var width=(Number(job.sizeMM)||100), ar=(img.height||1)/(img.width||1), height=(Number(job.pieceH)||width*ar), range=cncGlobalRange(img);
+    img.onload=function(){ var width=Number(plan&&plan.widthMm)||(Number(job.sizeMM)||100), ar=(img.height||1)/(img.width||1), height=Number(plan&&plan.heightMm)||(Number(job.pieceH)||width*ar), range=cncGlobalRange(img), useBit=bit||job.bit;
+      var t=(plan&&plan.tools)||{}, rough=(stage==='rough'||stage==='profile'), finish=(stage==='finish'||stage==='all');
       cncGenReliefRegion(img,{sx:0,sy:0,sw:img.width,sh:img.height},{
-        label:'machine job', panelW:width, panelH:height, maxDepth:(Number(job.reliefDepth)||preset.depth),
-        passDepth:+(preset.step*(cons?0.7:1)).toFixed(3), stepover:cncBitStepover(job),
-        feed:Math.round(preset.feed*(cons?0.6:1)), plunge:cons?Math.min(60,Math.round(preset.plunge*0.6)):preset.plunge, rpm:preset.rpm,
+        label:'machine job '+(stage||'all'), panelW:width, panelH:height, maxDepth:Number(plan&&plan.maxDepthMm)||(Number(job.reliefDepth)||preset.depth),
+        passDepth:rough?(Number(t.roughPassDepthMm)||1.5):+(preset.step*(cons?0.7:1)).toFixed(3), stepover:rough?(Number(t.roughStepoverMm)||2.5):(Number(t.finishStepoverMm)||cncBitStepover({bit:useBit})||.5),
+        feed:rough?(Number(t.roughFeedMmMin)||900):(finish?(Number(t.finishFeedMmMin)||700):Math.round(preset.feed*(cons?0.6:1))), plunge:rough?(Number(t.roughPlungeMmMin)||180):(finish?(Number(t.finishPlungeMmMin)||150):(cons?Math.min(60,Math.round(preset.plunge*0.6)):preset.plunge)), rpm:rough?(Number(t.roughRpm)||18000):(finish?(Number(t.finishRpm)||18000):preset.rpm),
         carveType:job.carveType||'3D relief', invert:(job.invertDepth==='true'||job.invertDepth===true),
         flatten:(job.flattenBg==='true'||job.flattenBg===true), gMn:range.mn, gMx:range.mx,
-        contrast:(job.reliefSource==='depth'?1:1.4), smooth:(job.reliefSource==='depth'), budget:30000,
-        cutout:'none', matThick:0, tabs:0, tabHeight:0, bitR:cncBitRadius(job)
+        contrast:(job.reliefSource==='depth'?1:1.4), smooth:plan?false:(job.reliefSource==='depth'), budget:(stage==='finish'?38000:30000),
+        cutout:'none', matThick:0, tabs:0, tabHeight:0, bitR:cncBitRadius({bit:useBit}),tool:useBit,woodSpecies:t.woodSpecies||'',plan:plan||null,stage:stage||'all',manualRouter:!!plan
       },resolve); };
     img.onerror=function(){ resolve(null); }; img.src=srcDataURL;
   });
 }
+async function cncApprovePlanAndGenerate(){ var job=cncCurrentJob();if(!job||!CNC_PLAN||!CNC_PLAN_SOURCE)return;cncPlanReadFields();var h=(CNC.agent&&CNC.agent.health)||{},safe=Number((h.setup||{}).maxCutDepthMm)||0;if(safe&&CNC_PLAN.maxDepthMm>safe+.001){alert('The approved depth exceeds the probed safe maximum.');return;}if(CNC_PLAN.cutout.mode!=='none'&&!(CNC_PLAN.cutout.thicknessMm>0)){alert('Enter the profile depth/material thickness.');return;}CNC_PLAN.status='approved';CNC_PLAN.hash=cncPlanHash(CNC_PLAN);var st=document.getElementById('cncPlanStatus'),btn=document.getElementById('cncPlanGenerateBtn');if(btn)btn.disabled=true;if(st)st.textContent='Saving the approved plan…';
+  try{var saved=await cncPost({jobId:job.id,machiningPlan:CNC_PLAN});if(!saved||!saved.cnc)throw Error((saved&&saved.error)||'Could not save machining plan');CNC=saved.cnc;job=cncCurrentJob();var update=await cncPost({updateJob:{id:job.id,sizeMM:String(CNC_PLAN.widthMm),sizeVal:String(CNC_PLAN.widthMm),sizeUnit:'mm',pieceH:String(CNC_PLAN.heightMm),reliefDepth:String(CNC_PLAN.maxDepthMm),bit:CNC_PLAN.tools.finishBit,cutout:CNC_PLAN.cutout.mode,matThick:String(CNC_PLAN.cutout.thicknessMm),tabs:String(CNC_PLAN.cutout.tabs),tabHeight:String(CNC_PLAN.cutout.tabHeightMm)}});if(update&&update.cnc){CNC=update.cnc;job=cncCurrentJob();}
+    var programs={},stages=CNC_PLAN.tools.strategy==='staged'?['rough','finish']:['all'];if(CNC_PLAN.cutout.mode!=='none')stages.push('profile');for(var i=0;i<stages.length;i++){var stage=stages[i],tool=stage==='rough'?CNC_PLAN.tools.roughBit:(stage==='profile'?CNC_PLAN.tools.profileBit:CNC_PLAN.tools.finishBit);if(st)st.textContent='Generating '+stage+' stage with '+tool+'…';var gc=await cncGenFromImage(job,CNC_PLAN_SOURCE,CNC_PLAN,stage,tool);if(!gc)throw Error('Could not generate '+stage+' stage');if(gc.length>790000)throw Error(stage+' stage is too large; reduce size or detail resolution');programs[stage]=gc;}
+    var out=await cncPost({jobId:job.id,gcodeStages:programs});if(!out||!out.cnc)throw Error((out&&out.error)||'Could not save generated stages');CNC=out.cnc;job=cncCurrentJob();var active=stages[0],activeGc=programs[active];cncRenderToolpath(activeGc);renderCncJobs();renderCncActiveSelect();cncRenderStages(job);if(st)st.textContent='Approved plan generated: '+stages.length+' guarded stage'+(stages.length===1?'':'s')+'.';cncClosePlan();var rs=document.getElementById('cncRunStatus');if(rs)rs.textContent='Machining plan approved. '+active+' stage loaded; review the exact toolpath before Start.';
+  }catch(e){if(st)st.textContent='Error: '+(e&&e.message?e.message:e);alert(e&&e.message?e.message:String(e));}finally{if(btn)btn.disabled=false;}}
 async function cncLoad(){ var job=cncCurrentJob(); if(!job){ alert('Pick or add a job first.'); return; }
   var st=document.getElementById('cncRunStatus');
   if(job.hasGcode && !job.hasCreative){ if(st) st.textContent='Loading...'; var j0=await cncPost({jobId:job.id, machineAction:'load'}); if(j0&&j0.cnc){ CNC=j0.cnc; renderCncJobs(); await cncRenderActive(); if(st) st.textContent=cncLoadMsg(); } return; }
   if(!job.hasCreative){ alert('Upload a creative image first (step 1).'); return; }
   var _pl=cncPanels(job); if(_pl && _pl.total>1){ alert('This finished size needs '+_pl.total+' panels ('+_pl.cols+' x '+_pl.rows+') - bigger than the machine. Use "Generate panel files" in the Size & panels card to make the per-panel .nc files.'); return; }
   var srcURL=await cncEnsureReliefSource(job, st); if(!srcURL){ if(st) st.textContent=''; return; }
-  var usedDepth=(job.reliefSource==='depth'&&CNC.config&&CNC.config.hasDepthToken&&(cncCurrentJob()||{}).hasDepth);
-  if(st) st.textContent=usedDepth?'Building the 3D relief from the AI depth...':'Building a basic relief (add a depth-AI token in 3D design AI for true 3D)...';
-  var gcode=await cncGenFromImage(job, srcURL);
-  if(!gcode){ if(st) st.textContent=''; alert('Could not generate the design.'); return; }
-  if(gcode.length>790000){ if(st) st.textContent=''; alert('Too large - lower the Size or the depth under Advanced.'); return; }
-  var j=await cncPost({jobId:job.id, gcode:gcode, gcodeName:'auto-'+(usedDepth?'depth':'basic')+'.nc', machineAction:'load'});
-  if(j&&j.cnc){ CNC=j.cnc; cncRenderRelief(srcURL,(Number(job.sizeMM)||100)+' mm wide \u00b7 max depth '+(Number(job.reliefDepth)||(CNC_MATS[job.material]||CNC_MATS['Other']).depth)+' mm \u00b7 '+(usedDepth?'AI scene depth':'from the artwork')); renderCncJobs(); renderCncActiveSelect(); if(st) st.textContent=cncLoadMsg(); }
+  if(st)st.textContent='Review the machining plan. No G-code has been created.';cncOpenPlan(srcURL,job);
 }
 async function cncStart(button){ var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
   if(!job.hasGcode){ alert('Generate and preview the design before you Start.'); return; }
+  if(job.hasCreative&&job.planStatus!=='approved'){ alert('Start is locked until the machining plan is reviewed and approved.'); return; }
   var fit=cncStockFit(job); if(!fit.ok){ alert('Start is locked: '+fit.reason); return; }
   var h=(CNC.agent&&CNC.agent.health)||{}, w=h.workspace||{}, s=h.setup||{};
   if(!CNC.agent||!h.connected||!w.calibrated||!s.xyReady||!s.bedProbeReady||!s.stockProbeReady||!s.probeReady||!s.probeLocked){ alert('Start is locked until Bridge, Controller, Boundaries, X/Y zero, Bed probe, Stock probe, and Probe lock are all green.'); return; }
-  if(!confirm('Start the carve for “'+(job.project||'job')+'”?\n\nStock: '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm\nToolpath: '+fit.f.W.toFixed(1)+' × '+fit.f.H.toFixed(1)+' mm from the locked stock-corner zero\n\nConfirm the stock cannot move, the probe plate and clip are removed, the full path is clear, and the e-stop is reachable.')) return;
+  var tools={};try{tools=JSON.parse(job.planTools||'{}');}catch(e){}var stage=job.activeStage||'all',rough=(stage==='rough'||stage==='profile'),tool=rough?tools.roughBit:tools.finishBit,targetRpm=rough?tools.roughRpm:tools.finishRpm,routerNote=targetRpm?('\n\nEXTERNAL ROUTER: Install '+(tool||'the selected bit')+', set the Genmitsu 710W to '+Math.round(targetRpm)+' RPM'+(Math.round(targetRpm)===18000?' (gear 4)':'')+', and switch it ON before confirming. Project cannot start or stop this AC router; switch it OFF after completion or any Stop.') : '';
+  if(!confirm('Start the '+stage+' stage for “'+(job.project||'job')+'”?\n\nStock: '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm\nToolpath: '+fit.f.W.toFixed(1)+' × '+fit.f.H.toFixed(1)+' mm from the locked stock-corner zero'+routerNote+'\n\nConfirm the stock cannot move, the probe plate and clip are removed, the full path is clear, and the e-stop is reachable.')) return;
   return cncQueueMachineAction('start',{},button);
 }
 async function cncMachineAction(action,extra,button){ return cncQueueMachineAction(action,extra||{},button); }
