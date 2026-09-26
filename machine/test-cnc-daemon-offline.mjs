@@ -16,7 +16,6 @@ const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.u
     CNC_DAEMON_SOCKET: socketPath,
     CNC_PROBE_STATE: probeStatePath,
     CNC_XY_STATE: xyStatePath,
-    CNC_CAMERA_REQUIRED: "0",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
