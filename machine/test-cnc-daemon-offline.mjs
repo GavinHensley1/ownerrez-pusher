@@ -14,6 +14,7 @@ const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.u
     CNC_HOST: "127.0.0.1",
     CNC_PORT: "9",
     CNC_DAEMON_SOCKET: socketPath,
+    CNC_LOCAL_UI_PORT: "0",
     CNC_PROBE_STATE: probeStatePath,
     CNC_XY_STATE: xyStatePath,
   },
@@ -49,6 +50,9 @@ try {
   assert.equal(child.exitCode, null, `daemon exited after health check: ${output}`);
   process.stdout.write("PASS offline CNC remains a stable disconnected state\n");
 } finally {
-  child.kill("SIGTERM");
-  await new Promise((resolve) => child.once("exit", resolve));
+  if (child.exitCode === null) {
+    const exited = new Promise((resolve) => child.once("exit", resolve));
+    child.kill("SIGTERM");
+    await exited;
+  }
 }

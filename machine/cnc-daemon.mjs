@@ -3,7 +3,7 @@ import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
-import { measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
+import { limitVerticalPlungeFeed, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 import { applyXyLock, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 import { readProgram, saveProgram } from "./cnc-program-state.mjs";
@@ -28,7 +28,7 @@ const job = { state: "idle", jobId: null, progress: 0, message: "", updatedAt: n
 const json = (res, status, value) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
 const motionGuard = async () => ({ state: "controller_and_software_guards" });
 
-const programGuard = async ({ analysis, programContext }) => {
+const programGuard = async ({ before, analysis, programContext }) => {
   const snap = workspace.snapshot();
   if (!snap.calibrated) throw new Error("Virtual boundaries are not calibrated");
   if (!setup.xyReady) throw new Error("Set X/Y zero before starting");
@@ -37,6 +37,13 @@ const programGuard = async ({ analysis, programContext }) => {
   if (!Number.isFinite(setup.maxCutDepthMm) || setup.maxCutDepthMm <= 0) throw new Error("Measured stock depth is unavailable");
   validateProgramEnvelope(analysis, { widthMm: 360, heightMm: 360, maxDepthMm: setup.maxCutDepthMm, maxSafeZMm: 6 });
   validateProgramStockEnvelope(analysis, { widthMm: programContext?.stockWidthMm, heightMm: programContext?.stockHeightMm, reserveMm: programContext?.stockReserveMm });
+  const current = coordinates(before);
+  for (const axis of ["X", "Y", "Z"]) {
+    const allowed = snap.bounds[axis];
+    if (current[axis] < allowed.min - 0.001 || current[axis] > allowed.max + 0.001) {
+      throw new Error(`Current ${axis} position ${current[axis].toFixed(3)} is outside the calibrated controller frame ${allowed.min.toFixed(3)}..${allowed.max.toFixed(3)}; reset coordinates before starting`);
+    }
+  }
   const origins = { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos };
   for (const axis of ["X", "Y", "Z"]) {
     if (!Number.isFinite(origins[axis])) throw new Error(`${axis} work origin is unavailable`);
@@ -96,6 +103,7 @@ const scheduleRestart = () => { if (restartScheduled) return; restartScheduled =
 controller.on("fault", (error) => {
   const hazardous = hazardousOperationActive();
   incident = error?.message || "CONTROLLER_FAULT";
+  process.stderr.write(`[cnc] controller fault hazardous=${hazardous}: ${incident}\n`);
   workspace.clear();
   clearSetup();
   if (hazardous) scheduleRestart();
@@ -103,6 +111,7 @@ controller.on("fault", (error) => {
 controller.on("close", () => {
   const hazardous = hazardousOperationActive();
   if (hazardous) incident = "CONTROLLER_CONNECTION_LOST";
+  process.stderr.write(`[cnc] controller close hazardous=${hazardous}\n`);
   workspace.clear();
   clearSetup();
   if (hazardous) scheduleRestart();
@@ -270,7 +279,7 @@ const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockRe
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm } });
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
-  try { const result = await controller.runProgram(savedProgram.gcode, { programContext: savedProgram.context, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
+  try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); throw error; } finally { moving = false; }
 };
 const recoverStoppedController = async (payload) => {

@@ -8,6 +8,18 @@ export function cleanProgramLine(raw) {
     .toUpperCase();
 }
 
+export function limitVerticalPlungeFeed(source, maxFeedMmMin = 60) {
+  const limit = Number(maxFeedMmMin);
+  if (!Number.isFinite(limit) || limit < 20 || limit > 300) throw new Error("Plunge feed limit must be 20-300 mm/min");
+  return String(source || "").split(/\r?\n/).map((raw) => {
+    const line = cleanProgramLine(raw);
+    if (!/^G0*1\b/.test(line) || !/\bZ[-+]?\d/.test(line) || /\b[XY][-+]?\d/.test(line)) return raw;
+    const feed = line.match(/\bF([-+]?(?:\d+(?:\.\d*)?|\.\d+))/);
+    if (!feed || Number(feed[1]) <= limit) return raw;
+    return raw.replace(/\bF([-+]?(?:\d+(?:\.\d*)?|\.\d+))/i, `F${limit}`);
+  }).join("\n");
+}
+
 export function analyzeProgram(source, { maxBytes = 800_000, maxLines = 120_000, maxSpindleRpm = 9_000 } = {}) {
   const text = String(source || "");
   if (!text.trim()) throw new Error("G-code is empty");

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeProgram, cleanProgramLine, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
+import { analyzeProgram, cleanProgramLine, limitVerticalPlungeFeed, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 
 const safe = `; sample\nG21\nG90\nG17\nG0 Z2\nM3 S9000\nG0 X0 Y0\nG1 Z-1 F100\nG1 X100 Y80 F200\nG0 Z2\nM5\nM2`;
 
@@ -10,6 +10,11 @@ test("cleans comments and analyzes a bounded generated program", () => {
   assert.equal(result.maxSpindleRpm, 9000);
   assert.deepEqual(result.bounds.X, { min: 0, max: 100 });
   assert.equal(validateProgramEnvelope(result, { widthMm: 360, heightMm: 360, maxDepthMm: 68, maxSafeZMm: 5 }), true);
+});
+
+test("caps pure vertical plunge feeds without changing cutting moves", () => {
+  const source = "G1 Z-0.2 F150\nG1 X10 Z-0.3 F480\nG1 Z-0.4 F40";
+  assert.equal(limitVerticalPlungeFeed(source, 60), "G1 Z-0.2 F60\nG1 X10 Z-0.3 F480\nG1 Z-0.4 F40");
 });
 
 test("rejects embedded probing, settings, relative motion, and excessive RPM", () => {

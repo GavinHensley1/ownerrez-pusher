@@ -43,6 +43,13 @@ export function positionContinuous(saved, current, toleranceMm = 0.05) {
   return ["X", "Y", "Z"].every((axis) => Math.abs(Number(saved[axis]) - Number(current[axis])) <= toleranceMm);
 }
 
+export function controllerFrameLooksReset(saved, current, zeroToleranceMm = 0.05, movementToleranceMm = 1) {
+  if (!saved || !current) return true;
+  const currentAtZero = ["X", "Y", "Z"].every((axis) => Math.abs(Number(current[axis])) <= zeroToleranceMm);
+  const savedAwayFromZero = ["X", "Y", "Z"].some((axis) => Math.abs(Number(saved[axis])) > movementToleranceMm);
+  return currentAtZero && savedAwayFromZero;
+}
+
 export function lockedProbeZRange(setup) {
   if (!setup?.probeLocked) return null;
   const stock = Number(setup.stockSurfaceMPos), depth = Number(setup.maxCutDepthMm);
@@ -82,6 +89,9 @@ export function calibrationFromSetup(setup, status, now = new Date().toISOString
 
 export function applyProbeLock(setup, raw, status, toleranceMm = 0.05, workOffset) {
   const lock = validateProbeLock(raw), current = machinePosition(status);
+  if (controllerFrameLooksReset(lock.lastKnownMPos, current)) {
+    throw new Error("Controller machine coordinates reset to zero; re-probe Z before restoring calibration");
+  }
   const offsetZ = Number(workOffset?.Z);
   if (workOffset && (!Number.isFinite(offsetZ) || Math.abs(lock.zOriginMPos - offsetZ) > toleranceMm)) {
     throw new Error(`Saved probe Z origin does not match this controller session (saved ${lock.zOriginMPos}; current ${Number.isFinite(offsetZ) ? offsetZ : "?"})`);

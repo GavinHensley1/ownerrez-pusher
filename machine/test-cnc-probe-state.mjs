@@ -28,7 +28,7 @@ test("probe lock validates, persists privately, and restores on continuous coord
 test("probe lock rejects power-cycle coordinate discontinuity and malformed depth", () => {
   const lock = calibrationFromSetup(setup, status);
   assert.equal(positionContinuous(lock.lastKnownMPos, machinePosition(status)), true);
-  assert.throws(() => applyProbeLock({}, lock, { MPos: "0.000,0.000,0.000,0.000" }), /do not match this controller session/);
+  assert.throws(() => applyProbeLock({}, lock, { MPos: "0.000,0.000,0.000,0.000" }), /coordinates reset to zero/);
   assert.throws(() => validateProbeLock({ ...lock, maxCutDepthMm: 6 }), /maximum cut depth is invalid/);
 });
 

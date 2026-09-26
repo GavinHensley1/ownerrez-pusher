@@ -1900,7 +1900,7 @@ async function cncGeneratePanels(){ var job=cncCurrentJob(); if(!job){ alert('Pi
   var src=await cncEnsureReliefSource(job, st); if(!src){ if(st) st.textContent=''; return; }
   var img=new Image(); img.onload=function(){ CNC_AR[job.id]=(img.height||1)/(img.width||1);
     var gr=cncGlobalRange(img), mat=CNC_MATS[job.material]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||''), f=cncFinished(job);
-    var opts0={ maxDepth:f.depth, feed:Math.round(mat.feed*(cons?0.6:1)), plunge:Math.round(mat.plunge*(cons?0.6:1)), rpm:mat.rpm,
+    var opts0={ maxDepth:f.depth, feed:Math.round(mat.feed*(cons?0.6:1)), plunge:cons?Math.min(60,Math.round(mat.plunge*0.6)):mat.plunge, rpm:mat.rpm,
       passDepth:+(mat.step*(cons?0.7:1)).toFixed(3), stepover:cncBitStepover(job), carveType:job.carveType||'3D relief',
       invert:(job.invertDepth==='true'||job.invertDepth===true), flatten:(job.flattenBg==='true'||job.flattenBg===true), gMn:gr.mn, gMx:gr.mx,
       contrast:(job.reliefSource==='depth'?1.0:1.4), smooth:(job.reliefSource==='depth'),
@@ -1932,7 +1932,7 @@ async function cncGenFromImage(job, srcDataURL){
       cncGenReliefRegion(img,{sx:0,sy:0,sw:img.width,sh:img.height},{
         label:'machine job', panelW:width, panelH:height, maxDepth:(Number(job.reliefDepth)||preset.depth),
         passDepth:+(preset.step*(cons?0.7:1)).toFixed(3), stepover:cncBitStepover(job),
-        feed:Math.round(preset.feed*(cons?0.6:1)), plunge:Math.round(preset.plunge*(cons?0.6:1)), rpm:preset.rpm,
+        feed:Math.round(preset.feed*(cons?0.6:1)), plunge:cons?Math.min(60,Math.round(preset.plunge*0.6)):preset.plunge, rpm:preset.rpm,
         carveType:job.carveType||'3D relief', invert:(job.invertDepth==='true'||job.invertDepth===true),
         flatten:(job.flattenBg==='true'||job.flattenBg===true), gMn:range.mn, gMx:range.mx,
         contrast:(job.reliefSource==='depth'?1:1.4), smooth:(job.reliefSource==='depth'), budget:30000,

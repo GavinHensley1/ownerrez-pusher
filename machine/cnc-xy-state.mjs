@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { machinePosition } from "./cnc-probe-state.mjs";
+import { controllerFrameLooksReset, machinePosition } from "./cnc-probe-state.mjs";
 
 const finite = (value) => Number.isFinite(Number(value));
 
@@ -39,6 +39,9 @@ export function xyLockFromSetup(setup, status, now = new Date().toISOString()) {
 
 export function applyXyLock(setup, raw, status, toleranceMm = 0.05, workOffset) {
   const lock = validateXyLock(raw), current = machinePosition(status);
+  if (controllerFrameLooksReset({ ...lock.lastKnownMPos, Z: 1 }, current)) {
+    throw new Error("Controller machine coordinates reset to zero; reset X/Y zero before restoring the origin");
+  }
   const reference = workOffset && finite(workOffset.X) && finite(workOffset.Y)
     ? { X: Number(workOffset.X), Y: Number(workOffset.Y) }
     : current;
