@@ -1685,11 +1685,14 @@ function cncRenderAgent(job){
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!['queued','accepted','running','paused'].includes(state);
   var motionBlocked=CNC_COMMAND_IN_FLIGHT||!CNC.agent||!h.connected||!!h.moving||['queued','accepted','running','paused'].includes(state);
   document.querySelectorAll('.cncJogBtn').forEach(function(btn){btn.disabled=motionBlocked;});
+  var zero=document.getElementById('cncZeroBtn'); if(zero) zero.disabled=motionBlocked;
   var bed=document.getElementById('cncProbeBedBtn'); if(bed){ bed.disabled=motionBlocked; bed.textContent=su.probeLocked?'1. Re-probe bed':'1. Probe bed'; }
   var stock=document.getElementById('cncProbeStockBtn'); if(stock) stock.disabled=motionBlocked||!su.bedProbeReady||!!su.probeLocked;
   var lock=document.getElementById('cncProbeLockBtn'); if(lock) lock.disabled=motionBlocked||!!su.probeLocked||!su.bedProbeReady||!su.stockProbeReady;
   var stockZero=document.getElementById('cncStockZZeroBtn'); if(stockZero) stockZero.disabled=motionBlocked||!su.probeLocked||!su.stockProbeReady;
   var unlock=document.getElementById('cncProbeUnlockBtn'); if(unlock) unlock.disabled=motionBlocked||!su.probeLocked;
+  var recoverProbe=document.getElementById('cncProbeRecoverBtn'); if(recoverProbe) recoverProbe.disabled=motionBlocked;
+  var recoverController=document.getElementById('cncControllerRecoverBtn'); if(recoverController) recoverController.disabled=motionBlocked;
   var probeInput=document.getElementById('cncProbeThickness'); if(probeInput) probeInput.disabled=!!su.probeLocked;
   var measured=document.getElementById('cncMeasuredStock'); if(measured) measured.textContent=su.stockProbeReady?((su.probeLocked?'🔒 Locked · ':'Ready to lock · ')+'measured '+Number(su.stockThicknessMm).toFixed(3)+' mm; protected floor '+Number(su.safetyFloorMm).toFixed(3)+' mm; max cut '+Number(su.maxCutDepthMm).toFixed(3)+' mm.'):'Thickness not measured.';
   cncRenderOriginFootprint(job,su);

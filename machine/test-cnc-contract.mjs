@@ -17,6 +17,9 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /cncQueueMachineAction\('jog'/);
   assert.match(html, /One press sends one command/);
   assert.match(html, /aria-live="assertive"/);
+  assert.match(html, /zero\.disabled=motionBlocked/);
+  assert.match(html, /recoverProbe\.disabled=motionBlocked/);
+  assert.match(html, /recoverController\.disabled=motionBlocked/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
   assert.match(html, /<option value="0\.1">0\.1 mm<\/option>/);
   assert.match(html, /Z is limited to 5 mm per click/);
