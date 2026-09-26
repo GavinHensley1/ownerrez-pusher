@@ -2646,7 +2646,7 @@ if(action==="email_recipients"){
         let st={jobs:[],config:{}}; try{ const raw=await redis.get("parkside:cnc"); const o=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); if(o&&typeof o==="object")st=o; }catch(e){}
         if(!Array.isArray(st.jobs))st.jobs=[];
         const jid=String(b.jobId||""); const target=st.jobs.find(function(x){return x&&x.id===jid;});
-        if(target){ target.agentState=state; target.agentMsg=String(b.message||"").slice(0,500); target.agentAt=now; target.updatedAt=now; if(state==="running"&&String(b.action)==="start")target.status="Carving"; if(state==="done"&&String(b.action)==="start"){target.status="Done";target.progress=100;} if(state==="stopped")target.status="Relief"; }
+        if(target){ target.agentState=state; target.agentMsg=String(b.message||"").slice(0,500); target.agentAt=now; target.agentCommandId=commandId||target.agentCommandId||""; target.agentAction=String(b.action||target.agentAction||"").slice(0,32); target.updatedAt=now; if(state==="running"&&String(b.action)==="start")target.status="Carving"; if(state==="done"&&String(b.action)==="start"){target.status="Done";target.progress=100;} if(state==="stopped")target.status="Relief"; }
         try{await redis.set("parkside:cnc",JSON.stringify(st));}catch(e){return res.status(500).json({error:"db error"});}
         return res.status(200).json({ok:true});
       }
@@ -2801,7 +2801,7 @@ if(action==="email_recipients"){
                 if(designWidthMm>stockWidthMm-stockReserveMm+0.001||designHeightMm>stockHeightMm-stockReserveMm+0.001) return res.status(409).json({error:"The complete toolpath does not fit inside the entered stock dimensions",cnc:st});
               }
               let prior=null; try{const raw=await redis.get("parkside:cnc:command"); prior=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null);}catch(e){}
-              if(prior&&act!=="stop") return res.status(409).json({error:"Another CNC command is still pending",cnc:st});
+              if(prior&&act!=="stop") return res.status(409).json({error:(String(prior.action||"CNC command").replace(/_/g," ")+" is already queued. Wait for its completion; do not press again."),pending:{id:String(prior.id||""),action:String(prior.action||""),createdAt:String(prior.createdAt||"")},cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
               if(act==="probe_bed"||act==="probe_stock")cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
               if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
@@ -2818,7 +2818,7 @@ if(action==="email_recipients"){
                 cmd.axis=axis; cmd.distanceMm=Number(distance.toFixed(3)); cmd.feedMmPerMin=Math.round(feed);
               }
               try{await redis.set("parkside:cnc:command",JSON.stringify(cmd),{ex:600});}catch(e){return res.status(500).json({error:"Could not queue CNC command"});}
-              job.agentState="queued"; job.agentMsg=act.replace("_"," ")+" queued"; job.agentAt=now;
+              job.agentState="queued"; job.agentMsg=act.replace(/_/g," ")+" sent to Mac bridge"; job.agentAt=now; job.agentCommandId=cmd.id; job.agentAction=act; job.agentQueuedAt=now;
               if(act==="start"){job.startedAt=now;job.progress=0;}
             }
             job.updatedAt=now;

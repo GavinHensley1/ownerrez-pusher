@@ -13,8 +13,10 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  for (const id of ["cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
-  assert.match(html, /machineAction:'jog'/);
+  for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
+  assert.match(html, /cncQueueMachineAction\('jog'/);
+  assert.match(html, /One press sends one command/);
+  assert.match(html, /aria-live="assertive"/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
   assert.match(html, /<option value="0\.1">0\.1 mm<\/option>/);
   assert.match(html, /Z is limited to 5 mm per click/);
@@ -53,6 +55,8 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /Jog step is outside the safe per-click limit/);
   assert.match(api, /const maxStep=axis==="Z"\?5:100/);
   assert.match(api, /Z jogs are limited to 5 mm per click/);
+  assert.match(api, /job\.agentCommandId=cmd\.id/);
+  assert.match(api, /do not press again/);
   assert.doesNotMatch(api, /fetch\(murl/);
 });
 
@@ -88,15 +92,17 @@ test("Project is completely independent of the external supervision camera", () 
   assert.doesNotMatch(html, /Camera status is informational|checking the camera/i);
 });
 
-test("CNC agent is low-frequency while idle and accepted programs persist locally", () => {
-  assert.match(agent, /IDLE_POLL_MS[^\n]+30000/);
-  assert.match(agent, /IDLE_HEARTBEAT_MS[^\n]+300000/);
+test("CNC agent acknowledges controls quickly and accepted programs persist locally", () => {
+  assert.match(agent, /IDLE_POLL_MS[^\n]+1500/);
+  assert.match(agent, /IDLE_HEARTBEAT_MS[^\n]+60000/);
   assert.match(agent, /const projectHealth = \{/);
   assert.doesNotMatch(agent, /\.\.\.health/);
+  assert.match(agent, /post-command heartbeat/);
   assert.match(api, /agentKey,JSON\.stringify\(rec\),\{ex:180\}/);
   assert.match(daemon, /saveProgram\(PROGRAM_STATE_PATH/);
   assert.match(daemon, /\/job\/last/);
-  assert.match(html, /active\?5000:60000/);
+  assert.match(html, /state==='queued'\|\|state==='accepted'/);
+  assert.match(html, /immediate\?150:delay/);
   assert.doesNotMatch(html, /setInterval\(function\(\)\{ var m=document\.getElementById\('cncMain'\)/);
 });
 
