@@ -54,6 +54,16 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /function cncAddDepthRegion/);
   assert.match(html, /function cncApprovePlanAndGenerate/);
   assert.match(html, /job\.planStatus!=='approved'/);
+  assert.match(html, /Cyan · surface \/ highest/);
+  assert.match(html, /Gold · shallow detail/);
+  assert.match(html, /Orange · medium detail/);
+  assert.match(html, /Red · deepest detail/);
+  assert.match(html, /Buckle edge · automatic/);
+  assert.match(html, /Profile depth · automatic/);
+  assert.match(html, /Project will not cut into the base/);
+  assert.match(html, /CNC_PLAN\.cutout\.thicknessMm=locked&&safe>0\?safe:0/);
+  assert.doesNotMatch(html, /id="cncPlanMask"/);
+  assert.doesNotMatch(html, /id="cncPlanCutThick"/);
   assert.match(html, /cncRenderToolpath\(gc\)/);
   assert.match(html, /Whiteside RU2100/);
   assert.match(html, /SpeTool W01015-SPE-X/);
