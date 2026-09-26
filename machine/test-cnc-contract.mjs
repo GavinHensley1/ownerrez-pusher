@@ -79,11 +79,10 @@ test("local daemon separates manual probe staging from the carve envelope", () =
   assert.match(daemon, /new Set\(\["X", "Y"\]\)\.has\(axis\) \? 60 : 0/);
 });
 
-test("camera remains informational and cannot stop Project motion", () => {
-  assert.match(daemon, /const CAMERA_REQUIRED = false/);
-  assert.match(daemon, /state: "external_supervision"/);
-  assert.doesNotMatch(daemon, /CAMERA_REQUIRED\) return assertCameraFresh/);
-  assert.match(html, /Camera status is informational and does not stop Project jobs/);
+test("Project is completely independent of the external supervision camera", () => {
+  assert.doesNotMatch(daemon, /camera/i);
+  assert.doesNotMatch(agent, /camera/i);
+  assert.doesNotMatch(html, /Camera status is informational|checking the camera/i);
 });
 
 test("CNC agent is low-frequency while idle and accepted programs persist locally", () => {

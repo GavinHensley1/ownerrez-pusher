@@ -58,7 +58,7 @@ async function cloud(method, payload) {
 async function heartbeat() {
   let health;
   try { health = await localRequest("/health"); }
-  catch (error) { health = { ok: false, connected: false, camera: { fresh: false }, error: error.message }; }
+  catch (error) { health = { ok: false, connected: false, error: error.message }; }
   await cloud("POST", { type: "heartbeat", at: new Date().toISOString(), health });
   return health;
 }

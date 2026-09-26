@@ -4,25 +4,16 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
 import { measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
-import { cameraBridgeFresh } from "./cnc-camera-diagnostics.mjs";
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 import { applyXyLock, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 import { readProgram, saveProgram } from "./cnc-program-state.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
-const CAMERA = process.env.CNC_CAMERA_BRIDGE || "http://127.0.0.1:47831";
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
 const PROBE_STATE_PATH = process.env.CNC_PROBE_STATE || join(homedir(), ".openclaw", "state", "cnc-probe-calibration.json");
 const XY_STATE_PATH = process.env.CNC_XY_STATE || join(homedir(), ".openclaw", "state", "cnc-xy-origin.json");
 const PROGRAM_STATE_PATH = process.env.CNC_PROGRAM_STATE || join(homedir(), ".openclaw", "state", "cnc-last-program.json");
-const CAMERA_MAX_AGE_MS = 3000;
-// The camera is an external supervision aid. Project must remain usable when
-// the camera is unplugged, offline, or being watched by a human/agent through
-// another surface. Machine safety comes from controller state, program/stock
-// envelopes, probing, input pins, and verified motion deltas -- never camera
-// availability.
-const CAMERA_REQUIRED = false;
 const MAX_BODY_BYTES = 900_000;
 let controller, lastControllerStatus, incident, moving = false, keepaliveBusy = false;
 let restartScheduled = false;
@@ -34,21 +25,7 @@ const setup = { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedP
 const job = { state: "idle", jobId: null, progress: 0, message: "", updatedAt: null };
 
 const json = (res, status, value) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const cameraStatus = async () => { const response = await fetch(`${CAMERA}/status`, { signal: AbortSignal.timeout(2000) }); if (!response.ok) throw new Error(`Camera status HTTP ${response.status}`); return response.json(); };
-const ensureCameraMonitor = async () => {
-  let status = await cameraStatus();
-  if (status.state !== "ready") throw new Error(`Camera not ready: ${status.state}`);
-  if (!status.monitoring) { const response = await fetch(`${CAMERA}/monitor/start`, { method: "POST", signal: AbortSignal.timeout(3000) }); if (!response.ok) throw new Error(`Camera monitor start HTTP ${response.status}`); }
-  const deadline = Date.now() + 25_000;
-  do {
-    status = await cameraStatus();
-    if (cameraBridgeFresh(status, Date.now(), CAMERA_MAX_AGE_MS)) return status;
-    await sleep(250);
-  } while (Date.now() < deadline);
-  throw new Error("Camera monitor did not produce a fresh frame");
-};
-const motionGuard = async () => ({ state: "external_supervision", monitoring: false, optional: true });
+const motionGuard = async () => ({ state: "controller_and_software_guards" });
 
 const programGuard = async ({ analysis, programContext }) => {
   const snap = workspace.snapshot();
@@ -160,22 +137,9 @@ const recoverIdleConnection = async () => {
 };
 const health = async () => {
   if (!controller.connected && !hazardousOperationActive()) await recoverIdleConnection();
-  let camera;
-  try {
-    const status = await cameraStatus();
-    camera = {
-      state: status.state,
-      monitoring: Boolean(status.monitoring),
-      lastFrameAt: status.lastFrameAt || null,
-      fresh: cameraBridgeFresh(status, Date.now(), CAMERA_MAX_AGE_MS),
-      diagnostics: status.diagnostics || null,
-    };
-  }
-  catch (error) { camera = { state: "error", monitoring: false, fresh: false, error: error.message }; }
-  camera.required = CAMERA_REQUIRED;
-  return { ok: true, connected: controller.connected, moving, incident, lastControllerStatus, camera, workspace: workspace.snapshot(), setup: { ...setup }, job: { ...job } };
+  return { ok: true, connected: controller.connected, moving, incident, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, job: { ...job } };
 };
-const observe = async () => { let camera; try { camera = await ensureCameraMonitor(); } catch (error) { if (CAMERA_REQUIRED) throw error; camera = { state: "unavailable", monitoring: false, optional: true, error: error.message }; } return { camera, cnc: await readStatus() }; };
+const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (status.state !== "Idle") throw new Error(`Controller must be Idle, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Feed/spindle must be zero, got ${status.FS}`); return status; };
 
 const jog = async (axis, payload) => {
