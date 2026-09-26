@@ -89,8 +89,10 @@ test("Project is completely independent of the external supervision camera", () 
 });
 
 test("CNC agent is low-frequency while idle and accepted programs persist locally", () => {
-  assert.match(agent, /IDLE_POLL_MS[^\n]+12000/);
-  assert.match(agent, /IDLE_HEARTBEAT_MS[^\n]+60000/);
+  assert.match(agent, /IDLE_POLL_MS[^\n]+30000/);
+  assert.match(agent, /IDLE_HEARTBEAT_MS[^\n]+300000/);
+  assert.match(agent, /const projectHealth = \{/);
+  assert.doesNotMatch(agent, /\.\.\.health/);
   assert.match(api, /agentKey,JSON\.stringify\(rec\),\{ex:180\}/);
   assert.match(daemon, /saveProgram\(PROGRAM_STATE_PATH/);
   assert.match(daemon, /\/job\/last/);

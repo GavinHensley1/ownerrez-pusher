@@ -5,9 +5,9 @@ import { splitJogDistance } from "./cnc-jog.mjs";
 const PROJECT_URL = String(process.env.PROJECT_URL || "https://project-jvyw3.vercel.app").replace(/\/$/, "");
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
 const ACTIVE_POLL_MS = Number(process.env.CNC_AGENT_ACTIVE_POLL_MS || 1500);
-const IDLE_POLL_MS = Number(process.env.CNC_AGENT_IDLE_POLL_MS || 12000);
+const IDLE_POLL_MS = Number(process.env.CNC_AGENT_IDLE_POLL_MS || 30000);
 const ACTIVE_HEARTBEAT_MS = Number(process.env.CNC_AGENT_ACTIVE_HEARTBEAT_MS || 5000);
-const IDLE_HEARTBEAT_MS = Number(process.env.CNC_AGENT_IDLE_HEARTBEAT_MS || 60000);
+const IDLE_HEARTBEAT_MS = Number(process.env.CNC_AGENT_IDLE_HEARTBEAT_MS || 300000);
 const KEYCHAIN_SERVICE = process.env.CNC_AGENT_KEYCHAIN_SERVICE || "openclaw-cnc-agent";
 const token = process.env.CNC_AGENT_TOKEN || execFileSync("/usr/bin/security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 if (!token) throw new Error("CNC agent token is unavailable");
@@ -59,7 +59,20 @@ async function heartbeat() {
   let health;
   try { health = await localRequest("/health"); }
   catch (error) { health = { ok: false, connected: false, error: error.message }; }
-  await cloud("POST", { type: "heartbeat", at: new Date().toISOString(), health });
+  // Project receives a strict machine-state allowlist. External supervision data
+  // must never be persisted, polled, or used as a Project control interlock.
+  const projectHealth = {
+    ok: health?.ok === true,
+    connected: health?.connected === true,
+    moving: health?.moving === true,
+    error: health?.error ? String(health.error).slice(0, 300) : "",
+    incident: health?.incident ? String(health.incident).slice(0, 300) : "",
+    lastControllerStatus: health?.lastControllerStatus || null,
+    workspace: health?.workspace || null,
+    setup: health?.setup || null,
+    job: health?.job || null,
+  };
+  await cloud("POST", { type: "heartbeat", at: new Date().toISOString(), health: projectHealth });
   return health;
 }
 
