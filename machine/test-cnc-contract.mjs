@@ -186,6 +186,7 @@ test("daemon persists per-line recovery checkpoints and validates position befor
   assert.match(daemon, /\/job\/resume-saved/);
   assert.match(daemon, /Resume position mismatch on/);
   assert.match(daemon, /buildResumeProgram/);
+  assert.match(daemon, /payload\.dryRun === true/);
 });
 
 test("bed re-probe atomically replaces only the locked Z calibration", () => {

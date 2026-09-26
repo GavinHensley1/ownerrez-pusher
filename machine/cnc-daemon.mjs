@@ -316,6 +316,7 @@ const resumeSavedProgram = async (payload) => {
     if (!Number.isFinite(work[axis]) || Math.abs(work[axis] - traced.position[axis]) > 0.05) throw new Error(`Resume position mismatch on ${axis}: controller ${work[axis]?.toFixed?.(3)}, program ${traced.position[axis].toFixed(3)}`);
   }
   const resumed = buildResumeProgram(saved.gcode, completedLine, { spindleMode: "manual" });
+  if (payload.dryRun === true) return { ok: true, dryRun: true, controller: status, workPosition: work, expectedPosition: traced.position, resume: { ...resumed, gcode: undefined } };
   const result = await startProgram({ jobId: `${saved.jobId}-resume-${completedLine}`, gcode: resumed.gcode, ...saved.context });
   return { ...result, resume: resumed };
 };
