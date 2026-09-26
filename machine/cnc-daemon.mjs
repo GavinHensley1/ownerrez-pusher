@@ -40,15 +40,21 @@ const programGuard = async ({ before, analysis, programContext }) => {
   const current = coordinates(before);
   for (const axis of ["X", "Y", "Z"]) {
     const allowed = snap.bounds[axis];
-    if (current[axis] < allowed.min - 0.001 || current[axis] > allowed.max + 0.001) {
-      throw new Error(`Current ${axis} position ${current[axis].toFixed(3)} is outside the calibrated controller frame ${allowed.min.toFixed(3)}..${allowed.max.toFixed(3)}; reset coordinates before starting`);
+    const aboveFiniteMaximum = axis !== "Z" && Number.isFinite(allowed.max) && current[axis] > allowed.max + 0.001;
+    if (current[axis] < allowed.min - 0.001 || aboveFiniteMaximum) {
+      const allowedText = axis === "Z" ? `${allowed.min.toFixed(3)} or higher` : `${allowed.min.toFixed(3)}..${allowed.max.toFixed(3)}`;
+      throw new Error(`Current ${axis} position ${current[axis].toFixed(3)} is outside the calibrated controller frame ${allowedText}; reset coordinates before starting`);
     }
   }
   const origins = { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos };
   for (const axis of ["X", "Y", "Z"]) {
     if (!Number.isFinite(origins[axis])) throw new Error(`${axis} work origin is unavailable`);
     const low = origins[axis] + analysis.bounds[axis].min, high = origins[axis] + analysis.bounds[axis].max, allowed = snap.bounds[axis];
-    if (low < allowed.min - 0.001 || high > allowed.max + 0.001) throw new Error(`${axis} program envelope ${low.toFixed(3)}..${high.toFixed(3)} exceeds virtual boundary ${allowed.min.toFixed(3)}..${allowed.max.toFixed(3)}`);
+    const aboveFiniteMaximum = axis !== "Z" && Number.isFinite(allowed.max) && high > allowed.max + 0.001;
+    if (low < allowed.min - 0.001 || aboveFiniteMaximum) {
+      const allowedText = axis === "Z" ? `${allowed.min.toFixed(3)} or higher` : `${allowed.min.toFixed(3)}..${allowed.max.toFixed(3)}`;
+      throw new Error(`${axis} program envelope ${low.toFixed(3)}..${high.toFixed(3)} exceeds virtual boundary ${allowedText}`);
+    }
   }
 };
 
@@ -58,7 +64,7 @@ const clearSetup = () => Object.assign(setup, { xyReady: false, xyLockStatus: "u
 const clearProbeSetup = (status = "unlocked_reprobe_required") => Object.assign(setup, { bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: status, probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
 const rebuildWorkspaceFromSetup = () => {
   if (!setup.xyReady || !setup.probeReady || !Number.isFinite(setup.xyOriginMPos?.X) || !Number.isFinite(setup.xyOriginMPos?.Y) || !Number.isFinite(setup.zOriginMPos) || !Number.isFinite(setup.maxCutDepthMm)) { workspace.clear(); return null; }
-  return workspace.setBounds({ X: { min: setup.xyOriginMPos.X, max: setup.xyOriginMPos.X + 360 }, Y: { min: setup.xyOriginMPos.Y, max: setup.xyOriginMPos.Y + 360 }, Z: { min: setup.zOriginMPos - setup.maxCutDepthMm, max: setup.zOriginMPos + 6 } });
+  return workspace.setBounds({ X: { min: setup.xyOriginMPos.X, max: setup.xyOriginMPos.X + 360 }, Y: { min: setup.xyOriginMPos.Y, max: setup.xyOriginMPos.Y + 360 }, Z: { min: setup.zOriginMPos - setup.maxCutDepthMm, max: null } });
 };
 const persistLockedXy = (status) => {
   if (!setup.xyReady) return null;

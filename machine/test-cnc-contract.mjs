@@ -78,6 +78,9 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /Previewing does not load or arm the stage/);
   assert.match(html, /function cncStartFrameCheck/);
   assert.match(html, /Start position/);
+  assert.match(html, /There is no upper Z ceiling/);
+  assert.match(html, /axis!==['"]Z['"]/);
+  assert.match(daemon, /axis !== "Z" && Number\.isFinite\(allowed\.max\)/);
   assert.match(html, /Whiteside RU2100/);
   assert.match(html, /SpeTool W01015-SPE-X/);
   assert.match(html, /id="cncPlanRoughPass"/);

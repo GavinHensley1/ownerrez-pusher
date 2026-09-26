@@ -138,6 +138,8 @@ test("virtual workspace permits inside jog and rejects barrier crossing", async 
   const origin = parseStatus("<Idle|MPos:0.000,0.000,0.000|FS:0,0>");
   assert.throws(() => workspace.assertJog({ before: origin, axis: "Y", distanceMm: 21 }), /Virtual Y barrier rejects/);
   assert.throws(() => workspace.assertJog({ before: origin, axis: "Z", distanceMm: -11 }), /Virtual Z barrier rejects/);
+  assert.equal(workspace.assertJog({ before: parseStatus("<Idle|MPos:0.000,0.000,25.000|FS:0,0>"), axis: "Z", distanceMm: -5 }).target, 20);
+  assert.equal(workspace.assertJog({ before: parseStatus("<Idle|MPos:0.000,0.000,25.000|FS:0,0>"), axis: "Z", distanceMm: 5 }).target, 30);
   const mock = await makeMock();
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {}, workspaceGuard: (request) => workspace.assertJog(request) });
   await c.jog("X", 10, 100);
@@ -156,7 +158,7 @@ test("probe-staging margin extends only the negative X/Y boundary", () => {
   assert.throws(() => workspace.assertJog({ before: origin, axis: "X", distanceMm: -25, negativeMarginMm: 61 }), /Invalid probe-staging margin/);
 });
 
-test("safe retract bypasses only the upper workspace ceiling for positive Z", async () => {
+test("positive Z retract remains allowed with no upper Z ceiling", async () => {
   const mock = await makeMock();
   const workspace = new VirtualWorkspace();
   workspace.setBounds({ X: { min: -20, max: 20 }, Y: { min: -20, max: 20 }, Z: { min: -10, max: 1 } });

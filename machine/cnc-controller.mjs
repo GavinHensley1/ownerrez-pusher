@@ -725,8 +725,14 @@ export class VirtualWorkspace {
       const pair = bounds?.[axis];
       if (!pair) throw new Error(`Missing ${axis} bounds`);
       const min = Number(pair.min), max = Number(pair.max);
-      if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) throw new Error(`Invalid ${axis} bounds`);
-      normalized[axis] = { min, max };
+      if (!Number.isFinite(min)) throw new Error(`Invalid ${axis} bounds`);
+      // Z has a protected lower floor only. Being higher than the stock is safe,
+      // and must never strand the operator outside an invented setup ceiling.
+      if (axis === "Z") normalized[axis] = { min, max: null };
+      else {
+        if (!Number.isFinite(max) || max <= min) throw new Error(`Invalid ${axis} bounds`);
+        normalized[axis] = { min, max };
+      }
     }
     this.bounds = normalized;
     this.createdAt = Date.now();
@@ -741,8 +747,10 @@ export class VirtualWorkspace {
     const margin = Number(negativeMarginMm);
     if (!Number.isFinite(margin) || margin < 0 || margin > 60 || (margin > 0 && !new Set(["X", "Y"]).has(axis))) throw new Error("Invalid probe-staging margin");
     const allowedMin = min - margin;
-    if (target < allowedMin - 0.001 || target > max + 0.001) {
-      throw new Error(`Virtual ${axis} barrier rejects target ${target.toFixed(3)}; allowed ${allowedMin.toFixed(3)}..${max.toFixed(3)}`);
+    const aboveFiniteMaximum = axis !== "Z" && Number.isFinite(max) && target > max + 0.001;
+    if (target < allowedMin - 0.001 || aboveFiniteMaximum) {
+      const allowed = axis === "Z" ? `${allowedMin.toFixed(3)} or higher` : `${allowedMin.toFixed(3)}..${max.toFixed(3)}`;
+      throw new Error(`Virtual ${axis} barrier rejects target ${target.toFixed(3)}; allowed ${allowed}`);
     }
     return { axis, current, target, min: allowedMin, max, probeStagingMarginMm: margin };
   }
