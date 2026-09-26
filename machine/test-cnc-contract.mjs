@@ -19,7 +19,13 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /aria-live="assertive"/);
   assert.match(html, /zero\.disabled=motionBlocked/);
   assert.match(html, /recoverProbe\.disabled=motionBlocked/);
-  assert.match(html, /recoverController\.disabled=motionBlocked/);
+  assert.match(html, /function cncControllerState/);
+  assert.match(html, /Controller ready/);
+  assert.match(html, /Positioning paused/);
+  assert.match(html, /Enable positioning/);
+  assert.match(html, /external router does not need to be installed/i);
+  assert.match(html, /button\.disabled=!!baseBlocked/);
+  assert.match(html, /var motionBlocked=baseBlocked\|\|!controller\.idle/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
   assert.match(html, /<option value="0\.1">0\.1 mm<\/option>/);
   assert.match(html, /Z is limited to 5 mm per click/);
@@ -140,6 +146,9 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /\/job\/import/);
   assert.match(daemon, /restoreLockedXy\(result\.after, workOffset\)/);
   assert.match(daemon, /restoreLockedProbe\(result\.after, workOffset\)/);
+  assert.match(daemon, /Controller positioning is paused/);
+  assert.match(daemon, /external router may be removed/);
+  assert.match(daemon, /Enable positioning/);
 });
 
 test("bed re-probe atomically replaces only the locked Z calibration", () => {
