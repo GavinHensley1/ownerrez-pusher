@@ -8,6 +8,8 @@ import path from "node:path";
 const socketPath = path.join(os.tmpdir(), `cnc-daemon-offline-${process.pid}.sock`);
 const probeStatePath = path.join(os.tmpdir(), `cnc-daemon-offline-probe-${process.pid}.json`);
 const xyStatePath = path.join(os.tmpdir(), `cnc-daemon-offline-xy-${process.pid}.json`);
+const programStatePath = path.join(os.tmpdir(), `cnc-daemon-offline-program-${process.pid}.json`);
+const runStatePath = path.join(os.tmpdir(), `cnc-daemon-offline-run-${process.pid}.json`);
 const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.url).pathname], {
   env: {
     ...process.env,
@@ -17,6 +19,8 @@ const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.u
     CNC_LOCAL_UI_PORT: "0",
     CNC_PROBE_STATE: probeStatePath,
     CNC_XY_STATE: xyStatePath,
+    CNC_PROGRAM_STATE: programStatePath,
+    CNC_RUN_STATE: runStatePath,
   },
   stdio: ["ignore", "pipe", "pipe"],
 });

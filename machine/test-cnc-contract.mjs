@@ -181,6 +181,13 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /Enable positioning/);
 });
 
+test("daemon persists per-line recovery checkpoints and validates position before resume", () => {
+  assert.match(daemon, /controller\.on\("programProgress"[\s\S]*persistRunProgress/);
+  assert.match(daemon, /\/job\/resume-saved/);
+  assert.match(daemon, /Resume position mismatch on/);
+  assert.match(daemon, /buildResumeProgram/);
+});
+
 test("bed re-probe atomically replaces only the locked Z calibration", () => {
   assert.match(daemon, /kind !== "bed" \|\| payload\.confirmReprobe !== true/);
   assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);\s*workspace\.clear\(\);/);
