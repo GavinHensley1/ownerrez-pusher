@@ -2633,7 +2633,7 @@ if(action==="email_recipients"){
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
       if(b.type==="heartbeat"){
         const rec={at:String(b.at||new Date().toISOString()),health:b.health&&typeof b.health==="object"?b.health:{}};
-        try{ await redis.set(agentKey,JSON.stringify(rec),{ex:15}); }catch(e){ return res.status(500).json({error:"db error"}); }
+        try{ await redis.set(agentKey,JSON.stringify(rec),{ex:180}); }catch(e){ return res.status(500).json({error:"db error"}); }
         let st=null; try{ const raw=await redis.get("parkside:cnc"); st=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); }catch(e){}
         const lj=rec.health&&rec.health.job;
         if(st&&Array.isArray(st.jobs)&&lj&&lj.jobId){ const target=st.jobs.find(function(x){return x&&x.id===String(lj.jobId);}); if(target){ target.progress=Math.max(0,Math.min(100,Number(lj.progress)||0)); target.agentState=String(lj.state||"").slice(0,24); target.agentMsg=String(lj.message||"").slice(0,300); target.agentAt=rec.at; target.updatedAt=rec.at; try{await redis.set("parkside:cnc",JSON.stringify(st));}catch(e){} } }

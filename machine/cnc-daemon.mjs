@@ -7,6 +7,7 @@ import { measuredStockProtection, validateProgramEnvelope, validateProgramStockE
 import { cameraBridgeFresh } from "./cnc-camera-diagnostics.mjs";
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 import { applyXyLock, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
+import { readProgram, saveProgram } from "./cnc-program-state.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
@@ -14,8 +15,14 @@ const CAMERA = process.env.CNC_CAMERA_BRIDGE || "http://127.0.0.1:47831";
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
 const PROBE_STATE_PATH = process.env.CNC_PROBE_STATE || join(homedir(), ".openclaw", "state", "cnc-probe-calibration.json");
 const XY_STATE_PATH = process.env.CNC_XY_STATE || join(homedir(), ".openclaw", "state", "cnc-xy-origin.json");
+const PROGRAM_STATE_PATH = process.env.CNC_PROGRAM_STATE || join(homedir(), ".openclaw", "state", "cnc-last-program.json");
 const CAMERA_MAX_AGE_MS = 3000;
-const CAMERA_REQUIRED = /^(1|true|yes)$/i.test(process.env.CNC_CAMERA_REQUIRED || "1");
+// The camera is an external supervision aid. Project must remain usable when
+// the camera is unplugged, offline, or being watched by a human/agent through
+// another surface. Machine safety comes from controller state, program/stock
+// envelopes, probing, input pins, and verified motion deltas -- never camera
+// availability.
+const CAMERA_REQUIRED = false;
 const MAX_BODY_BYTES = 900_000;
 let controller, lastControllerStatus, incident, moving = false, keepaliveBusy = false;
 let restartScheduled = false;
@@ -41,17 +48,7 @@ const ensureCameraMonitor = async () => {
   } while (Date.now() < deadline);
   throw new Error("Camera monitor did not produce a fresh frame");
 };
-const assertCameraFresh = async () => {
-  const status = await cameraStatus(), age = Date.now() - Number(status.lastFrameAt || 0);
-  if (!cameraBridgeFresh(status, Date.now(), CAMERA_MAX_AGE_MS)) {
-    throw new Error(`Camera interlock open: state=${status.state} fresh=${status.fresh} monitoring=${status.monitoring} ageMs=${age}`);
-  }
-  return status;
-};
-const motionGuard = async () => {
-  if (CAMERA_REQUIRED) return assertCameraFresh();
-  try { return await cameraStatus(); } catch { return { state: "unavailable", monitoring: false, optional: true }; }
-};
+const motionGuard = async () => ({ state: "external_supervision", monitoring: false, optional: true });
 
 const programGuard = async ({ analysis, programContext }) => {
   const snap = workspace.snapshot();
@@ -306,8 +303,9 @@ const unlockProbeCalibration = async (payload) => {
 };
 const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm }) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
+  const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm } });
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
-  try { const result = await controller.runProgram(gcode, { programContext: { stockWidthMm, stockHeightMm, stockReserveMm }, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
+  try { const result = await controller.runProgram(savedProgram.gcode, { programContext: savedProgram.context, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); throw error; } finally { moving = false; }
 };
 const bodyJson = async (req) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY_BYTES) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
@@ -315,6 +313,7 @@ const bodyJson = async (req) => { let body = "", size = 0; for await (const chun
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === "GET" && req.url === "/health") return json(res, 200, await health());
+    if (req.method === "GET" && req.url === "/job/last") { const saved = readProgram(PROGRAM_STATE_PATH); return json(res, 200, { ok: true, program: saved ? { ...saved, gcode: undefined } : null }); }
     if (req.method === "POST" && req.url === "/observe") return json(res, 200, await observe());
     if (req.method === "POST" && req.url === "/query") { const { command } = await bodyJson(req); return json(res, 200, { command, lines: await controller.query(command) }); }
     if (req.method === "POST" && /^\/jog\/[xyz]$/.test(req.url)) return json(res, 200, await jog(req.url.at(-1).toUpperCase(), await bodyJson(req)));

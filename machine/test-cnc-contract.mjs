@@ -79,6 +79,21 @@ test("local daemon separates manual probe staging from the carve envelope", () =
   assert.match(daemon, /new Set\(\["X", "Y"\]\)\.has\(axis\) \? 60 : 0/);
 });
 
+test("camera remains informational and cannot stop Project motion", () => {
+  assert.match(daemon, /const CAMERA_REQUIRED = false/);
+  assert.match(daemon, /state: "external_supervision"/);
+  assert.doesNotMatch(daemon, /CAMERA_REQUIRED\) return assertCameraFresh/);
+  assert.match(html, /Camera status is informational and does not stop Project jobs/);
+});
+
+test("CNC agent is low-frequency while idle and accepted programs persist locally", () => {
+  assert.match(agent, /IDLE_POLL_MS[^\n]+12000/);
+  assert.match(agent, /IDLE_HEARTBEAT_MS[^\n]+60000/);
+  assert.match(api, /agentKey,JSON\.stringify\(rec\),\{ex:180\}/);
+  assert.match(daemon, /saveProgram\(PROGRAM_STATE_PATH/);
+  assert.match(daemon, /\/job\/last/);
+});
+
 test("bed re-probe atomically replaces only the locked Z calibration", () => {
   assert.match(daemon, /kind !== "bed" \|\| payload\.confirmReprobe !== true/);
   assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);\s*workspace\.clear\(\);/);

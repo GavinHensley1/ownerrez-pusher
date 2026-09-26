@@ -1626,7 +1626,7 @@ function cncRenderAgent(job){
   cncRenderOriginFootprint(job,su);
   if(!as) return;
   if(job&&state){ var m={queued:'⏳ Command queued',accepted:'⏳ Machine preparing',running:'▶ Machine running'+((job.progress!=null)?(' — '+Math.round(job.progress)+'%'):''),paused:'⏸ Machine paused',stopped:'■ Machine stopped',done:'✅ Carve complete',error:'⚠ Machine error'}[state]||state; as.innerHTML=m+(job.agentMsg?(' <span style="opacity:.7">— '+cncEsc(job.agentMsg)+'</span>'):''); }
-  else as.textContent=ready?'Machine is ready. Operator must watch the CNC during the full run.':'Start is locked until every required readiness check is green.';
+  else as.textContent=ready?'Machine is ready. Camera status is informational and does not stop Project jobs.':'Start is locked until every required readiness check is green.';
 }
 function cncRenderOriginFootprint(job,su){
   var el=document.getElementById('cncOriginFootprint'); if(!el)return;

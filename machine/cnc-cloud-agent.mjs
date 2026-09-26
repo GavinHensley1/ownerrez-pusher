@@ -4,7 +4,10 @@ import { splitJogDistance } from "./cnc-jog.mjs";
 
 const PROJECT_URL = String(process.env.PROJECT_URL || "https://project-jvyw3.vercel.app").replace(/\/$/, "");
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
-const POLL_MS = Number(process.env.CNC_AGENT_POLL_MS || 1500);
+const ACTIVE_POLL_MS = Number(process.env.CNC_AGENT_ACTIVE_POLL_MS || 1500);
+const IDLE_POLL_MS = Number(process.env.CNC_AGENT_IDLE_POLL_MS || 12000);
+const ACTIVE_HEARTBEAT_MS = Number(process.env.CNC_AGENT_ACTIVE_HEARTBEAT_MS || 5000);
+const IDLE_HEARTBEAT_MS = Number(process.env.CNC_AGENT_IDLE_HEARTBEAT_MS || 60000);
 const KEYCHAIN_SERVICE = process.env.CNC_AGENT_KEYCHAIN_SERVICE || "openclaw-cnc-agent";
 const token = process.env.CNC_AGENT_TOKEN || execFileSync("/usr/bin/security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 if (!token) throw new Error("CNC agent token is unavailable");
@@ -102,7 +105,12 @@ async function loop() {
   let nextHeartbeat = 0;
   while (!stopped) {
     try {
-      if (Date.now() >= nextHeartbeat) { await heartbeat(); nextHeartbeat = Date.now() + 3500; }
+      const active = Boolean(activeStart);
+      if (Date.now() >= nextHeartbeat) {
+        const health = await heartbeat();
+        const running = active || ["running", "paused"].includes(String(health?.job?.state || ""));
+        nextHeartbeat = Date.now() + (running ? ACTIVE_HEARTBEAT_MS : IDLE_HEARTBEAT_MS);
+      }
       const data = await cloud("GET");
       const command = data.command;
       if (command?.id && !handled.has(command.id)) {
@@ -111,7 +119,7 @@ async function loop() {
         execute(command).catch((error) => process.stderr.write(`command ${command.id}: ${error.message}\n`));
       }
     } catch (error) { process.stderr.write(`CNC agent: ${error.message}\n`); }
-    await sleep(POLL_MS);
+    await sleep(activeStart ? ACTIVE_POLL_MS : IDLE_POLL_MS);
   }
 }
 
