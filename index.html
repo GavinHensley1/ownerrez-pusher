@@ -1630,9 +1630,14 @@ function cncPlanReadFields(){ if(!CNC_PLAN)return null; var p=CNC_PLAN;
   p.tools=p.tools||{}; p.tools.woodSpecies=String((document.getElementById('cncPlanWood')||{}).value||'').trim().slice(0,80); p.tools.strategy=(document.getElementById('cncPlanTools')||{}).value||'staged'; p.tools.finishBit=(document.getElementById('cncPlanFinishBit')||{}).value||'SpeTool W01015-SPE-X · 1/32″ radius tapered ball nose'; p.tools.roughBit=(document.getElementById('cncPlanRoughBit')||{}).value||'Whiteside RU2100 · 1/4″ upcut'; p.tools.profileBit=(document.getElementById('cncPlanProfileBit')||{}).value||p.tools.roughBit; p.tools.roughPassDepthMm=cncClamp((document.getElementById('cncPlanRoughPass')||{}).value,.2,6); p.tools.roughStepoverMm=cncClamp((document.getElementById('cncPlanRoughStep')||{}).value,.2,6); p.tools.roughFeedMmMin=cncClamp((document.getElementById('cncPlanRoughFeed')||{}).value,50,4000); p.tools.roughPlungeMmMin=cncClamp((document.getElementById('cncPlanRoughPlunge')||{}).value,20,1000); p.tools.roughRpm=cncClamp((document.getElementById('cncPlanRoughRpm')||{}).value,6500,30000); p.tools.finishStepoverMm=cncClamp((document.getElementById('cncPlanFinishStep')||{}).value,.05,3); p.tools.finishFeedMmMin=cncClamp((document.getElementById('cncPlanFinishFeed')||{}).value,50,3000); p.tools.finishPlungeMmMin=cncClamp((document.getElementById('cncPlanFinishPlunge')||{}).value,20,1000); p.tools.finishRpm=cncClamp((document.getElementById('cncPlanFinishRpm')||{}).value,6500,30000); p.status='draft'; p.hash=cncPlanHash(p); return p; }
 function cncPlanPopulate(p){ CNC_PLAN=p; p.tools=p.tools||{}; cncPlanField('cncPlanW',p.widthMm);cncPlanField('cncPlanH',p.heightMm);cncPlanField('cncPlanMaxD',p.maxDepthMm);cncPlanField('cncPlanBg',p.background||'mask'); for(var i=0;i<4;i++)cncPlanField('cncBand'+i,(p.depthBands||[])[i]||0); cncPlanField('cncPlanCutout',(p.cutout||{}).mode||'none');cncPlanField('cncPlanTabs',String((p.cutout||{}).tabs||0));cncPlanField('cncPlanWood',p.tools.woodSpecies||'');cncPlanField('cncPlanTools',p.tools.strategy||'staged');cncPlanField('cncPlanFinishBit',p.tools.finishBit||'SpeTool W01015-SPE-X · 1/32″ radius tapered ball nose');cncPlanField('cncPlanRoughBit',p.tools.roughBit||'Whiteside RU2100 · 1/4″ upcut');cncPlanField('cncPlanProfileBit',p.tools.profileBit||'Whiteside RU2100 · 1/4″ upcut');cncPlanField('cncPlanRoughPass',p.tools.roughPassDepthMm||1.5);cncPlanField('cncPlanRoughStep',p.tools.roughStepoverMm||2.5);cncPlanField('cncPlanRoughFeed',p.tools.roughFeedMmMin||900);cncPlanField('cncPlanRoughPlunge',p.tools.roughPlungeMmMin||180);cncPlanField('cncPlanRoughRpm',p.tools.roughRpm||18000);cncPlanField('cncPlanFinishStep',p.tools.finishStepoverMm||.5);cncPlanField('cncPlanFinishFeed',p.tools.finishFeedMmMin||700);cncPlanField('cncPlanFinishPlunge',p.tools.finishPlungeMmMin||150);cncPlanField('cncPlanFinishRpm',p.tools.finishRpm||18000); cncRenderPlanRegions(); cncPlanChanged(true); }
 function cncPlanBuildMask(data,w,h,threshold,forceRectangle){ var out=new Uint8Array(w*h); if(forceRectangle){out.fill(1);return out;} var pts=[[1,1],[w-2,1],[1,h-2],[w-2,h-2]],br=0,bg=0,bb=0; pts.forEach(function(p){var i=(p[1]*w+p[0])*4;br+=data[i];bg+=data[i+1];bb+=data[i+2];});br/=4;bg/=4;bb/=4; var seen=new Uint8Array(w*h),q=new Int32Array(w*h),head=0,tail=0;
-  function near(i){var k=i*4,dr=data[k]-br,dg=data[k+1]-bg,db=data[k+2]-bb;return data[k+3]<20||Math.sqrt(dr*dr+dg*dg+db*db)<=threshold;}
-  function push(i){if(i<0||i>=w*h||seen[i]||!near(i))return;seen[i]=1;q[tail++]=i;}
-  for(var x=0;x<w;x++){push(x);push((h-1)*w+x);}for(var y=0;y<h;y++){push(y*w);push(y*w+w-1);}while(head<tail){var n=q[head++],xx=n%w,yy=(n/w)|0;if(xx)push(n-1);if(xx<w-1)push(n+1);if(yy)push(n-w);if(yy<h-1)push(n+w);}for(var i=0;i<out.length;i++)out[i]=seen[i]?0:1;return out; }
+  function sample(i){var k=i*4,r=data[k],g=data[k+1],b=data[k+2],dr=r-br,dg=g-bg,db=b-bb;return {r:r,g:g,b:b,a:data[k+3],global:Math.sqrt(dr*dr+dg*dg+db*db),chroma:Math.max(r,g,b)-Math.min(r,g,b),lum:(r+g+b)/3};}
+  // Flood the flat corner color first, then follow only smooth neutral-gray
+  // transitions. This absorbs soft drop shadows without crossing the warm,
+  // high-contrast rope edge into the buckle itself.
+  function near(i,from){var p=sample(i);if(p.a<20||p.global<=threshold)return true;if(from<0)return false;var f=sample(from),local=Math.sqrt(Math.pow(p.r-f.r,2)+Math.pow(p.g-f.g,2)+Math.pow(p.b-f.b,2));return p.chroma<=4&&p.lum>=135&&local<=8;}
+  function push(i,from){if(i<0||i>=w*h||seen[i]||!near(i,from))return;seen[i]=1;q[tail++]=i;}
+  for(var x=0;x<w;x++){push(x,-1);push((h-1)*w+x,-1);}for(var y=0;y<h;y++){push(y*w,-1);push(y*w+w-1,-1);}while(head<tail){var n=q[head++],xx=n%w,yy=(n/w)|0;if(xx)push(n-1,n);if(xx<w-1)push(n+1,n);if(yy)push(n-w,n);if(yy<h-1)push(n+w,n);}for(var i=0;i<out.length;i++)out[i]=seen[i]?0:1;return out; }
+function cncPlanMaskTouchesEdge(mask,w,h){if(!mask||!mask.length)return true;for(var x=0;x<w;x++)if(mask[x]||mask[(h-1)*w+x])return true;for(var y=0;y<h;y++)if(mask[y*w]||mask[y*w+w-1])return true;return false;}
 var CNC_PLAN_COLORS=[[34,211,238],[251,191,36],[251,146,60],[244,63,94]];
 function cncPlanBandIndex(lum){return Math.min(3,Math.max(0,Math.floor((1-lum)*4)));}
 function cncPlanDepthAt(nx,ny,lum){ var p=CNC_PLAN||{}, bands=p.depthBands||[0,.5,1,1.5], idx=cncPlanBandIndex(lum),d=Number(bands[idx])||0; (p.regions||[]).forEach(function(r){if(nx>=r.x&&nx<=r.x+r.w&&ny>=r.y&&ny<=r.y+r.h)d=Number(r.depthMm)||0;}); return Math.min(Number(p.maxDepthMm)||d,d); }
@@ -1656,9 +1661,11 @@ function cncPlanChanged(reanalyze){
   cncPlanReadFields();
   var h=(CNC.agent&&CNC.agent.health)||{},su=h.setup||{},safe=Number(su.maxCutDepthMm)||0,locked=!!su.probeLocked;
   cncPlanSyncAutomaticFields(su);
+  if(reanalyze)cncPlanAnalyze();
   var fit=cncStockFit({sizeMM:String(CNC_PLAN.widthMm),pieceH:String(CNC_PLAN.heightMm),material:'Other',reliefDepth:String(CNC_PLAN.maxDepthMm),imgAR:1}),problems=[];
   if(safe>0&&CNC_PLAN.maxDepthMm>safe+.001)problems.push('Relief depth exceeds the probed safe maximum of '+safe.toFixed(2)+' mm.');
   if(CNC_PLAN.cutout.mode!=='none'&&(!locked||!(safe>0)))problems.push('Lock the base and stock probes so Project can calculate the profile depth automatically.');
+  if(CNC_PLAN.background==='mask'&&CNC_PLAN_PIXELS&&cncPlanMaskTouchesEdge(CNC_PLAN_MASK,CNC_PLAN_PIXELS.width,CNC_PLAN_PIXELS.height))problems.push('The detected subject touches the image edge. Use artwork with clear background around the entire buckle before generating G-code.');
   if(!fit.ok)problems.push(fit.reason);
   var el=document.getElementById('cncPlanFit');
   if(el){
@@ -1673,7 +1680,7 @@ function cncPlanChanged(reanalyze){
     if(CNC_PLAN.cutout.mode!=='none')stages.push(['Profile',t.profileBit,'automatic '+safe.toFixed(2)+' mm depth from probes · reuse roughing bit + re-probe Z']);
     seq.innerHTML=stages.map(function(s){return '<div class="cnc-stage"><b>'+s[0]+'</b><span>'+cncEsc(s[1])+'</span><span class="muted" style="margin-left:auto">'+s[2]+'</span></div>';}).join('');
   }
-  if(reanalyze)cncPlanAnalyze();else{cncPlanRenderMaskStatus();cncPlanRender();}
+  if(!reanalyze){cncPlanRenderMaskStatus();cncPlanRender();}
 }
 async function cncOpenPlan(src,job){job=job||cncCurrentJob();if(!job||!src)return;CNC_PLAN_SOURCE=src;var img=new Image();img.onload=async function(){CNC_PLAN_IMG=img;var p=null,raw=await cncFetchFile(job.id,'plan');try{p=raw?JSON.parse(raw):null;}catch(e){}if(!p||p.version!==1)p=cncPlanDefault(job,img);document.getElementById('cncPlanModal').classList.add('open');document.body.style.overflow='hidden';cncPlanBindCanvas();cncPlanPopulate(p);setTimeout(function(){document.getElementById('cncPlanW').focus();},50);};img.onerror=function(){alert('Could not open the uploaded artwork.');};img.src=src;}
 function cncClosePlan(){var m=document.getElementById('cncPlanModal');if(m)m.classList.remove('open');document.body.style.overflow='';CNC_PLAN_SELECTION=null;CNC_PLAN_DRAG=null;}
@@ -2075,7 +2082,11 @@ function cncAppendCutout(g, W, H, o){
   var centers=[]; for(var t=0;t<nTabs;t++) centers.push((t+0.5)/nTabs*total);
   function inTab(d){ for(var k=0;k<centers.length;k++){ var dd=Math.abs(d-centers[k]); dd=Math.min(dd,total-dd); if(dd<tabW/2) return true; } return false; }
   g.push('; --- Profile cut-out'+(withTabs?(' with '+nTabs+' tabs '+tabH+'mm'):'')+' through '+thick+'mm stock ---');
-  g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+x0.toFixed(3)+' Y'+y0.toFixed(3));
+  // Start on the actual contour. The old rectangle fallback origin (−tool
+  // radius, −tool radius) must never be reused for a detected silhouette: it
+  // would plunge off-stock and cut a diagonal to the first contour point.
+  var startX=pts[0][0], startY=pts[0][1];
+  g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+startX.toFixed(3)+' Y'+startY.toFixed(3));
   var passes=Math.max(1,Math.ceil((thick+0.6)/passDepth)), tabTopZ=-(thick-tabH);
   for(var p2=1;p2<=passes;p2++){ var z=Math.max(full,-passDepth*p2);
     g.push('G1 Z'+z.toFixed(3)+' F'+plunge);
@@ -2098,7 +2109,11 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
   if(moveBudget()>budget){ var gridScale=Math.sqrt(budget/moveBudget()); cols=Math.max(60,Math.floor(cols*gridScale)); rows=Math.max(20,Math.floor(rows*gridScale)); while(moveBudget()>budget&&cols>60){if(cols/rows>panelW/panelH)cols--;else rows--;} }
   var cv=document.createElement('canvas'); cv.width=cols; cv.height=rows; var cx=cv.getContext('2d');
   cx.drawImage(img, reg.sx,reg.sy,reg.sw,reg.sh, 0,0, cols,rows); var data=cx.getImageData(0,0,cols,rows).data;
-  var hm=new Float32Array(cols*rows), rng=(gMx-gMn)||1, i,ix,iy,x,y,dx,dy, planMask=plan?cncPlanBuildMask(data,cols,rows,Number(plan.maskThreshold)||32,plan.background==='rectangle'):null;
+  var hm=new Float32Array(cols*rows), rng=(gMx-gMn)||1, i,ix,iy,x,y,dx,dy,planMask=null;
+  // Detect once at the same high resolution used by the approval preview,
+  // then sample that exact mask into every machining grid. Re-detecting on a
+  // coarse rough/finish grid can move the silhouette and profile boundary.
+  if(plan){var maskScale=Math.min(680/reg.sw,520/reg.sh,1),maskW=Math.max(120,Math.round(reg.sw*maskScale)),maskH=Math.max(100,Math.round(reg.sh*maskScale)),maskCv=document.createElement('canvas');maskCv.width=maskW;maskCv.height=maskH;var maskCx=maskCv.getContext('2d');maskCx.drawImage(img,reg.sx,reg.sy,reg.sw,reg.sh,0,0,maskW,maskH);var maskData=maskCx.getImageData(0,0,maskW,maskH).data,sourceMask=cncPlanBuildMask(maskData,maskW,maskH,Number(plan.maskThreshold)||32,plan.background==='rectangle');if(plan.background!=='rectangle'&&cncPlanMaskTouchesEdge(sourceMask,maskW,maskH))throw Error('Detected subject touches the image edge');planMask=new Uint8Array(cols*rows);for(iy=0;iy<rows;iy++)for(ix=0;ix<cols;ix++){var mx=Math.round(ix/Math.max(1,cols-1)*(maskW-1)),my=Math.round(iy/Math.max(1,rows-1)*(maskH-1));planMask[iy*cols+ix]=sourceMask[my*maskW+mx];}}
   if(planMask){gMn=1e9;gMx=-1e9;for(iy=0;iy<rows;iy++)for(ix=0;ix<cols;ix++){var li=(iy*cols+ix)*4;if(!planMask[iy*cols+ix])continue;var lv=.299*data[li]+.587*data[li+1]+.114*data[li+2];if(lv<gMn)gMn=lv;if(lv>gMx)gMx=lv;}if(!(gMx>gMn)){gMn=0;gMx=255;}rng=gMx-gMn;}
   for(iy=0;iy<rows;iy++)for(ix=0;ix<cols;ix++){ i=(iy*cols+ix)*4; var a=data[i+3];
     var lum=(a<10)?gMx:(0.299*data[i]+0.587*data[i+1]+0.114*data[i+2]); var h=(lum-gMn)/rng; if(h<0)h=0; if(h>1)h=1; if(invert) h=1-h;

@@ -48,6 +48,15 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /id="cncPlanModal"/);
   assert.match(html, /Approve plan &amp; generate G-code/);
   assert.match(html, /function cncPlanBuildMask/);
+  assert.match(html, /smooth neutral-gray/);
+  assert.match(html, /p\.chroma<=4&&p\.lum>=135&&local<=8/);
+  assert.match(html, /function cncPlanMaskTouchesEdge/);
+  assert.match(html, /The detected subject touches the image edge/);
+  assert.match(html, /sample that exact mask into every machining grid/);
+  assert.match(html, /sourceMask=cncPlanBuildMask/);
+  assert.match(html, /Detected subject touches the image edge/);
+  assert.match(html, /var startX=pts\[0\]\[0\], startY=pts\[0\]\[1\]/);
+  assert.doesNotMatch(html, /'G0 X'\+x0\.toFixed\(3\)\+' Y'\+y0\.toFixed\(3\)/);
   assert.match(html, /function rowRuns\(py,ltr\)/);
   assert.match(html, /roughRuns=rowRuns/);
   assert.match(html, /finishRuns=rowRuns/);
