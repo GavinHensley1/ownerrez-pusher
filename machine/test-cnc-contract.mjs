@@ -7,12 +7,13 @@ const html = readFileSync(new URL("index.html", root), "utf8");
 const api = readFileSync(new URL("api/app.js", root), "utf8");
 const agent = readFileSync(new URL("machine/cnc-cloud-agent.mjs", root), "utf8");
 const daemon = readFileSync(new URL("machine/cnc-daemon.mjs", root), "utf8");
+const controller = readFileSync(new URL("machine/cnc-controller.mjs", root), "utf8");
 
 test("CNC page script parses and exposes guarded positioning and two-probe controls", () => {
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  for (const id of ["cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
+  for (const id of ["cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
   assert.match(html, /machineAction:'jog'/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
   assert.match(html, /<option value="0\.1">0\.1 mm<\/option>/);
@@ -67,6 +68,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /lock_probe: "\/probe\/lock"/);
   assert.match(agent, /unlock_probe: "\/probe\/unlock"/);
   assert.match(agent, /zero_z: "\/zero\/z"/);
+  assert.match(agent, /recover_controller: "\/controller\/recover-stopped"/);
   assert.match(agent, /confirmReprobe: command\.confirmReprobe === true/);
   assert.ok(agent.includes('const isHealth = path === "/health"'));
   assert.match(agent, /headers: isHealth \? \{\} :/);
@@ -82,6 +84,7 @@ test("local daemon separates manual probe staging from the carve envelope", () =
 test("Project is completely independent of the external supervision camera", () => {
   assert.doesNotMatch(daemon, /camera/i);
   assert.doesNotMatch(agent, /camera/i);
+  assert.doesNotMatch(controller, /camera/i);
   assert.doesNotMatch(html, /Camera status is informational|checking the camera/i);
 });
 
@@ -93,6 +96,15 @@ test("CNC agent is low-frequency while idle and accepted programs persist locall
   assert.match(daemon, /\/job\/last/);
   assert.match(html, /active\?5000:60000/);
   assert.doesNotMatch(html, /setInterval\(function\(\)\{ var m=document\.getElementById\('cncMain'\)/);
+});
+
+test("local Project recovery UI can restore stopped controller state without cloud storage", () => {
+  assert.match(daemon, /Project CNC · Local recovery/);
+  assert.match(daemon, /\/controller\/recover-stopped/);
+  assert.match(daemon, /\/job\/start-saved/);
+  assert.match(daemon, /\/job\/import/);
+  assert.match(daemon, /restoreLockedXy\(result\.after, workOffset\)/);
+  assert.match(daemon, /restoreLockedProbe\(result\.after, workOffset\)/);
 });
 
 test("bed re-probe atomically replaces only the locked Z calibration", () => {

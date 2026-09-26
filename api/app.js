@@ -2778,8 +2778,8 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","probe_bed","probe_stock","lock_probe","unlock_probe","recover_probe","zero_xy","zero_z","start","pause","resume","stop"].indexOf(act)!==-1){
-              const health=st.agent&&st.agent.health||{}, camera=health.camera||{}, ws=health.workspace||{}, setup=health.setup||{};
+            else if(["jog","probe_bed","probe_stock","lock_probe","unlock_probe","recover_probe","recover_controller","zero_xy","zero_z","start","pause","resume","stop"].indexOf(act)!==-1){
+              const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
               if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
               if(act==="probe_stock"&&!setup.bedProbeReady) return res.status(409).json({error:"Probe the exposed bed before probing the stock",cnc:st});
@@ -2808,6 +2808,7 @@ if(action==="email_recipients"){
               if(act==="start"){cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);}
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="zero_z")cmd.confirm=b.confirm===true;
+              if(act==="recover_controller")cmd.confirm=b.confirm===true;
               if(act==="jog"){
                 const axis=String(b.axis||"").toUpperCase(), distance=Number(b.distanceMm), feed=Number(b.feedMmPerMin);
                 if(["X","Y","Z"].indexOf(axis)===-1) return res.status(400).json({error:"Jog axis must be X, Y, or Z",cnc:st});

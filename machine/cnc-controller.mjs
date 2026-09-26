@@ -144,7 +144,7 @@ export class GrblTcpController extends EventEmitter {
       const samples = [];
       while (now() < deadline) {
         try { await this.motionGuard(); }
-        catch (error) { await this.#emergencyStop(`CAMERA_GUARD_FAILED:${error.message}`); throw this.fault; }
+        catch (error) { await this.#emergencyStop(`MOTION_GUARD_FAILED:${error.message}`); throw this.fault; }
         const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
         samples.push(status.raw);
         if (status.state === "Idle") {
@@ -192,7 +192,7 @@ export class GrblTcpController extends EventEmitter {
       try {
         while (now() < deadline) {
           try { await this.motionGuard(); }
-          catch (error) { await this.#emergencyStop(`CAMERA_GUARD_FAILED:${error.message}`); throw this.fault; }
+          catch (error) { await this.#emergencyStop(`MOTION_GUARD_FAILED:${error.message}`); throw this.fault; }
           const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
           samples.push(status.raw);
           const [feed, spindle] = feedAndSpindle(status);
@@ -258,6 +258,34 @@ export class GrblTcpController extends EventEmitter {
         await sleep(150);
       }
       throw new Error("Controller did not become Idle after door acknowledgment");
+    });
+  }
+
+  recoverStoppedController() {
+    return this.#enqueue(async () => {
+      if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for controller recovery");
+      if (this.programRunning) throw new Error("Cannot recover the controller while a program is active");
+      await this.motionGuard();
+      const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      if (before.state === "Idle") return { alreadyIdle: true, before, after: before, samples: [] };
+      if (!new Set(["Hold:0", "Door:0"]).has(before.state)) throw new Error(`Controller must be Hold:0, Door:0, or Idle, got ${before.state}`);
+      const [feed, spindle] = feedAndSpindle(before);
+      if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before controller recovery: ${before.FS}`);
+      if (before.Pn) throw new Error(`Active input pins before controller recovery: ${before.Pn}`);
+      this.socket.write("~");
+      const deadline = now() + 5_000, samples = [];
+      while (now() < deadline) {
+        const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
+        samples.push(status.raw);
+        if (status.state === "Idle") {
+          const [afterFeed, afterSpindle] = feedAndSpindle(status);
+          if (afterFeed !== 0 || afterSpindle !== 0) throw new Error(`Non-zero feed/spindle after controller recovery: ${status.FS}`);
+          return { before, after: status, samples };
+        }
+        if (!new Set(["Hold", "Door"]).has(status.state.split(":")[0])) throw new Error(`Unexpected controller recovery state: ${status.raw}`);
+        await sleep(150);
+      }
+      throw new Error("Controller did not become Idle after recovery");
     });
   }
 
@@ -409,22 +437,22 @@ export class GrblTcpController extends EventEmitter {
       this.programRunning = true;
       this.pauseRequested = false;
       this.abortRequested = false;
-      let cameraError;
+      let guardError;
       let checking = false;
       const monitor = setInterval(async () => {
-        if (checking || cameraError || !this.programRunning) return;
+        if (checking || guardError || !this.programRunning) return;
         checking = true;
         try { await this.motionGuard(); }
-        catch (error) { cameraError = error; await this.#emergencyStop(`CAMERA_GUARD_FAILED:${error.message}`); }
+        catch (error) { guardError = error; await this.#emergencyStop(`MOTION_GUARD_FAILED:${error.message}`); }
         finally { checking = false; }
       }, 250);
       monitor.unref?.();
       try {
         for (let index = 0; index < analysis.lines.length; index += 1) {
-          if (cameraError) throw this.fault || cameraError;
+          if (guardError) throw this.fault || guardError;
           if (this.abortRequested) throw new Error("PROGRAM_ABORTED");
           while (this.pauseRequested) {
-            if (cameraError) throw this.fault || cameraError;
+            if (guardError) throw this.fault || guardError;
             await this.motionGuard();
             await sleep(200);
           }
@@ -436,7 +464,7 @@ export class GrblTcpController extends EventEmitter {
         const deadline = now() + 60_000;
         let after;
         while (now() < deadline) {
-          if (cameraError) throw this.fault || cameraError;
+          if (guardError) throw this.fault || guardError;
           await this.motionGuard();
           after = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
           if (after.state === "Idle") break;
@@ -498,7 +526,7 @@ export class GrblTcpController extends EventEmitter {
       const deadline = now() + timeoutMs;
       while (now() < deadline && !replySettled) {
         try { await this.motionGuard(); }
-        catch (error) { await this.#emergencyStop(`CAMERA_GUARD_FAILED:${error.message}`); throw this.fault; }
+        catch (error) { await this.#emergencyStop(`MOTION_GUARD_FAILED:${error.message}`); throw this.fault; }
         await Promise.race([replyPromise, sleep(200)]);
       }
       if (!replySettled) {
@@ -653,7 +681,7 @@ export class GrblTcpController extends EventEmitter {
     );
     while (!settled) {
       try { await this.motionGuard(); }
-      catch (error) { await this.#emergencyStop(`CAMERA_GUARD_FAILED:${error.message}`); throw this.fault; }
+      catch (error) { await this.#emergencyStop(`MOTION_GUARD_FAILED:${error.message}`); throw this.fault; }
       await Promise.race([pending, sleep(200)]);
     }
     if (failure) throw failure;

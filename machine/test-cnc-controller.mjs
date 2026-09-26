@@ -3,8 +3,8 @@ import net from "node:net";
 import test from "node:test";
 import { GrblTcpController, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
 
-const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, startProbeAlarm = false, startDoor = false } = {}) => {
-  let connections = 0, statusQueries = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm, door = startDoor, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true;
+const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, startProbeAlarm = false, startDoor = false, startHold = false } = {}) => {
+  let connections = 0, statusQueries = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true;
   const writes = [];
   const server = net.createServer((socket) => {
     connections += 1;
@@ -14,11 +14,11 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
       for (const byte of chunk) {
         const char = String.fromCharCode(byte);
         if (byte === 0x85 || byte === 0x9e || byte === 0x18 || char === "!") { jogging = false; continue; }
-        if (char === "~") { jogging = false; door = false; continue; }
+        if (char === "~") { jogging = false; door = false; hold = false; continue; }
         if (char === "?") {
           statusQueries += 1;
           if (ignoreFirstStatus && statusQueries === 1) continue;
-          let state = alarmed ? "Alarm" : door ? "Door:0" : "Idle";
+          let state = alarmed ? "Alarm" : door ? "Door:0" : hold ? "Hold:0" : "Idle";
           if (jogging) { state = "Jog"; jogPolls += 1; if (!jogNeverIdles && jogPolls >= 2) { jogging = false; state = "Idle"; } }
           if (homing) {
             state = "Home"; homePolls += 1;
@@ -29,7 +29,7 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
             }
           }
           const pins = `${probeActive ? "P" : ""}${zLimitActive ? "Z" : ""}`;
-          socket.write(`<${state}|MPos:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}|FS:${state === "Idle" || state === "Alarm" || state.startsWith("Door") ? `0,${spindle}` : "100,0"}${pins ? `|Pn:${pins}` : ""}>${delimiter}`);
+          socket.write(`<${state}|MPos:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}|FS:${state === "Idle" || state === "Alarm" || state.startsWith("Door") || state.startsWith("Hold") ? `0,${spindle}` : "100,0"}${pins ? `|Pn:${pins}` : ""}>${delimiter}`);
         } else {
           buffer += char;
           if (char === "\r") {
@@ -104,10 +104,10 @@ test("jog requires guard and verifies Idle completion and delta", async () => {
   await c.close(); await mock.close();
 });
 
-test("camera failure sends jog cancel and feed hold and latches fault", async () => {
+test("motion guard failure sends jog cancel and feed hold and latches fault", async () => {
   const mock = await makeMock({ jogNeverIdles: true }); let guardCalls = 0;
-  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guardCalls += 1; if (guardCalls >= 3) throw new Error("camera stale"); } });
-  await assert.rejects(() => c.jogX(10, 100, { calibration: true }), /CAMERA_GUARD_FAILED/); await new Promise((r) => setTimeout(r, 30)); assert(mock.bytes.includes(0x85)); assert(mock.bytes.includes("!".charCodeAt(0))); await assert.rejects(() => c.status(), /fault is latched/);
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guardCalls += 1; if (guardCalls >= 3) throw new Error("guard rejected motion"); } });
+  await assert.rejects(() => c.jogX(10, 100, { calibration: true }), /MOTION_GUARD_FAILED/); await new Promise((r) => setTimeout(r, 30)); assert(mock.bytes.includes(0x85)); assert(mock.bytes.includes("!".charCodeAt(0))); await assert.rejects(() => c.status(), /fault is latched/);
   await c.close(); await mock.close();
 });
 
@@ -118,7 +118,7 @@ test("rejects rounded-zero, excessive feed, and cumulative travel", async () => 
   await c.close(); await mock.close();
 });
 
-test("homing is camera-guarded and captures success", async () => {
+test("homing is motion-guarded and captures success", async () => {
   const mock = await makeMock(); let guardCalls = 0;
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guardCalls += 1; } });
   const result = await c.home({ timeoutMs: 10_000 }); assert.equal(result.after.state, "Idle"); assert(result.reply.includes("ok")); assert(guardCalls >= 3);
@@ -189,7 +189,7 @@ test("manual and probe-safety settings and work offset are narrowly allowed", as
   await c.close(); await mock.close();
 });
 
-test("spindle test is camera-guarded, capped, timed, and verifies stop", async () => {
+test("spindle test is motion-guarded, capped, timed, and verifies stop", async () => {
   const mock = await makeMock(); let guardCalls = 0;
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guardCalls += 1; }, maxSpindleTestRpm: 1500 });
   const result = await c.spindleTest(1000, 250);
@@ -198,7 +198,7 @@ test("spindle test is camera-guarded, capped, timed, and verifies stop", async (
   await c.close(); await mock.close();
 });
 
-test("power-on door acknowledgment is camera-guarded and cannot start motion", async () => {
+test("power-on door acknowledgment is motion-guarded and cannot start motion", async () => {
   const mock = await makeMock({ startDoor: true }); let guards = 0;
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
   const result = await c.acknowledgePowerOnDoor();
@@ -207,16 +207,16 @@ test("power-on door acknowledgment is camera-guarded and cannot start motion", a
   await c.close(); await mock.close();
 });
 
-test("camera failure during spindle test sends M5 and latches fault", async () => {
+test("motion guard failure during spindle test sends M5 and latches fault", async () => {
   const mock = await makeMock(); let guardCalls = 0;
-  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guardCalls += 1; if (guardCalls >= 3) throw new Error("camera stale"); } });
-  await assert.rejects(() => c.spindleTest(1000, 1000), /CAMERA_GUARD_FAILED/);
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guardCalls += 1; if (guardCalls >= 3) throw new Error("guard rejected motion"); } });
+  await assert.rejects(() => c.spindleTest(1000, 1000), /MOTION_GUARD_FAILED/);
   await new Promise((r) => setTimeout(r, 30));
   assert(mock.bytes.includes(Buffer.from("M5\r"))); assert(mock.bytes.includes("!".charCodeAt(0)));
   await c.close(); await mock.close();
 });
 
-test("probe is camera guarded and establishes Z from a bounded two-pass cycle", async () => {
+test("probe is motion guarded and establishes Z from a bounded two-pass cycle", async () => {
   const mock = await makeMock(); let guards = 0;
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
   const result = await c.probeZ({ thicknessMm: 12.1 });
@@ -237,12 +237,21 @@ test("recovers an alarmed probe contact, retracts, and restores hard limits", as
   await c.close(); await mock.close();
 });
 
-test("program streaming requires both camera and envelope guards", async () => {
-  const mock = await makeMock(); let cameraGuards = 0, programGuards = 0;
-  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { cameraGuards += 1; }, programGuard: async ({ analysis }) => { programGuards += 1; assert.equal(analysis.bounds.X.max, 10); } });
+test("program streaming requires both motion and envelope guards", async () => {
+  const mock = await makeMock(); let motionGuards = 0, programGuards = 0;
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { motionGuards += 1; }, programGuard: async ({ analysis }) => { programGuards += 1; assert.equal(analysis.bounds.X.max, 10); } });
   const source = "G21\nG90\nG17\nG0 X0 Y0 Z2\nM3 S1000\nG1 X10 Y10 Z-1 F100\nM5\nM2";
   const result = await c.runProgram(source);
-  assert.equal(result.after.state, "Idle"); assert.equal(programGuards, 1); assert(cameraGuards >= 2); assert(mock.bytes.includes(Buffer.from("G1 X10 Y10 Z-1 F100\r")));
+  assert.equal(result.after.state, "Idle"); assert.equal(programGuards, 1); assert(motionGuards >= 2); assert(mock.bytes.includes(Buffer.from("G1 X10 Y10 Z-1 F100\r")));
+  await c.close(); await mock.close();
+});
+
+test("recovers an idle stopped Hold state without jog or spindle motion", async () => {
+  const mock = await makeMock({ startHold: true }); let guards = 0;
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
+  const result = await c.recoverStoppedController();
+  assert.equal(result.before.state, "Hold:0"); assert.equal(result.after.state, "Idle"); assert(guards >= 1);
+  assert(mock.bytes.includes("~".charCodeAt(0))); assert(!mock.bytes.includes(Buffer.from("$J="))); assert(!mock.bytes.includes(Buffer.from("M3")));
   await c.close(); await mock.close();
 });
 

@@ -11,6 +11,7 @@ import { readProgram, saveProgram } from "./cnc-program-state.mjs";
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
+const LOCAL_UI_PORT = Number(process.env.CNC_LOCAL_UI_PORT || 47832);
 const PROBE_STATE_PATH = process.env.CNC_PROBE_STATE || join(homedir(), ".openclaw", "state", "cnc-probe-calibration.json");
 const XY_STATE_PATH = process.env.CNC_XY_STATE || join(homedir(), ".openclaw", "state", "cnc-xy-origin.json");
 const PROGRAM_STATE_PATH = process.env.CNC_PROGRAM_STATE || join(homedir(), ".openclaw", "state", "cnc-last-program.json");
@@ -272,12 +273,31 @@ const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockRe
   try { const result = await controller.runProgram(savedProgram.gcode, { programContext: savedProgram.context, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); return result; }
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); throw error; } finally { moving = false; }
 };
+const recoverStoppedController = async (payload) => {
+  if (payload.confirm !== true) throw new Error("Explicit stopped-controller recovery confirmation is required");
+  if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
+  await controller.resetConnection();
+  const result = await controller.recoverStoppedController();
+  lastControllerStatus = result.after;
+  await restoreHardLimitsOnStartup(result.after);
+  const workOffset = parseWorkOffset(await controller.query("$#"));
+  restoreLockedXy(result.after, workOffset);
+  restoreLockedProbe(result.after, workOffset);
+  rebuildWorkspaceFromSetup();
+  incident = undefined;
+  return { ok: true, result, workOffset, setup: { ...setup }, workspace: workspace.snapshot() };
+};
 const bodyJson = async (req) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY_BYTES) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
 
-const server = http.createServer(async (req, res) => {
+const localUi = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Project CNC · Local</title><style>body{font:16px system-ui;background:#111827;color:#eef2ff;max-width:820px;margin:30px auto;padding:16px}button{font:inherit;padding:12px 16px;margin:5px;border-radius:8px;border:1px solid #64748b;background:#1e293b;color:white}button.danger{background:#991b1b}pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:8px}</style><h1>Project CNC · Local recovery</h1><p>This console uses Project's local daemon and safety guards without the cloud queue.</p><div><button onclick="recover()">Recover stopped controller</button><button onclick="start()">Start saved carve</button><button onclick="cmd('/job/pause')">Pause</button><button onclick="cmd('/job/resume')">Resume</button><button class="danger" onclick="cmd('/job/stop')">Stop</button><button onclick="refresh()">Refresh</button></div><pre id="s">Loading…</pre><script>async function req(path,body){let r=await fetch(path,{method:body?'POST':'GET',headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined}),j=await r.json();if(!r.ok)throw Error(j.error||r.status);return j}async function refresh(){try{let h=await req('/health'),p=await req('/job/last');s.textContent=JSON.stringify({controller:h.lastControllerStatus,connected:h.connected,moving:h.moving,incident:h.incident,workspace:h.workspace,setup:h.setup,job:h.job,savedProgram:p.program},null,2)}catch(e){s.textContent='ERROR: '+e.message}}async function cmd(p,b={}){try{await req(p,b);await refresh()}catch(e){alert(e.message);await refresh()}}async function recover(){if(confirm('Recover an idle, spindle-off Hold/Door state and verify the saved G54 origin?'))await cmd('/controller/recover-stopped',{confirm:true})}async function start(){if(confirm('Start the locally saved carve from line 1 through Project guards?'))await cmd('/job/start-saved',{})}refresh();setInterval(refresh,2000)</script>`;
+const requestHandler = async (req, res) => {
   try {
+    if (req.method === "GET" && (req.url === "/" || req.url === "/ui")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); return res.end(localUi); }
+    if (req.method === "OPTIONS" && req.url === "/job/import") { const origin=String(req.headers.origin||""); if(origin!=="https://project-jvyw3.vercel.app") return json(res,403,{ok:false,error:"Origin denied"}); res.writeHead(204,{"access-control-allow-origin":origin,"access-control-allow-methods":"POST,OPTIONS","access-control-allow-headers":"content-type","access-control-allow-private-network":"true"}); return res.end(); }
+    if (req.method === "POST" && req.url === "/job/import") { const origin=String(req.headers.origin||""); if(origin!=="https://project-jvyw3.vercel.app") return json(res,403,{ok:false,error:"Origin denied"}); const saved=saveProgram(PROGRAM_STATE_PATH,{version:1,...await bodyJson(req),capturedAt:new Date().toISOString(),state:"imported"}); res.writeHead(200,{"content-type":"application/json","cache-control":"no-store","access-control-allow-origin":origin}); return res.end(JSON.stringify({ok:true,program:{...saved,gcode:undefined}})); }
     if (req.method === "GET" && req.url === "/health") return json(res, 200, await health());
     if (req.method === "GET" && req.url === "/job/last") { const saved = readProgram(PROGRAM_STATE_PATH); return json(res, 200, { ok: true, program: saved ? { ...saved, gcode: undefined } : null }); }
+    if (req.method === "POST" && req.url === "/job/start-saved") { const saved=readProgram(PROGRAM_STATE_PATH); if(!saved) throw new Error("No locally saved carve is available"); return json(res,200,await startProgram({jobId:saved.jobId,gcode:saved.gcode,...saved.context})); }
     if (req.method === "POST" && req.url === "/observe") return json(res, 200, await observe());
     if (req.method === "POST" && req.url === "/query") { const { command } = await bodyJson(req); return json(res, 200, { command, lines: await controller.query(command) }); }
     if (req.method === "POST" && /^\/jog\/[xyz]$/.test(req.url)) return json(res, 200, await jog(req.url.at(-1).toUpperCase(), await bodyJson(req)));
@@ -305,9 +325,12 @@ const server = http.createServer(async (req, res) => {
       incident = undefined;
       return json(res, 200, result);
     }
+    if (req.method === "POST" && req.url === "/controller/recover-stopped") return json(res,200,await recoverStoppedController(await bodyJson(req)));
     return json(res, 404, { ok: false, error: "Not found" });
   } catch (error) { return json(res, 500, { ok: false, error: error?.message || "Error" }); }
-});
+};
+const server = http.createServer(requestHandler);
+const uiServer = http.createServer(requestHandler);
 
 const restoreHardLimitsOnStartup = async (knownStatus) => {
   try {
@@ -325,6 +348,7 @@ const keepalive = setInterval(async () => { if (moving || keepaliveBusy || !cont
 keepalive.unref();
 if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
 server.listen(SOCKET_PATH, () => { chmodSync(SOCKET_PATH, 0o600); process.stdout.write(JSON.stringify({ event: "CNC_DAEMON_READY", socket: SOCKET_PATH, host: HOST, port: PORT }) + "\n"); });
+uiServer.listen(LOCAL_UI_PORT, "127.0.0.1");
 void recoverIdleConnection();
-const shutdown = async () => { clearInterval(keepalive); workspace.clear(); clearSetup(); if (moving) await controller.emergencyStop("DAEMON_SHUTDOWN_DURING_MOTION").catch(() => {}); await controller.close(); server.close(() => { try { if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH); } catch {} process.exit(0); }); };
+const shutdown = async () => { clearInterval(keepalive); workspace.clear(); clearSetup(); if (moving) await controller.emergencyStop("DAEMON_SHUTDOWN_DURING_MOTION").catch(() => {}); await controller.close(); uiServer.close(); server.close(() => { try { if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH); } catch {} process.exit(0); }); };
 process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);
