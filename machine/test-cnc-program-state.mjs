@@ -16,3 +16,12 @@ test("accepted CNC programs are atomically persisted with their analyzed envelop
   assert.doesNotMatch(readFileSync(path, "utf8"), /undefined/);
   assert.deepEqual(readProgram(path), saved);
 });
+
+test("persists the explicit manual-router contract for spindle-free staged programs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cnc-program-manual-")), path = join(dir, "last.json");
+  const manual = GCODE.replace("M3 S9000\n", "").replace("M5\n", "");
+  const saved = saveProgram(path, { version: 1, jobId: "buckle-rough", gcode: manual, state: "accepted", context: { stockWidthMm: 140, stockHeightMm: 241, stockReserveMm: 5, manualRouter: true } });
+  assert.equal(saved.context.manualRouter, true);
+  assert.equal(saved.analysis.spindleMode, "manual");
+  assert.deepEqual(readProgram(path), saved);
+});

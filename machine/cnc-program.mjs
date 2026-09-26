@@ -20,7 +20,7 @@ export function limitVerticalPlungeFeed(source, maxFeedMmMin = 60) {
   }).join("\n");
 }
 
-export function analyzeProgram(source, { maxBytes = 800_000, maxLines = 120_000, maxSpindleRpm = 9_000 } = {}) {
+export function analyzeProgram(source, { maxBytes = 800_000, maxLines = 120_000, maxSpindleRpm = 9_000, spindleMode = "controller" } = {}) {
   const text = String(source || "");
   if (!text.trim()) throw new Error("G-code is empty");
   if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error(`G-code exceeds ${maxBytes} bytes`);
@@ -69,12 +69,18 @@ export function analyzeProgram(source, { maxBytes = 800_000, maxLines = 120_000,
   }
   if (!metric) throw new Error("G-code must declare metric mode with G21");
   if (!absolute) throw new Error("G-code must declare absolute mode with G90");
-  if (!spindleStart || !spindleStop) throw new Error("G-code must contain both M3 and M5");
+  if (spindleMode === "manual") {
+    if (spindleStart || spindleStop || maxS > 0) throw new Error("Manual-router G-code must not contain M3, M5, or spindle-speed commands");
+  } else if (spindleMode === "controller") {
+    if (!spindleStart || !spindleStop) throw new Error("Controller-spindle G-code must contain both M3 and M5");
+  } else {
+    throw new Error("Spindle mode must be controller or manual");
+  }
   for (const axis of ["X", "Y", "Z"]) {
     if (!Number.isFinite(bounds[axis].min)) bounds[axis] = { min: 0, max: 0 };
   }
   if (bounds.X.min < -10.001 || bounds.Y.min < -10.001) throw new Error("Carve X/Y coordinates may extend at most 10 mm behind work zero");
-  return { lines, bounds, maxSpindleRpm: maxS, executableLines: lines.length };
+  return { lines, bounds, maxSpindleRpm: maxS, spindleMode, executableLines: lines.length };
 }
 
 export function validateProgramEnvelope(analysis, { widthMm = 360, heightMm = 360, maxDepthMm = 68, maxSafeZMm = 5 } = {}) {

@@ -4,8 +4,9 @@ import { analyzeProgram } from "./cnc-program.mjs";
 
 export function validateSavedProgram(raw) {
   if (!raw || typeof raw !== "object" || raw.version !== 1) throw new Error("Saved CNC program is unsupported");
-  const gcode = String(raw.gcode || ""), analysis = analyzeProgram(gcode);
   const context = raw.context && typeof raw.context === "object" ? raw.context : {};
+  const manualRouter = context.manualRouter === true;
+  const gcode = String(raw.gcode || ""), analysis = analyzeProgram(gcode, { spindleMode: manualRouter ? "manual" : "controller" });
   for (const field of ["stockWidthMm", "stockHeightMm", "stockReserveMm"]) {
     if (!Number.isFinite(Number(context[field]))) throw new Error(`Saved CNC program ${field} is invalid`);
   }
@@ -14,8 +15,8 @@ export function validateSavedProgram(raw) {
     jobId: String(raw.jobId || ""),
     capturedAt: String(raw.capturedAt || new Date().toISOString()),
     state: String(raw.state || "accepted").slice(0, 24),
-    context: { stockWidthMm: Number(context.stockWidthMm), stockHeightMm: Number(context.stockHeightMm), stockReserveMm: Number(context.stockReserveMm) },
-    analysis: { bounds: analysis.bounds, maxSpindleRpm: analysis.maxSpindleRpm, executableLines: analysis.executableLines },
+    context: { stockWidthMm: Number(context.stockWidthMm), stockHeightMm: Number(context.stockHeightMm), stockReserveMm: Number(context.stockReserveMm), manualRouter },
+    analysis: { bounds: analysis.bounds, maxSpindleRpm: analysis.maxSpindleRpm, spindleMode: analysis.spindleMode, executableLines: analysis.executableLines },
     gcode,
   };
 }

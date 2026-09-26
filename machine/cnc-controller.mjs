@@ -426,7 +426,8 @@ export class GrblTcpController extends EventEmitter {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for programs");
       if (typeof this.programGuard !== "function") throw new Error("Program guard is required");
-      const analysis = analyzeProgram(source);
+      const spindleMode = programContext?.manualRouter === true ? "manual" : "controller";
+      const analysis = analyzeProgram(source, { spindleMode });
       await this.motionGuard();
       const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
       if (before.state !== "Idle") throw new Error(`Controller must be Idle, got ${before.state}`);

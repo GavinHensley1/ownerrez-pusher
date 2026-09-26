@@ -73,7 +73,11 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /CNC_PLAN\.cutout\.thicknessMm=locked&&safe>0\?safe:0/);
   assert.doesNotMatch(html, /id="cncPlanMask"/);
   assert.doesNotMatch(html, /id="cncPlanCutThick"/);
-  assert.match(html, /cncRenderToolpath\(gc\)/);
+  assert.match(html, /function cncPreviewStage/);
+  assert.match(html, /exact G-code depth/);
+  assert.match(html, /Previewing does not load or arm the stage/);
+  assert.match(html, /function cncStartFrameCheck/);
+  assert.match(html, /Start position/);
   assert.match(html, /Whiteside RU2100/);
   assert.match(html, /SpeTool W01015-SPE-X/);
   assert.match(html, /id="cncPlanRoughPass"/);
@@ -103,6 +107,8 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /Approve the machining plan before Start/);
   assert.match(api, /parkside:cnc:plan:/);
   assert.match(api, /gcodeStages/);
+  assert.match(api, /cmd\.manualRouter=job\.planStatus==="approved"/);
+  assert.match(api, /requestedStage/);
   assert.match(api, /Explicit confirmation is required to replace the locked Z calibration/);
   assert.match(api, /cmd\.confirmReprobe=b\.confirmReprobe===true/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
@@ -121,6 +127,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /splitJogDistance/);
   assert.match(agent, /completedSegments/);
   assert.match(agent, /stockWidthMm/);
+  assert.match(agent, /manualRouter: command\.manualRouter === true/);
   assert.match(agent, /recover_probe: "\/probe\/recover"/);
   assert.match(agent, /lock_probe: "\/probe\/lock"/);
   assert.match(agent, /unlock_probe: "\/probe\/unlock"/);

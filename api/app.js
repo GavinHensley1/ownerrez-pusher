@@ -2659,8 +2659,10 @@ if(action==="email_recipients"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y") && (req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const q=req.query||{};
       if(req.method!=="POST" && q.file){
-        const jid=String(q.jobId||""); const key=(q.file==="gc")?("parkside:cnc:gc:"+jid):((q.file==="depth")?("parkside:cnc:depth:"+jid):((q.file==="plan")?("parkside:cnc:plan:"+jid):("parkside:cnc:img:"+jid)));
-        let val=""; try{ if(redis){ const v=await redis.get(key); val=(v==null)?"":String(v); } }catch(e){ val=""; }
+        const jid=String(q.jobId||""), requestedStage=String(q.stage||"");
+        const gcKey=(requestedStage&&["rough","finish","profile","all"].indexOf(requestedStage)!==-1)?("parkside:cnc:gc:"+jid+":"+requestedStage):("parkside:cnc:gc:"+jid);
+        const key=(q.file==="gc")?gcKey:((q.file==="depth")?("parkside:cnc:depth:"+jid):((q.file==="plan")?("parkside:cnc:plan:"+jid):("parkside:cnc:img:"+jid)));
+        let val=""; try{ if(redis){ const v=await redis.get(key); val=(v==null)?"":(typeof v==="string"?v:JSON.stringify(v)); } }catch(e){ val=""; }
         return res.status(200).json({file:String(q.file), jobId:jid, data:val});
       }
       let st={jobs:[],config:{}};
@@ -2830,7 +2832,7 @@ if(action==="email_recipients"){
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
               if(act==="probe_bed"||act==="probe_stock")cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
               if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
-              if(act==="start"){cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);}
+              if(act==="start"){cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;}
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="zero_z")cmd.confirm=b.confirm===true;
               if(act==="recover_controller")cmd.confirm=b.confirm===true;

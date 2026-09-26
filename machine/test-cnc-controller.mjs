@@ -246,6 +246,16 @@ test("program streaming requires both motion and envelope guards", async () => {
   await c.close(); await mock.close();
 });
 
+test("manual-router program streams without controller spindle commands only when explicitly declared", async () => {
+  const mock = await makeMock(); let seenMode = "";
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {}, programGuard: async ({ analysis }) => { seenMode = analysis.spindleMode; } });
+  const source = "G21\nG90\nG17\nG0 X0 Y0 Z2\nG1 X10 Y10 Z-1 F100\nM2";
+  const result = await c.runProgram(source, { programContext: { manualRouter: true } });
+  assert.equal(result.after.state, "Idle"); assert.equal(seenMode, "manual");
+  assert(!mock.bytes.includes(Buffer.from("M3"))); assert(!mock.bytes.includes(Buffer.from("M5")));
+  await c.close(); await mock.close();
+});
+
 test("recovers an idle stopped Hold state without jog or spindle motion", async () => {
   const mock = await makeMock({ startHold: true }); let guards = 0;
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });

@@ -12,6 +12,13 @@ test("cleans comments and analyzes a bounded generated program", () => {
   assert.equal(validateProgramEnvelope(result, { widthMm: 360, heightMm: 360, maxDepthMm: 68, maxSafeZMm: 5 }), true);
 });
 
+test("manual-router programs omit controller spindle commands while controller programs require them", () => {
+  const manual = safe.replace("M3 S9000\n", "").replace("M5\n", "");
+  assert.equal(analyzeProgram(manual, { spindleMode: "manual" }).spindleMode, "manual");
+  assert.throws(() => analyzeProgram(manual), /Controller-spindle G-code must contain both M3 and M5/);
+  assert.throws(() => analyzeProgram(safe, { spindleMode: "manual" }), /Manual-router G-code must not contain/);
+});
+
 test("caps pure vertical plunge feeds without changing cutting moves", () => {
   const source = "G1 Z-0.2 F150\nG1 X10 Z-0.3 F480\nG1 Z-0.4 F40";
   assert.equal(limitVerticalPlungeFeed(source, 60), "G1 Z-0.2 F60\nG1 X10 Z-0.3 F480\nG1 Z-0.4 F40");
