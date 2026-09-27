@@ -1895,7 +1895,7 @@ function cncRenderOriginFootprint(job,su){
   var el=document.getElementById('cncOriginFootprint'); if(!el)return;
   var f=cncFinished(job);
   if(!f){el.innerHTML='<span class="muted">Generate the design to calculate its required X/Y footprint.</span>';return;}
-  var fit=cncStockFit(job), msg='<b>Required carve footprint:</b> '+Number(f.W).toFixed(1)+' × '+Number(f.H).toFixed(1)+' mm, extending <b>X+ right</b> and <b>Y+ back</b> from the stock front-left origin.';
+  var fit=cncStockFit(job), msg='<b>Required carve footprint:</b> '+Number(f.W).toFixed(1)+' × '+Number(f.H).toFixed(1)+' mm at project offset X '+Number(f.OX||0).toFixed(1)+' / Y '+Number(f.OY||0).toFixed(1)+' mm in the preserved stock coordinate frame.';
   if(fit.ok) msg+=' <span style="color:#7ee0ac">✓ Fits inside '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm stock; remaining far-edge clearance '+fit.clearX.toFixed(1)+' mm X and '+fit.clearY.toFixed(1)+' mm Y.</span>';
   else msg+=' <span style="color:#ff9a9a">× '+cncEsc(fit.reason)+'</span>';
   msg+=su&&su.xyReady?' <span style="color:#7ee0ac">✓ X/Y origin set.</span>':' <span style="color:#ffcf79">Move the black bit to the front-left carve origin, verify this full rectangle fits on stock, then set X/Y zero.</span>';
@@ -2065,11 +2065,11 @@ function cncFinished(job){ if(!job) return null;
   var W=Number(job.sizeMM)||0; if(!W) return null;
   var H=Number(job.pieceH)||0; if(!H){ H=Math.round(W*cncJobAR(job)); }
   var depth=Number(job.reliefDepth)||((CNC_MATS[job.material]||CNC_MATS['Other']).depth);
-  return {W:W,H:H,depth:depth}; }
+  return {W:W,H:H,OX:Math.max(0,Number(job.originOffsetXMm)||0),OY:Math.max(0,Number(job.originOffsetYMm)||0),depth:depth}; }
 function cncStockFit(job){ var f=cncFinished(job), m=cncMach(); if(!f)return {ok:false,reason:'Generate the design to calculate its stock footprint.',f:null,m:m};
   var reserve=Math.max(0,Number(m.M)||0), usableX=Math.max(0,m.X-reserve), usableY=Math.max(0,m.Y-reserve);
-  var ok=f.W<=usableX+0.001&&f.H<=usableY+0.001;
-  return {ok:ok,f:f,m:m,usableX:usableX,usableY:usableY,clearX:usableX-f.W,clearY:usableY-f.H,reason:ok?'':('Toolpath '+f.W.toFixed(1)+' × '+f.H.toFixed(1)+' mm exceeds usable stock '+usableX.toFixed(1)+' × '+usableY.toFixed(1)+' mm.')}; }
+  var endX=f.OX+f.W,endY=f.OY+f.H,ok=endX<=usableX+0.001&&endY<=usableY+0.001;
+  return {ok:ok,f:f,m:m,usableX:usableX,usableY:usableY,endX:endX,endY:endY,clearX:usableX-endX,clearY:usableY-endY,reason:ok?'':('Offset toolpath ends at X '+endX.toFixed(1)+' / Y '+endY.toFixed(1)+' mm and exceeds usable stock X '+usableX.toFixed(1)+' / Y '+usableY.toFixed(1)+' mm.')}; }
 function cncPanels(job){ var f=cncFinished(job); if(!f) return null; var m=cncMach();
   var uX=Math.max(20,m.X-m.M), uY=Math.max(20,m.Y-m.M);
   var cols=Math.max(1,Math.ceil(f.W/uX)), rows=Math.max(1,Math.ceil(f.H/uY));

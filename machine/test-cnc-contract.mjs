@@ -57,6 +57,7 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /minimum feature/);
   assert.match(html, /function cncCompensateToolpath/);
   assert.match(html, /function cncOffsetProgram/);
+  assert.match(html, /endX=f\.OX\+f\.W,endY=f\.OY\+f\.H/);
   assert.match(html, /TOOL COMPENSATION:/);
   assert.match(html, /stockToLeaveMm:rough\?\.5:0/);
   assert.match(html, /function cncFinishFidelity/);
