@@ -25,7 +25,7 @@ let reconnectPromise;
 let nextReconnectAt = 0;
 const RECONNECT_BACKOFF_MS = 10_000;
 const workspace = new VirtualWorkspace();
-const setup = { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, probeCircuitReady: false, probeCircuitTestedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
+const setup = { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
 const job = { state: "idle", jobId: null, progress: 0, message: "", updatedAt: null };
 let activeRunCheckpoint;
 try { activeRunCheckpoint = readRunCheckpoint(RUN_STATE_PATH); } catch { activeRunCheckpoint = undefined; }
@@ -73,12 +73,8 @@ controller.on("programProgress", (value) => {
   Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() });
   persistRunProgress({ state: "running", lastCompletedLine: value.line, totalLines: value.total, message: job.message });
 });
-const clearSetup = () => Object.assign(setup, { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, probeCircuitReady: false, probeCircuitTestedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
-const clearProbeSetup = (status = "unlocked_reprobe_required", preserveCircuit = false) => {
-  const probeCircuitReady = preserveCircuit && setup.probeCircuitReady === true;
-  const probeCircuitTestedAt = probeCircuitReady ? setup.probeCircuitTestedAt : null;
-  return Object.assign(setup, { probeCircuitReady, probeCircuitTestedAt, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: status, probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
-};
+const clearSetup = () => Object.assign(setup, { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const clearProbeSetup = (status = "unlocked_reprobe_required") => Object.assign(setup, { bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: status, probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
 const rebuildWorkspaceFromSetup = () => {
   if (!setup.xyReady || !setup.probeReady || !Number.isFinite(setup.xyOriginMPos?.X) || !Number.isFinite(setup.xyOriginMPos?.Y) || !Number.isFinite(setup.zOriginMPos) || !Number.isFinite(setup.maxCutDepthMm)) { workspace.clear(); return null; }
   return workspace.setBounds({ X: { min: setup.xyOriginMPos.X, max: setup.xyOriginMPos.X + 360 }, Y: { min: setup.xyOriginMPos.Y, max: setup.xyOriginMPos.Y + 360 }, Z: { min: setup.zOriginMPos - setup.maxCutDepthMm, max: null } });
@@ -298,37 +294,16 @@ const setStockZZero = async (payload) => {
   lastControllerStatus = await readStatus();
   return { ok: true, setup: { ...setup }, status: lastControllerStatus, workOffset };
 };
-const probeCircuitIsFresh = () => setup.probeCircuitReady === true && Number.isFinite(Date.parse(setup.probeCircuitTestedAt)) && Date.now() - Date.parse(setup.probeCircuitTestedAt) <= 5 * 60 * 1000;
-const testProbeCircuit = async () => {
-  if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
-  const status = await readStatus();
-  if (status.state !== "Idle") throw new Error(`Controller must report Idle before the probe-circuit test, got ${status.state}`);
-  const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number);
-  if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`);
-  if (!String(status.Pn || "").includes("P")) {
-    setup.probeCircuitReady = false;
-    setup.probeCircuitTestedAt = null;
-    throw new Error("Probe circuit is open. Keep the clipped probe plate touching the bit, then test again. No axis moved.");
-  }
-  setup.probeCircuitReady = true;
-  setup.probeCircuitTestedAt = new Date().toISOString();
-  setup.updatedAt = setup.probeCircuitTestedAt;
-  lastControllerStatus = status;
-  return { ok: true, noMotion: true, status, setup: { ...setup } };
-};
 const probeSurface = async (kind, payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (!new Set(["bed", "stock"]).has(kind)) throw new Error("Unknown probe surface");
   if (kind === "bed") {
     if (setup.probeLocked && payload.confirmReprobe !== true) throw new Error("Probe calibration is locked; confirm a bed re-probe to replace it");
-    if (!probeCircuitIsFresh()) throw new Error("Test the probe circuit with the plate touching the bit before probing the bed");
     removeProbeLock(PROBE_STATE_PATH);
-    clearProbeSetup("reprobe_in_progress", true);
+    clearProbeSetup("reprobe_in_progress");
     workspace.clear();
   }
   if (kind === "stock" && !setup.bedProbeReady) throw new Error("Probe the exposed bed before probing the stock");
-  setup.probeCircuitReady = false;
-  setup.probeCircuitTestedAt = null;
   moving = true; incident = undefined;
   try {
     await motionGuard(); const result = await controller.probeZ({ thicknessMm: payload.thicknessMm }); const thickness = Number(result.thicknessMm);
@@ -359,12 +334,10 @@ const probeSurface = async (kind, payload) => {
       setup.probeLockStatus = "ready_to_lock";
     }
     setup.updatedAt = new Date().toISOString(); lastControllerStatus = result.after;
-    setup.probeCircuitReady = true;
-    setup.probeCircuitTestedAt = setup.updatedAt;
     rebuildWorkspaceFromSetup();
     persistLockedXy(result.after);
     return { ...result, setup: { ...setup } };
-  } catch (error) { setup.probeCircuitReady = false; setup.probeCircuitTestedAt = null; incident = error?.message || "PROBE_FAILED"; throw error; } finally { moving = false; }
+  } catch (error) { incident = error?.message || "PROBE_FAILED"; throw error; } finally { moving = false; }
 };
 const lockProbeCalibration = async () => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
@@ -446,7 +419,6 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && req.url === "/zero/xy") return json(res, 200, await setXyZero(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/zero/xy/restore-after-power-cycle") return json(res, 200, await restoreXyAfterPowerCycle(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/zero/z") return json(res, 200, await setStockZZero(await bodyJson(req)));
-    if (req.method === "POST" && req.url === "/probe/test") return json(res, 200, await testProbeCircuit());
     if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/lock") return json(res, 200, await lockProbeCalibration());

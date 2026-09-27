@@ -2803,12 +2803,11 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","test_probe","probe_bed","probe_stock","lock_probe","unlock_probe","recover_probe","recover_controller","restore_xy","zero_xy","zero_z","start","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["jog","probe_bed","probe_stock","lock_probe","unlock_probe","recover_probe","recover_controller","restore_xy","zero_xy","zero_z","start","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
               if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
               if(act==="probe_stock"&&!setup.bedProbeReady) return res.status(409).json({error:"Probe the exposed bed before probing the stock",cnc:st});
-              if(act==="probe_bed"&&setup.probeCircuitReady!==true) return res.status(409).json({error:"Test the probe circuit with the plate touching the bit before probing the bed",cnc:st});
               if(act==="probe_stock"&&setup.probeLocked) return res.status(409).json({error:"Probe calibration is locked; re-probe the bed first to replace it",cnc:st});
               if(act==="probe_bed"&&setup.probeLocked&&b.confirmReprobe!==true) return res.status(400).json({error:"Explicit confirmation is required to replace the locked Z calibration",cnc:st});
               if(act==="lock_probe"&&(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady)) return res.status(409).json({error:"Probe both the bed and stock before locking calibration",cnc:st});

@@ -552,7 +552,6 @@
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <button id="cncZeroBtn" class="cncCommandBtn" onclick="cncSetXyZero(this)">Reset X/Y for new project</button>
         <button id="cncRestoreXyBtn" class="cncCommandBtn" onclick="cncRestoreSavedXy(this)" style="display:none">Restore saved X/Y</button>
-        <button id="cncProbeTestBtn" class="cncCommandBtn" onclick="cncTestProbeCircuit(this)">0. Test probe circuit</button>
         <button id="cncProbeBedBtn" class="cncCommandBtn" onclick="cncProbe('bed',this)">1. Probe bed</button>
         <button id="cncProbeStockBtn" class="cncCommandBtn" onclick="cncProbe('stock',this)">2. Probe stock</button>
         <button id="cncProbeLockBtn" class="cncCommandBtn" onclick="cncLockProbe(this)">3. Lock probe calibration</button>
@@ -1857,8 +1856,7 @@ function cncRenderAgent(job){
   document.querySelectorAll('.cncJogBtn').forEach(function(btn){btn.disabled=motionBlocked;});
   var zero=document.getElementById('cncZeroBtn'); if(zero) zero.disabled=motionBlocked;
   var restoreXy=document.getElementById('cncRestoreXyBtn'),xyRecovery=h.xyRecovery||{};if(restoreXy){restoreXy.style.display=xyRecovery.available?'':'none';restoreXy.disabled=motionBlocked||!xyRecovery.available;restoreXy.textContent=xyRecovery.available?('Restore saved X/Y ('+Number((xyRecovery.savedWorkPosition||{}).X).toFixed(3)+', '+Number((xyRecovery.savedWorkPosition||{}).Y).toFixed(3)+')'):'Restore saved X/Y';}
-  var probeTest=document.getElementById('cncProbeTestBtn'); if(probeTest){probeTest.disabled=motionBlocked;probeTest.textContent=su.probeCircuitReady?'0. Probe circuit verified ✓':'0. Test probe circuit';}
-  var bed=document.getElementById('cncProbeBedBtn'); if(bed){ bed.disabled=motionBlocked||!su.probeCircuitReady; bed.textContent=su.probeLocked?'1. Re-probe bed':'1. Probe bed'; }
+  var bed=document.getElementById('cncProbeBedBtn'); if(bed){ bed.disabled=motionBlocked; bed.textContent=su.probeLocked?'1. Re-probe bed':'1. Probe bed'; }
   var stock=document.getElementById('cncProbeStockBtn'); if(stock) stock.disabled=motionBlocked||!su.bedProbeReady||!!su.probeLocked;
   var lock=document.getElementById('cncProbeLockBtn'); if(lock) lock.disabled=motionBlocked||!!su.probeLocked||!su.bedProbeReady||!su.stockProbeReady;
   var stockZero=document.getElementById('cncStockZZeroBtn'); if(stockZero) stockZero.disabled=motionBlocked||!su.probeLocked||!su.stockProbeReady;
@@ -2267,7 +2265,6 @@ async function cncJog(axis,dir,button){
   var distance=step*(dir<0?-1:1), feed=axis==='Z'?100:300, st=document.getElementById('cncJogStatus'); if(st)st.textContent='One move requested: '+axis+(distance>0?'+':'−')+Math.abs(distance)+' mm.';
   return cncQueueMachineAction('jog',{axis:axis,distanceMm:distance,feedMmPerMin:feed},button);
 }
-async function cncTestProbeCircuit(button){if(!confirm('NO-MOTION PROBE TEST\n\nAttach the clip and hold the probe plate so it is touching the bit now. Keep it touching until Project confirms the circuit. No axis will move.'))return;return cncMachineAction('test_probe',{},button);}
 async function cncProbe(kind,button){ var t=cncClamp((document.getElementById('cncProbeThickness')||{}).value||12.1,1,30), label=kind==='bed'?'exposed bed':'top of the wood'; var su=((CNC.agent||{}).health||{}).setup||{}, replacing=kind==='bed'&&!!su.probeLocked; var warning=replacing?'\n\nThis will replace the old Z calibration while preserving the X/Y stock zero. If probing fails, Start will remain locked until both surfaces are re-probed.':''; if(!confirm('Probe the '+label+' with the '+t.toFixed(1)+' mm plate?\nPlace the plate at that location, attach the clip, and keep hands clear.'+warning))return; await cncSaveProbeThickness(); return cncMachineAction(kind==='bed'?'probe_bed':'probe_stock',{confirmReprobe:replacing},button); }
 async function cncSaveProbeThickness(){ var e=document.getElementById('cncProbeThickness'); var t=cncClamp(e&&e.value||12.1,1,30); if(e)e.value=t.toFixed(1); var j=await cncPost({config:{probeThickness:t}}); if(j&&j.cnc)CNC=j.cnc; }
 async function cncSaveDepthToken(){ var v=(document.getElementById('cncDepthTok')||{}).value||''; var s=document.getElementById('cncTokState'); if(s) s.textContent='Saving...'; var j=await cncPost({secret:{depthToken:v}}); if(j&&j.cnc){ CNC=j.cnc; var el=document.getElementById('cncDepthTok'); if(el) el.value=''; if(s) s.textContent=CNC.config.hasDepthToken?'✓ token saved':'no token yet'; } else if(s) s.textContent='Error.'; }
