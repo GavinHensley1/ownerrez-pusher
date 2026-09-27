@@ -37,6 +37,29 @@ export function xyLockFromSetup(setup, status, now = new Date().toISOString()) {
   });
 }
 
+export function planXyPowerCycleRecovery(raw, status, workOffset, toleranceMm = 0.05) {
+  const lock = validateXyLock(raw), current = machinePosition(status);
+  if (!current) throw new Error("Current machine position is unavailable");
+  if (!["X", "Y"].every((axis) => Math.abs(current[axis]) <= toleranceMm)) {
+    throw new Error("X/Y power-cycle recovery is available only before any post-reset X/Y movement");
+  }
+  if (!workOffset || !["X", "Y"].every((axis) => finite(workOffset[axis]) && Math.abs(Number(workOffset[axis])) <= toleranceMm)) {
+    throw new Error("Controller X/Y work offsets are not in the expected reset state");
+  }
+  const savedWorkPosition = {
+    X: Number((lock.lastKnownMPos.X - lock.xyOriginMPos.X).toFixed(3)),
+    Y: Number((lock.lastKnownMPos.Y - lock.xyOriginMPos.Y).toFixed(3)),
+  };
+  if (savedWorkPosition.X < -60.001 || savedWorkPosition.X > 400.001 || savedWorkPosition.Y < -60.001 || savedWorkPosition.Y > 400.001) {
+    throw new Error(`Saved X/Y work position ${savedWorkPosition.X},${savedWorkPosition.Y} is outside the recoverable machine range`);
+  }
+  const rebasedOriginMPos = {
+    X: Number((current.X - savedWorkPosition.X).toFixed(3)),
+    Y: Number((current.Y - savedWorkPosition.Y).toFixed(3)),
+  };
+  return { lock, current, savedWorkPosition, rebasedOriginMPos };
+}
+
 export function applyXyLock(setup, raw, status, toleranceMm = 0.05, workOffset) {
   const lock = validateXyLock(raw), current = machinePosition(status);
   if (controllerFrameLooksReset({ ...lock.lastKnownMPos, Z: 1 }, current)) {

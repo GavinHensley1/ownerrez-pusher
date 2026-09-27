@@ -14,9 +14,19 @@ test("cleans comments and analyzes a bounded generated program", () => {
 
 test("manual-router programs omit controller spindle commands while controller programs require them", () => {
   const manual = safe.replace("M3 S9000\n", "").replace("M5\n", "");
-  assert.equal(analyzeProgram(manual, { spindleMode: "manual" }).spindleMode, "manual");
+  const analyzed = analyzeProgram(manual, { spindleMode: "manual" });
+  assert.equal(analyzed.spindleMode, "manual");
+  assert.equal(analyzed.lines.at(-1), "G0 Z2");
+  assert(!analyzed.lines.includes("M2"));
   assert.throws(() => analyzeProgram(manual), /Controller-spindle G-code must contain both M3 and M5/);
   assert.throws(() => analyzeProgram(safe, { spindleMode: "manual" }), /Manual-router G-code must not contain/);
+});
+
+test("manual-router analysis omits only terminal M2/M30", () => {
+  const manual = "G21\nG90\nG17\nG0 Z3\nG0 X0 Y0\nM30";
+  const analyzed = analyzeProgram(manual, { spindleMode: "manual" });
+  assert.deepEqual(analyzed.lines, ["G21", "G90", "G17", "G0 Z3", "G0 X0 Y0"]);
+  assert.throws(() => analyzeProgram(manual.replace("G0 X0 Y0\nM30", "M2\nG0 X0 Y0"), { spindleMode: "manual" }), /terminal command/);
 });
 
 test("caps pure vertical plunge feeds without changing cutting moves", () => {

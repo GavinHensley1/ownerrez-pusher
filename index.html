@@ -551,6 +551,7 @@
       <div style="font-weight:600;margin-bottom:7px">Set origin and measure wood</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <button id="cncZeroBtn" class="cncCommandBtn" onclick="cncSetXyZero(this)">Set X/Y zero here</button>
+        <button id="cncRestoreXyBtn" class="cncCommandBtn" onclick="cncRestoreSavedXy(this)" style="display:none">Restore saved X/Y</button>
         <button id="cncProbeBedBtn" class="cncCommandBtn" onclick="cncProbe('bed',this)">1. Probe bed</button>
         <button id="cncProbeStockBtn" class="cncCommandBtn" onclick="cncProbe('stock',this)">2. Probe stock</button>
         <button id="cncProbeLockBtn" class="cncCommandBtn" onclick="cncLockProbe(this)">3. Lock probe calibration</button>
@@ -1608,7 +1609,7 @@ function switchView(v){
 var CNC={jobs:[],config:{}}; var CNC_CUR=null;
 var CNC_COMMAND_IN_FLIGHT=false, CNC_COMMAND_BUTTON=null, CNC_COMMAND_BUTTON_HTML='', CNC_LAST_COMMAND_ID='';
 var CNC_PLAN=null, CNC_PLAN_IMG=null, CNC_PLAN_PIXELS=null, CNC_PLAN_MASK=null, CNC_PLAN_SELECTION=null, CNC_PLAN_DRAG=null, CNC_PLAN_SOURCE='';
-var CNC_ACTION_LABELS={jog:'Move',probe_bed:'Probe bed',probe_stock:'Probe stock',lock_probe:'Lock calibration',unlock_probe:'Unlock calibration',recover_probe:'Retract probe',recover_controller:'Enable positioning',zero_xy:'Set X/Y zero',zero_z:'Set stock Z zero',start:'Start carve',pause:'Pause',resume:'Resume',stop:'Stop'};
+var CNC_ACTION_LABELS={jog:'Move',probe_bed:'Probe bed',probe_stock:'Probe stock',lock_probe:'Lock calibration',unlock_probe:'Unlock calibration',recover_probe:'Retract probe',recover_controller:'Enable positioning',restore_xy:'Restore saved X/Y',zero_xy:'Set X/Y zero',zero_z:'Set stock Z zero',start:'Start carve',pause:'Pause',resume:'Resume',stop:'Stop'};
 var CNC_MATS={
  'C752 nickel silver':{feed:250,plunge:80,step:0.08,depth:0.8,rpm:9000},
  'Aluminum / soft metal':{feed:300,plunge:100,step:0.10,depth:1.0,rpm:9000},
@@ -1854,6 +1855,7 @@ function cncRenderAgent(job){
   var motionBlocked=baseBlocked||!controller.idle;
   document.querySelectorAll('.cncJogBtn').forEach(function(btn){btn.disabled=motionBlocked;});
   var zero=document.getElementById('cncZeroBtn'); if(zero) zero.disabled=motionBlocked;
+  var restoreXy=document.getElementById('cncRestoreXyBtn'),xyRecovery=h.xyRecovery||{};if(restoreXy){restoreXy.style.display=xyRecovery.available?'':'none';restoreXy.disabled=motionBlocked||!xyRecovery.available;restoreXy.textContent=xyRecovery.available?('Restore saved X/Y ('+Number((xyRecovery.savedWorkPosition||{}).X).toFixed(3)+', '+Number((xyRecovery.savedWorkPosition||{}).Y).toFixed(3)+')'):'Restore saved X/Y';}
   var bed=document.getElementById('cncProbeBedBtn'); if(bed){ bed.disabled=motionBlocked; bed.textContent=su.probeLocked?'1. Re-probe bed':'1. Probe bed'; }
   var stock=document.getElementById('cncProbeStockBtn'); if(stock) stock.disabled=motionBlocked||!su.bedProbeReady||!!su.probeLocked;
   var lock=document.getElementById('cncProbeLockBtn'); if(lock) lock.disabled=motionBlocked||!!su.probeLocked||!su.bedProbeReady||!su.stockProbeReady;
@@ -2251,6 +2253,7 @@ async function cncStart(button){ var job=cncCurrentJob(); if(!job){ alert('Pick 
 }
 async function cncMachineAction(action,extra,button){ return cncQueueMachineAction(action,extra||{},button); }
 async function cncRecoverController(button){if(!confirm('Enable manual positioning?\n\nGRBL is paused with commanded feed and spindle already at zero. The external router does not need to be installed. Project will release only a safe Hold:0/Door:0 state, verify Idle, and restore saved origins. No axis moves during this step.'))return;return cncMachineAction('recover_controller',{confirm:true},button);}
+async function cncRestoreSavedXy(button){var h=(CNC.agent&&CNC.agent.health)||{},r=h.xyRecovery||{},p=r.savedWorkPosition||{};if(!r.available){alert('Exact saved X/Y recovery is not available.');return;}if(!confirm('Restore the original stock X/Y after this power cycle?\n\nSaved pre-shutdown work position: X '+Number(p.X).toFixed(3)+' mm, Y '+Number(p.Y).toFixed(3)+' mm.\n\nThis changes only the coordinate frame and does not move an axis. Continue only if the gantry was NOT pushed or moved while controller power was off.'))return;return cncMachineAction('restore_xy',{confirmGantryUnmoved:true},button);}
 async function cncSetXyZero(button){ var job=cncCurrentJob(); if(!job){alert('Pick a job first.');return;} var f=cncFinished(job), footprint=f?(Number(f.W).toFixed(1)+' × '+Number(f.H).toFixed(1)+' mm'):'the generated design'; if(!confirm('Set X/Y zero at the current bit position?\n\nThe current point becomes the FRONT-LEFT carve origin. '+footprint+' will extend X+ right and Y+ back. Confirm that full rectangle fits on the stock and avoids clamps.'))return; return cncMachineAction('zero_xy',{},button); }
 async function cncSetStockZZero(button){ var job=cncCurrentJob(); if(!job){alert('Pick a job first.');return;} if(!confirm('Set stock Z zero at the current bit position?\n\nThe spindle must be OFF, the probe plate removed, and the bit tip must be just touching the bare wood. Project will preserve the measured stock thickness and protected bottom.'))return; return cncMachineAction('zero_z',{confirm:true},button); }
 async function cncLockProbe(button){ if(!confirm('Lock the measured bed and stock calibration?\n\nThis preserves stock thickness and maximum cut depth across page refreshes and daemon restarts while the controller coordinate session remains continuous. A CNC power cycle or coordinate jump will reject the saved lock.'))return; return cncMachineAction('lock_probe',{},button); }

@@ -2803,7 +2803,7 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","probe_bed","probe_stock","lock_probe","unlock_probe","recover_probe","recover_controller","zero_xy","zero_z","start","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["jog","probe_bed","probe_stock","lock_probe","unlock_probe","recover_probe","recover_controller","restore_xy","zero_xy","zero_z","start","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
               if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
@@ -2836,6 +2836,11 @@ if(action==="email_recipients"){
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="zero_z")cmd.confirm=b.confirm===true;
               if(act==="recover_controller")cmd.confirm=b.confirm===true;
+              if(act==="restore_xy"){
+                if(!health.xyRecovery||health.xyRecovery.available!==true) return res.status(409).json({error:"Exact saved X/Y recovery is not available in the current controller state",cnc:st});
+                if(b.confirmGantryUnmoved!==true) return res.status(400).json({error:"Confirm the gantry was not moved while controller power was off",cnc:st});
+                cmd.confirmGantryUnmoved=true;
+              }
               if(act==="jog"){
                 const axis=String(b.axis||"").toUpperCase(), distance=Number(b.distanceMm), feed=Number(b.feedMmPerMin);
                 if(["X","Y","Z"].indexOf(axis)===-1) return res.status(400).json({error:"Jog axis must be X, Y, or Z",cnc:st});

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { applyXyLock, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
+import { applyXyLock, planXyPowerCycleRecovery, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 
 const setup = { xyReady: true, xyOriginMPos: { X: -207.685, Y: -25, Z: -22.759 }, xyLockedAt: "2026-09-25T20:41:23.226Z" };
 const status = { MPos: "-207.685,-25.000,-22.759,0.000" };
@@ -39,4 +39,12 @@ test("X/Y lock rejects a changed G54 origin even if the cutter is elsewhere", ()
 test("X/Y lock rejects a coordinate reset", () => {
   const lock = xyLockFromSetup(setup, status);
   assert.throws(() => applyXyLock({}, lock, { MPos: "0.000,0.000,-22.759,0.000" }), /origin does not match this controller session/);
+});
+
+test("power-cycle recovery rebases the saved work position without motion", () => {
+  const lock = { version: 1, locked: true, xyOriginMPos: { X: 0, Y: 0 }, lastKnownMPos: { X: 243.4, Y: 5.029 }, lockedAt: "2026-09-26T19:32:20.244Z", source: "Project guarded front-left X/Y origin" };
+  const plan = planXyPowerCycleRecovery(lock, { MPos: "0.000,0.000,0.000,0.000" }, { X: 0, Y: 0, Z: -13.531 });
+  assert.deepEqual(plan.savedWorkPosition, { X: 243.4, Y: 5.029 });
+  assert.deepEqual(plan.rebasedOriginMPos, { X: -243.4, Y: -5.029 });
+  assert.throws(() => planXyPowerCycleRecovery(lock, { MPos: "1.000,0.000,0.000,0.000" }, { X: 0, Y: 0, Z: -13.531 }), /before any post-reset X\/Y movement/);
 });

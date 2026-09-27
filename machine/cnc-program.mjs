@@ -47,7 +47,7 @@ export function analyzeProgram(source, { maxBytes = 800_000, maxLines = 120_000,
     }
     const mCodes = [...line.matchAll(/\bM0*(\d+)\b/g)].map((match) => Number(match[1]));
     for (const code of mCodes) {
-      if (![2, 3, 5].includes(code)) throw new Error(`Unsupported M-code M${code}`);
+      if (![2, 3, 5, 30].includes(code)) throw new Error(`Unsupported M-code M${code}`);
       if (code === 3) spindleStart = true;
       if (code === 5) spindleStop = true;
     }
@@ -71,6 +71,12 @@ export function analyzeProgram(source, { maxBytes = 800_000, maxLines = 120_000,
   if (!absolute) throw new Error("G-code must declare absolute mode with G90");
   if (spindleMode === "manual") {
     if (spindleStart || spindleStop || maxS > 0) throw new Error("Manual-router G-code must not contain M3, M5, or spindle-speed commands");
+    // M2/M30 can make inexpensive GRBL bridges close or stop answering before
+    // their final acknowledgement. The external router is already controlled
+    // manually, so omit only terminal program-end commands after validating the
+    // complete file. An embedded M2/M30 is still unsafe and rejected.
+    while (/^M0*(?:2|30)$/.test(lines.at(-1) || "")) lines.pop();
+    if (lines.some((line) => /\bM0*(?:2|30)\b/.test(line))) throw new Error("Manual-router M2/M30 is allowed only as the terminal command");
   } else if (spindleMode === "controller") {
     if (!spindleStart || !spindleStop) throw new Error("Controller-spindle G-code must contain both M3 and M5");
   } else {

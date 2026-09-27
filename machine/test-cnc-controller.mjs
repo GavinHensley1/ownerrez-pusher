@@ -255,6 +255,7 @@ test("manual-router program streams without controller spindle commands only whe
   const result = await c.runProgram(source, { programContext: { manualRouter: true } });
   assert.equal(result.after.state, "Idle"); assert.equal(seenMode, "manual");
   assert(!mock.bytes.includes(Buffer.from("M3"))); assert(!mock.bytes.includes(Buffer.from("M5")));
+  assert(!mock.bytes.includes(Buffer.from("M2\r")));
   await c.close(); await mock.close();
 });
 

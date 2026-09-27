@@ -13,7 +13,7 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
+  for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncRestoreXyBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
   assert.match(html, /cncQueueMachineAction\('jog'/);
   assert.match(html, /if\(action==='jog'\)return 'Move'/);
   assert.match(html, /One press sends one command/);
@@ -24,6 +24,8 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /Controller ready/);
   assert.match(html, /Positioning paused/);
   assert.match(html, /Enable positioning/);
+  assert.match(html, /Restore saved X\/Y/);
+  assert.match(html, /confirmGantryUnmoved/);
   assert.match(html, /external router does not need to be installed/i);
   assert.match(html, /button\.disabled=!!baseBlocked/);
   assert.match(html, /var motionBlocked=baseBlocked\|\|!controller\.idle/);
@@ -114,6 +116,7 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /requestedStage/);
   assert.match(api, /Explicit confirmation is required to replace the locked Z calibration/);
   assert.match(api, /cmd\.confirmReprobe=b\.confirmReprobe===true/);
+  assert.match(api, /health\.xyRecovery/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
   assert.match(api, /const maxStep=axis==="Z"\?5:100/);
   assert.match(api, /Z jogs are limited to 5 mm per click/);
@@ -136,6 +139,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /unlock_probe: "\/probe\/unlock"/);
   assert.match(agent, /zero_z: "\/zero\/z"/);
   assert.match(agent, /recover_controller: "\/controller\/recover-stopped"/);
+  assert.match(agent, /restore_xy: "\/zero\/xy\/restore-after-power-cycle"/);
   assert.match(agent, /confirmReprobe: command\.confirmReprobe === true/);
   assert.ok(agent.includes('const isHealth = path === "/health"'));
   assert.match(agent, /headers: isHealth \? \{\} :/);
@@ -179,6 +183,8 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /Controller positioning is paused/);
   assert.match(daemon, /external router may be removed/);
   assert.match(daemon, /Enable positioning/);
+  assert.match(daemon, /\/zero\/xy\/restore-after-power-cycle/);
+  assert.match(daemon, /planXyPowerCycleRecovery/);
 });
 
 test("daemon persists per-line recovery checkpoints and validates position before resume", () => {

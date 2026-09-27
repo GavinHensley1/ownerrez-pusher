@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
 import { limitVerticalPlungeFeed, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
-import { applyXyLock, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
+import { applyXyLock, planXyPowerCycleRecovery, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 import { readProgram, saveProgram } from "./cnc-program-state.mjs";
 import { buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
 import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
@@ -164,9 +164,18 @@ const recoverIdleConnection = async () => {
   }).finally(() => { reconnectPromise = undefined; });
   return reconnectPromise;
 };
+const xyRecoverySnapshot = async () => {
+  try {
+    const lock = readXyLock(XY_STATE_PATH);
+    if (!lock || setup.xyReady || lastControllerStatus?.state !== "Idle") return { available: false };
+    const workOffset = parseWorkOffset(await controller.query("$#"));
+    const plan = planXyPowerCycleRecovery(lock, lastControllerStatus, workOffset);
+    return { available: true, savedWorkPosition: plan.savedWorkPosition, rebasedOriginMPos: plan.rebasedOriginMPos, lockedAt: plan.lock.lockedAt };
+  } catch (error) { return { available: false, reason: error?.message || "X/Y recovery unavailable" }; }
+};
 const health = async () => {
   if (!controller.connected && !hazardousOperationActive()) await recoverIdleConnection();
-  return { ok: true, connected: controller.connected, moving, incident, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
+  return { ok: true, connected: controller.connected, moving, incident, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, xyRecovery: controller.connected ? await xyRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
 };
 const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (new Set(["Door:0", "Hold:0"]).has(status.state)) throw new Error(`Controller positioning is paused in ${status.state}. The external router may be removed; use Enable positioning first.`); if (status.state !== "Idle") throw new Error(`Controller must report Idle before positioning, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`); return status; };
@@ -206,6 +215,28 @@ const setXyZero = async () => {
   rebuildWorkspaceFromSetup();
   persistLockedProbe(before);
   return { setup: { ...setup }, status: before };
+};
+const restoreXyAfterPowerCycle = async (payload) => {
+  if (payload.confirmGantryUnmoved !== true) throw new Error("Confirm the gantry was not moved while controller power was off");
+  if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
+  await motionGuard();
+  const before = await assertIdle(), workOffsetBefore = parseWorkOffset(await controller.query("$#")), raw = readXyLock(XY_STATE_PATH);
+  if (!raw) throw new Error("No saved X/Y stock origin is available");
+  const plan = planXyPowerCycleRecovery(raw, before, workOffsetBefore);
+  await controller.setWorkOffset({ x: plan.savedWorkPosition.X, y: plan.savedWorkPosition.Y });
+  const workOffset = parseWorkOffset(await controller.query("$#"));
+  for (const axis of ["X", "Y"]) {
+    if (Math.abs(workOffset[axis] - plan.rebasedOriginMPos[axis]) > 0.05) throw new Error(`Restored ${axis} origin verification failed: expected ${plan.rebasedOriginMPos[axis]}, got ${workOffset[axis]}`);
+  }
+  setup.xyReady = true;
+  setup.xyLockStatus = "restored_after_power_cycle";
+  setup.xyLockedAt = raw.lockedAt;
+  setup.xyOriginMPos = { X: workOffset.X, Y: workOffset.Y, Z: coordinates(before).Z };
+  setup.updatedAt = new Date().toISOString();
+  const lock = persistLockedXy(before);
+  rebuildWorkspaceFromSetup();
+  lastControllerStatus = await readStatus();
+  return { ok: true, status: lastControllerStatus, setup: { ...setup }, restoredWorkPosition: plan.savedWorkPosition, lock: { lockedAt: lock.lockedAt, lastKnownMPos: lock.lastKnownMPos } };
 };
 const setStockZZero = async (payload) => {
   if (payload.confirm !== true) throw new Error("Explicit stock Z-zero confirmation is required");
@@ -351,6 +382,7 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && /^\/jog\/[xyz]$/.test(req.url)) return json(res, 200, await jog(req.url.at(-1).toUpperCase(), await bodyJson(req)));
     if (req.method === "POST" && req.url === "/workspace/set") { removeXyLock(XY_STATE_PATH); setup.xyReady = false; setup.xyLockStatus = "unlocked"; setup.xyLockedAt = null; setup.xyOriginMPos = null; setup.updatedAt = new Date().toISOString(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
     if (req.method === "POST" && req.url === "/zero/xy") return json(res, 200, await setXyZero());
+    if (req.method === "POST" && req.url === "/zero/xy/restore-after-power-cycle") return json(res, 200, await restoreXyAfterPowerCycle(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/zero/z") return json(res, 200, await setStockZZero(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));
