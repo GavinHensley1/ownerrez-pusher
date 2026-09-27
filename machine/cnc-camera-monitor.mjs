@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, openSync, closeSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
-import { cameraFresh, consumeDiagnosticChunk, createDiagnostics, selectAnalyzedCandidate } from "./cnc-camera-diagnostics.mjs";
+import { cameraFresh, consumeDiagnosticChunk, createDiagnostics, selectAnalyzedCandidate, sourceFrameAge } from "./cnc-camera-diagnostics.mjs";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.CNC_CAMERA_PORT || 47831);
@@ -137,8 +137,8 @@ const publishFrames = (ownedGeneration, generationDir, ownedDiagnostics) => {
     const source = path.join(generationDir, candidate.name);
     try {
       const sourceProducedAt = statSync(source).mtimeMs;
-      const sourceAge = Date.now() - sourceProducedAt;
-      if (sourceAge < 0 || sourceAge > MAX_FRAME_AGE_MS) throw new Error(`STALE_SOURCE_FRAME:${sourceAge}`);
+      const sourceAge = sourceFrameAge(sourceProducedAt);
+      if (sourceAge === null || sourceAge > MAX_FRAME_AGE_MS) throw new Error(`STALE_SOURCE_FRAME:${Date.now() - sourceProducedAt}`);
       const data = validJpeg(source);
       if (!data) return;
       ownedDiagnostics.black = ownedDiagnostics.blackFrames.includes(analyzedFrame);

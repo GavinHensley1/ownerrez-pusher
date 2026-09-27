@@ -7,7 +7,7 @@ import { limitVerticalPlungeFeed, measuredStockProtection, validateProgramEnvelo
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 import { applyXyLock, planXyPowerCycleRecovery, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 import { readProgram, saveProgram } from "./cnc-program-state.mjs";
-import { buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
+import { buildBufferedStopResume, buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
 import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
@@ -378,10 +378,14 @@ const resumeSavedProgram = async (payload) => {
   const traced = programPositionAtLine(saved.gcode, completedLine, { spindleMode: "manual" });
   const status = await assertIdle(), machine = coordinates(status);
   const work = { X: machine.X - Number(setup.xyOriginMPos?.X), Y: machine.Y - Number(setup.xyOriginMPos?.Y), Z: machine.Z - Number(setup.zOriginMPos) };
-  for (const axis of ["X", "Y", "Z"]) {
-    if (!Number.isFinite(work[axis]) || Math.abs(work[axis] - traced.position[axis]) > 0.05) throw new Error(`Resume position mismatch on ${axis}: controller ${work[axis]?.toFixed?.(3)}, program ${traced.position[axis].toFixed(3)}`);
+  const exactPosition = ["X", "Y", "Z"].every((axis) => Number.isFinite(work[axis]) && Math.abs(work[axis] - traced.position[axis]) <= 0.05);
+  if (!exactPosition && activeRunCheckpoint?.state !== "interrupted") {
+    const axis = ["X", "Y", "Z"].find((name) => !Number.isFinite(work[name]) || Math.abs(work[name] - traced.position[name]) > 0.05);
+    throw new Error(`Resume position mismatch on ${axis}: controller ${work[axis]?.toFixed?.(3)}, program ${traced.position[axis].toFixed(3)}`);
   }
-  const resumed = buildResumeProgram(saved.gcode, completedLine, { spindleMode: "manual" });
+  const resumed = exactPosition
+    ? buildResumeProgram(saved.gcode, completedLine, { spindleMode: "manual" })
+    : buildBufferedStopResume(saved.gcode, completedLine, work, { spindleMode: "manual" });
   if (payload.dryRun === true) return { ok: true, dryRun: true, controller: status, workPosition: work, expectedPosition: traced.position, resume: { ...resumed, gcode: undefined } };
   const result = await startProgram({ jobId: `${saved.jobId}-resume-${completedLine}`, gcode: resumed.gcode, ...saved.context });
   return { ...result, resume: resumed };

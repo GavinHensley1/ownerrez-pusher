@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cameraBridgeFresh, cameraFresh, consumeDiagnosticChunk, createDiagnostics, parseDiagnosticLine, selectAnalyzedCandidate } from "./cnc-camera-diagnostics.mjs";
+import { cameraBridgeFresh, cameraFresh, consumeDiagnosticChunk, createDiagnostics, parseDiagnosticLine, selectAnalyzedCandidate, sourceFrameAge } from "./cnc-camera-diagnostics.mjs";
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
@@ -68,6 +68,12 @@ test("daemon bridge freshness trusts only the monitor's fail-closed verdict", ()
   assert.equal(cameraBridgeFresh({ ...good, lastFrameAt: 11_000 }, now), false);
   assert.equal(cameraBridgeFresh({ ...good, lastFrameAt: 1_000 }, now), false);
   assert.equal(cameraBridgeFresh({ ...good, lastFrameAt: 1, frameAgeMs: null }, now), false);
+});
+
+test("source frame age tolerates sub-second filesystem clock skew", () => {
+  assert.equal(sourceFrameAge(10_000.3, 10_000), 0);
+  assert.equal(sourceFrameAge(11_001, 10_000), null);
+  assert.equal(sourceFrameAge(9_500, 10_000), 500);
 });
 
 let passed = 0;

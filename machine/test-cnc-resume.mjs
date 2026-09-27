@@ -3,7 +3,7 @@ import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
+import { buildBufferedStopResume, buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
 import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
 
 const PROGRAM = [
@@ -21,6 +21,15 @@ test("manual-router resume retracts and continues at the next row boundary", () 
   assert.equal(resumed.skippedUnfinishedLines, 1);
   assert.match(resumed.gcode, /G21\nG90\nG17\nG0 Z3\.6\nG0 X0 Y8/);
   assert.doesNotMatch(resumed.gcode, /G1 X0 Z0/);
+});
+
+test("buffered stop rewinds to the current row after stopping mid-motion", () => {
+  const stopped = { X: 7.5, Y: 10, Z: -1.5 };
+  const resumed = buildBufferedStopResume(PROGRAM, 8, stopped, { spindleMode: "manual" });
+  assert.equal(resumed.interruptedLine, 7);
+  assert.equal(resumed.resumeAtLine, 4);
+  assert.equal(resumed.replayedLines, 3);
+  assert.match(resumed.gcode, /G21\nG90\nG17\nG0 Z3\.6\nG0 X10 Y10/);
 });
 
 test("run checkpoints persist the last acknowledged line atomically", () => {

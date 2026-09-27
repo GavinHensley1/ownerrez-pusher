@@ -56,3 +56,9 @@ export const cameraBridgeFresh = (status, now = Date.now(), maxAgeMs = 3000) => 
   const age = typeof status?.frameAgeMs === "number" && Number.isFinite(status.frameAgeMs) ? status.frameAgeMs : now - Number(status?.lastFrameAt || 0);
   return status?.state === "ready" && status?.fresh === true && status?.monitoring === true && age >= 0 && age <= maxAgeMs;
 };
+
+export const sourceFrameAge = (producedAt, now = Date.now(), allowedFutureSkewMs = 1000) => {
+  const raw = Number(now) - Number(producedAt);
+  if (!Number.isFinite(raw) || raw < -allowedFutureSkewMs) return null;
+  return Math.max(0, raw);
+};
