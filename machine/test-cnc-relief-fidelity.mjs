@@ -62,3 +62,14 @@ test("ball cutter envelope raises the commanded center near a protected peak", (
   assert.ok(result[12] > 0.99);
   assert.ok(result[11] > source[11], "ball geometry prevents the flank from gouging the peak");
 });
+
+test("project offset places the adjacent proof without redefining durable X/Y zero", () => {
+  const make = new Function(`${line("cncOffsetProgram")}\nreturn cncOffsetProgram;`);
+  const offset = make();
+  const source = "; test\nG21\nG0 X0 Y0\nG1 X111.438 Y86.077 Z-2.972\nG0 X0 Y0";
+  const result = offset(source, 0, 100);
+  assert.match(result, /PROJECT OFFSET: X0\.000 Y100\.000/);
+  assert.match(result, /G0 X0 Y100\.000/);
+  assert.match(result, /G1 X111\.438 Y186\.077 Z-2\.972/);
+  assert.doesNotMatch(result, /Y86\.077/);
+});
