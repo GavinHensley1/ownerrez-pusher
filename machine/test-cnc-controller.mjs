@@ -3,8 +3,8 @@ import net from "node:net";
 import test from "node:test";
 import { GrblTcpController, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
 
-const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, startProbeAlarm = false, startDoor = false, startHold = false } = {}) => {
-  let connections = 0, statusQueries = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true;
+const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, startProbeAlarm = false, startAlarm = false, startDoor = false, startHold = false } = {}) => {
+  let connections = 0, statusQueries = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm || startAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true;
   const writes = [];
   const server = net.createServer((socket) => {
     connections += 1;
@@ -265,6 +265,15 @@ test("recovers an idle stopped Hold state without jog or spindle motion", async 
   const result = await c.recoverStoppedController();
   assert.equal(result.before.state, "Hold:0"); assert.equal(result.after.state, "Idle"); assert(guards >= 1);
   assert(mock.bytes.includes("~".charCodeAt(0))); assert(!mock.bytes.includes(Buffer.from("$J="))); assert(!mock.bytes.includes(Buffer.from("M3")));
+  await c.close(); await mock.close();
+});
+
+test("clears a probe-miss alarm without axis or spindle motion", async () => {
+  const mock = await makeMock({ startAlarm: true }); let guards = 0;
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
+  const result = await c.recoverStoppedController();
+  assert.equal(result.before.state, "Alarm"); assert.equal(result.after.state, "Idle"); assert(guards >= 1);
+  assert(mock.bytes.includes(Buffer.from("$X\r"))); assert(!mock.bytes.includes(Buffer.from("$J="))); assert(!mock.bytes.includes(Buffer.from("M3")));
   await c.close(); await mock.close();
 });
 

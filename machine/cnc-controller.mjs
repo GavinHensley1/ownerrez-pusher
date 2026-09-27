@@ -268,11 +268,13 @@ export class GrblTcpController extends EventEmitter {
       await this.motionGuard();
       const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
       if (before.state === "Idle") return { alreadyIdle: true, before, after: before, samples: [] };
-      if (!new Set(["Hold:0", "Door:0"]).has(before.state)) throw new Error(`Controller must be Hold:0, Door:0, or Idle, got ${before.state}`);
+      const baseState = before.state.split(":")[0];
+      if (!new Set(["Hold:0", "Door:0"]).has(before.state) && baseState !== "Alarm") throw new Error(`Controller must be Alarm, Hold:0, Door:0, or Idle, got ${before.state}`);
       const [feed, spindle] = feedAndSpindle(before);
       if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before controller recovery: ${before.FS}`);
       if (before.Pn) throw new Error(`Active input pins before controller recovery: ${before.Pn}`);
-      this.socket.write("~");
+      if (baseState === "Alarm") await this.#lineCommandUnlocked("$X", false);
+      else this.socket.write("~");
       const deadline = now() + 5_000, samples = [];
       while (now() < deadline) {
         const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
@@ -280,6 +282,10 @@ export class GrblTcpController extends EventEmitter {
         if (status.state === "Idle") {
           const [afterFeed, afterSpindle] = feedAndSpindle(status);
           if (afterFeed !== 0 || afterSpindle !== 0) throw new Error(`Non-zero feed/spindle after controller recovery: ${status.FS}`);
+          if (baseState === "Alarm") {
+            const beforePosition = coordinates(before), afterPosition = coordinates(status);
+            for (const axis of ["X", "Y", "Z"]) if (Math.abs(beforePosition[axis] - afterPosition[axis]) > 0.001) throw new Error(`Alarm recovery moved ${axis}: ${beforePosition[axis]} to ${afterPosition[axis]}`);
+          }
           return { before, after: status, samples };
         }
         if (!new Set(["Hold", "Door"]).has(status.state.split(":")[0])) throw new Error(`Unexpected controller recovery state: ${status.raw}`);
