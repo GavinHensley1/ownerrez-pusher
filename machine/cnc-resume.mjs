@@ -73,6 +73,20 @@ const distanceToSegment = (point, start, end) => {
   return { distance: Math.hypot(point.X - nearest.X, point.Y - nearest.Y, point.Z - nearest.Z), progress };
 };
 
+const distanceToXySegment = (point, start, end) => {
+  const delta = { X: end.X - start.X, Y: end.Y - start.Y };
+  const lengthSquared = delta.X ** 2 + delta.Y ** 2;
+  if (lengthSquared === 0) return { distance: Infinity, progress: 0 };
+  const relative = { X: point.X - start.X, Y: point.Y - start.Y };
+  const progress = (relative.X * delta.X + relative.Y * delta.Y) / lengthSquared;
+  const clamped = Math.max(0, Math.min(1, progress));
+  const nearest = {
+    X: start.X + clamped * delta.X,
+    Y: start.Y + clamped * delta.Y,
+  };
+  return { distance: Math.hypot(point.X - nearest.X, point.Y - nearest.Y), progress };
+};
+
 export function buildBufferedStopResume(source, acknowledgedLine, currentPosition, { spindleMode = "controller", toleranceMm = 0.05, searchWindow = 128 } = {}) {
   if (spindleMode !== "manual") throw new Error("Automatic resume is currently limited to manual-router stages");
   const analysis = analyzeProgram(source, { spindleMode });
@@ -93,6 +107,22 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
       }
     }
     position = next;
+  }
+  let matchMode = "xyz";
+  if (!segments.length && currentPosition.Z >= analysis.bounds.Z.max - toleranceMm) {
+    position = { X: 0, Y: 0, Z: 0 };
+    for (let index = 0; index < acknowledged; index += 1) {
+      const command = analysis.lines[index];
+      const next = positionAfter(position, command);
+      if (index >= firstCandidate && /^G0*1\b/.test(command)) {
+        const match = distanceToXySegment(currentPosition, position, next);
+        if (match.progress >= -0.001 && match.progress <= 1.001 && match.distance <= toleranceMm) {
+          segments.push({ index, command, start: { ...position }, end: { ...next }, ...match });
+        }
+      }
+      position = next;
+    }
+    if (segments.length) matchMode = "xy-retracted";
   }
   if (!segments.length) throw new Error(`Stopped position does not match any of the last ${Math.min(searchWindow, acknowledged)} acknowledged motion lines`);
   segments.sort((a, b) => a.distance - b.distance || a.index - b.index);
@@ -124,6 +154,7 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
     interruptedCommand: interrupted.command,
     segmentProgress: interrupted.progress,
     positionErrorMm: interrupted.distance,
+    positionMatchMode: matchMode,
     resumeAtLine: rewindIndex + 1,
     replayedLines: interrupted.index - rewindIndex,
     originalExecutableLines: analysis.lines.length,

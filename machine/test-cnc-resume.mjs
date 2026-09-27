@@ -32,6 +32,16 @@ test("buffered stop rewinds to the current row after stopping mid-motion", () =>
   assert.match(resumed.gcode, /G21\nG90\nG17\nG0 Z3\.6\nG0 X10 Y10/);
 });
 
+test("buffered stop recovers the interrupted row after Z was safely retracted", () => {
+  const stoppedAndRetracted = { X: 7.5, Y: 10, Z: 20 };
+  const resumed = buildBufferedStopResume(PROGRAM, 8, stoppedAndRetracted, { spindleMode: "manual" });
+  assert.equal(resumed.positionMatchMode, "xy-retracted");
+  assert.equal(resumed.interruptedLine, 7);
+  assert.equal(resumed.resumeAtLine, 4);
+  assert.equal(resumed.positionErrorMm, 0);
+  assert.match(resumed.gcode, /G21\nG90\nG17\nG0 Z3\.6\nG0 X10 Y10/);
+});
+
 test("run checkpoints persist the last acknowledged line atomically", () => {
   const dir = mkdtempSync(join(tmpdir(), "cnc-run-")), path = join(dir, "run.json");
   const saved = writeRunCheckpoint(path, { version: 1, jobId: "rough", programCapturedAt: "now", state: "interrupted", lastCompletedLine: 152, totalLines: 3971, message: "read ETIMEDOUT", updatedAt: "later" });
