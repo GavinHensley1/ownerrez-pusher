@@ -99,6 +99,7 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /if\(hadXY\)upd\(px,py\);upd\(nx,ny\)/);
   assert.match(html, /FULL-STOCK PLACEMENT/);
   assert.match(html, /Exact motion bounds:/);
+  assert.match(html, /prev\.style\.display='block'/);
   assert.match(html, /Previewing does not load or arm the stage/);
   assert.match(html, /function cncStartFrameCheck/);
   assert.match(html, /Start position/);
