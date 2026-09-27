@@ -8,6 +8,12 @@ const line = (name) => {
   assert.ok(source, `${name} must exist as a standalone function`);
   return source;
 };
+const block = (name, nextName) => {
+  const start = html.indexOf(`function ${name}`);
+  const end = html.indexOf(`function ${nextName}`, start + 1);
+  assert.ok(start >= 0 && end > start, `${name} block must exist`);
+  return html.slice(start, end);
+};
 
 test("continuous finish depth interpolates through all four approved anchors", () => {
   const make = new Function(`${line("cncClamp")}\n${line("cncPlanContinuousDepth")}\nreturn cncPlanContinuousDepth;`);
@@ -72,4 +78,34 @@ test("project offset places the adjacent proof without redefining durable X/Y ze
   assert.match(result, /G0 X0 Y100\.000/);
   assert.match(result, /G1 X111\.438 Y186\.077 Z-2\.972/);
   assert.doesNotMatch(result, /Y86\.077/);
+});
+
+test("V-bit detail fidelity accepts a dense recessed contour program", () => {
+  const make = new Function(`${line("cncDetailFidelity")}\n${line("cncAssertDetailFidelity")}\nreturn cncAssertDetailFidelity;`);
+  const assertDetail = make();
+  const rows = [
+    "; DETAIL MODE: four-level V-carved contours from the unsmoothed artwork",
+    "; DETAIL SAFETY: recessed grooves only; fragile raised detail is not generated",
+    "; V-BIT: 30 degree 0.1mm tip | groove depth 0.450 mm",
+    "; DETAIL PATHS: 240 | contour length 1250.0 mm",
+  ];
+  for (let index = 0; index < 1200; index += 1) rows.push(`G1 X${(index * 0.01).toFixed(3)} Y${(index * 0.005).toFixed(3)} Z-1.200`);
+  const result = assertDetail(rows.join("\n"));
+  assert.equal(result.paths, 240);
+  assert.equal(result.grooveDepthMm, 0.45);
+});
+
+test("marching-square detail generator emits connected safe recessed paths", () => {
+  const source = `${line("cncClamp")}\n${block("cncAppendDetailContours", "cncGenReliefRegion")}\nreturn cncAppendDetailContours;`;
+  const append = new Function(source)();
+  const cols = 9, rows = 9, hm = new Float32Array(cols * rows), mask = new Uint8Array(cols * rows).fill(1);
+  for (let y = 0; y < rows; y += 1) for (let x = 0; x < cols; x += 1) hm[y * cols + x] = Math.max(0, 1 - Math.hypot(x - 4, y - 4) / 5);
+  const g = [];
+  const result = append(g, hm, mask, cols, rows, 16, 16, { safeZ: 3.2, maxDepth: 3, depth: 0.45, feed: 420, plunge: 100, levels: [0.3, 0.6] });
+  const text = g.join("\n");
+  assert.ok(result.paths >= 2);
+  assert.match(text, /DETAIL SAFETY: recessed grooves only/);
+  assert.match(text, /G0 Z3\.20/);
+  assert.match(text, /G1 Z-\d+\.\d{3} F100/);
+  assert.doesNotMatch(text, /M3|M5|G38/);
 });

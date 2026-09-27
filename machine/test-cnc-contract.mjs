@@ -49,7 +49,7 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /X\+ right/);
   assert.match(html, /Y\+ back/);
   assert.match(html, /recover_probe/);
-  assert.match(html, /budget:\(stage==='finish'\?700000:30000\)/);
+  assert.match(html, /budget:\(stage==='finish'\?700000:\(stage==='detail'\?180000:30000\)\)/);
   assert.match(html, /function cncPlanContinuousDepth/);
   assert.match(html, /RELIEF MODE:/);
   assert.match(html, /continuous piecewise-linear depth/);
@@ -61,6 +61,12 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /TOOL COMPENSATION:/);
   assert.match(html, /stockToLeaveMm:rough\?\.5:0/);
   assert.match(html, /function cncFinishFidelity/);
+  assert.match(html, /function cncAppendDetailContours/);
+  assert.match(html, /function cncDetailFidelity/);
+  assert.match(html, /function cncAssertDetailFidelity/);
+  assert.match(html, /Three-bit relief \+ detail/);
+  assert.match(html, /30° V-bit 0\.1mm/);
+  assert.match(html, /DETAIL SAFETY: recessed grooves only/);
   assert.match(html, /uniqueDepths<128/);
   assert.match(html, /gcodeStagesGzip/);
   assert.match(html, /CompressionStream\('gzip'\)/);
@@ -136,6 +142,7 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /parkside:cnc:plan:/);
   assert.match(api, /gcodeStages/);
   assert.match(api, /gcodeStagesGzip/);
+  assert.match(api, /\["rough","finish","detail","all","profile"\]/);
   assert.match(api, /@gzip:/);
   assert.match(api, /command\.gcodeGzip/);
   assert.match(api, /cmd\.manualRouter=job\.planStatus==="approved"/);

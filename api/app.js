@@ -2660,7 +2660,7 @@ if(action==="email_recipients"){
       const q=req.query||{};
       if(req.method!=="POST" && q.file){
         const jid=String(q.jobId||""), requestedStage=String(q.stage||"");
-        const gcKey=(requestedStage&&["rough","finish","profile","all"].indexOf(requestedStage)!==-1)?("parkside:cnc:gc:"+jid+":"+requestedStage):("parkside:cnc:gc:"+jid);
+        const gcKey=(requestedStage&&["rough","finish","detail","profile","all"].indexOf(requestedStage)!==-1)?("parkside:cnc:gc:"+jid+":"+requestedStage):("parkside:cnc:gc:"+jid);
         const key=(q.file==="gc")?gcKey:((q.file==="depth")?("parkside:cnc:depth:"+jid):((q.file==="plan")?("parkside:cnc:plan:"+jid):("parkside:cnc:img:"+jid)));
         let val=""; try{ if(redis){ const v=await redis.get(key); val=(v==null)?"":(typeof v==="string"?v:JSON.stringify(v)); } }catch(e){ val=""; }
         if(q.file==="gc"&&val.startsWith("@gzip:"))return res.status(200).json({file:"gc",jobId:jid,encoding:"gzip-base64",data:val.slice(6)});
@@ -2686,10 +2686,10 @@ if(action==="email_recipients"){
         } else if(b.updateJob&&typeof b.updateJob==="object"){
           const u=b.updateJob; const id=String(u.id||"");
           st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","originOffsetXMm","originOffsetYMm","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); if(u.invalidatePlan===true){x.planStatus="draft";x.hasGcode=false;delete x.planHash;delete x.gcodeStages;delete x.activeStage;} x.updatedAt=now; } return x; });
-          if(u.invalidatePlan===true) try{if(redis){await redis.del("parkside:cnc:plan:"+id);await redis.del("parkside:cnc:gc:"+id);for(const stage of ["rough","finish","profile","all"])await redis.del("parkside:cnc:gc:"+id+":"+stage);}}catch(e){}
+          if(u.invalidatePlan===true) try{if(redis){await redis.del("parkside:cnc:plan:"+id);await redis.del("parkside:cnc:gc:"+id);for(const stage of ["rough","finish","detail","profile","all"])await redis.del("parkside:cnc:gc:"+id+":"+stage);}}catch(e){}
         } else if(b.delJob){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
-          try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); await redis.del("parkside:cnc:depth:"+id); await redis.del("parkside:cnc:plan:"+id); for(const stage of ["rough","finish","profile"]) await redis.del("parkside:cnc:gc:"+id+":"+stage); } }catch(e){}
+          try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); await redis.del("parkside:cnc:depth:"+id); await redis.del("parkside:cnc:plan:"+id); for(const stage of ["rough","finish","detail","profile"]) await redis.del("parkside:cnc:gc:"+id+":"+stage); } }catch(e){}
         } else if(b.config&&typeof b.config==="object"){
           const c=b.config;
           if(c.reliefWidth!==undefined) st.config.reliefWidth=Math.max(20,Math.min(600,Number(c.reliefWidth)||100));
@@ -2772,7 +2772,7 @@ if(action==="email_recipients"){
           if(b.creativeImage!==undefined){
             const d=String(b.creativeImage||""); if(d.length>800000) return res.status(413).json({error:"image too large"});
             try{ if(redis){ if(d) await redis.set("parkside:cnc:img:"+jid, d); else await redis.del("parkside:cnc:img:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
-            job.hasCreative=!!d; job.hasGcode=false; job.hasDepth=false; job.planStatus="draft"; delete job.planHash; delete job.gcodeStages; delete job.activeStage; try{ if(redis){ await redis.del("parkside:cnc:depth:"+jid); await redis.del("parkside:cnc:gc:"+jid); await redis.del("parkside:cnc:plan:"+jid); for(const stage of ["rough","finish","profile"]) await redis.del("parkside:cnc:gc:"+jid+":"+stage); } }catch(e){} job.updatedAt=now;
+            job.hasCreative=!!d; job.hasGcode=false; job.hasDepth=false; job.planStatus="draft"; delete job.planHash; delete job.gcodeStages; delete job.activeStage; try{ if(redis){ await redis.del("parkside:cnc:depth:"+jid); await redis.del("parkside:cnc:gc:"+jid); await redis.del("parkside:cnc:plan:"+jid); for(const stage of ["rough","finish","detail","profile"]) await redis.del("parkside:cnc:gc:"+jid+":"+stage); } }catch(e){} job.updatedAt=now;
           }
           if(b.machiningPlan!==undefined){
             const plan=(b.machiningPlan&&typeof b.machiningPlan==="object")?b.machiningPlan:null;
@@ -2781,22 +2781,22 @@ if(action==="email_recipients"){
             try{ if(redis) await redis.set("parkside:cnc:plan:"+jid,raw); }catch(e){ return res.status(500).json({error:"db error"}); }
             job.planHash=String(plan.hash||"").slice(0,80); job.planStatus=String(plan.status||"draft").slice(0,20); job.planVersion=String(plan.version||1).slice(0,12); job.planTools=JSON.stringify(plan.tools||{}).slice(0,4000); job.planCutout=String((plan.cutout||{}).mode||"none").slice(0,20); job.planUpdatedAt=now;
             job.hasGcode=false; delete job.gcodeStages; delete job.activeStage;
-            try{ if(redis){ await redis.del("parkside:cnc:gc:"+jid); for(const stage of ["rough","finish","profile"]) await redis.del("parkside:cnc:gc:"+jid+":"+stage); } }catch(e){}
+            try{ if(redis){ await redis.del("parkside:cnc:gc:"+jid); for(const stage of ["rough","finish","detail","profile"]) await redis.del("parkside:cnc:gc:"+jid+":"+stage); } }catch(e){}
           }
           if(b.gcodeStages&&typeof b.gcodeStages==="object"){
-            const order=[]; for(const stage of ["rough","finish","all","profile"]){ if(b.gcodeStages[stage]===undefined) continue; const text=String(b.gcodeStages[stage]||""); if(!text||text.length>800000) return res.status(text?413:400).json({error:"invalid "+stage+" stage G-code"}); order.push(stage); try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,text);}catch(e){return res.status(500).json({error:"db error"});} }
+            const order=[]; for(const stage of ["rough","finish","detail","all","profile"]){ if(b.gcodeStages[stage]===undefined) continue; const text=String(b.gcodeStages[stage]||""); if(!text||text.length>800000) return res.status(text?413:400).json({error:"invalid "+stage+" stage G-code"}); order.push(stage); try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,text);}catch(e){return res.status(500).json({error:"db error"});} }
             if(!order.length) return res.status(400).json({error:"at least one G-code stage is required"});
             const active=order[0]; try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
             job.hasGcode=true; job.gcodeStages=JSON.stringify(order); job.activeStage=active; job.gcodeName="auto-"+active+".nc"; job.planStatus="approved"; job.updatedAt=now;
           }
           if(b.gcodeStagesGzip&&typeof b.gcodeStagesGzip==="object"){
-            const order=[];for(const stage of ["rough","finish","all","profile"]){if(b.gcodeStagesGzip[stage]===undefined)continue;const data=String(b.gcodeStagesGzip[stage]||"");if(!data||data.length>3800000||!/^[A-Za-z0-9+/=]+$/.test(data))return res.status(data?413:400).json({error:"invalid compressed "+stage+" stage G-code"});order.push(stage);try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,"@gzip:"+data);}catch(e){return res.status(500).json({error:"db error"});}}
+            const order=[];for(const stage of ["rough","finish","detail","all","profile"]){if(b.gcodeStagesGzip[stage]===undefined)continue;const data=String(b.gcodeStagesGzip[stage]||"");if(!data||data.length>3800000||!/^[A-Za-z0-9+/=]+$/.test(data))return res.status(data?413:400).json({error:"invalid compressed "+stage+" stage G-code"});order.push(stage);try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,"@gzip:"+data);}catch(e){return res.status(500).json({error:"db error"});}}
             if(!order.length)return res.status(400).json({error:"at least one compressed G-code stage is required"});
             const active=order[0];try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
             job.hasGcode=true;job.gcodeStages=JSON.stringify(order);job.activeStage=active;job.gcodeName="auto-"+active+".nc";job.planStatus="approved";job.gcodeEncoding="gzip-base64";job.updatedAt=now;
           }
           if(b.activateStage!==undefined){
-            const stage=String(b.activateStage||""); if(["rough","finish","profile","all"].indexOf(stage)===-1) return res.status(400).json({error:"invalid machining stage"});
+            const stage=String(b.activateStage||""); if(["rough","finish","detail","profile","all"].indexOf(stage)===-1) return res.status(400).json({error:"invalid machining stage"});
             if(["queued","accepted","running","paused"].indexOf(String(job.agentState||""))!==-1) return res.status(409).json({error:"Stop the current machine operation before loading another stage",cnc:st});
             let code=""; try{if(redis){const v=await redis.get("parkside:cnc:gc:"+jid+":"+stage);code=(v==null)?"":String(v);}}catch(e){} if(!code)return res.status(404).json({error:"stage G-code not found"});
             try{if(redis)await redis.set("parkside:cnc:gc:"+jid,code);}catch(e){return res.status(500).json({error:"db error"});}
