@@ -200,6 +200,11 @@ test("Project is completely independent of the external supervision camera", () 
   assert.doesNotMatch(html, /Camera status is informational|checking the camera/i);
 });
 
+test("recovery heartbeat maps progress back to the hosted Project job", () => {
+  assert.match(agent, /replace\(\/-resume-\\d\+\$\/, ""\)/);
+  assert.match(agent, /job: projectJob/);
+});
+
 test("CNC agent acknowledges controls quickly and accepted programs persist locally", () => {
   assert.match(agent, /IDLE_POLL_MS[^\n]+1500/);
   assert.match(agent, /IDLE_HEARTBEAT_MS[^\n]+60000/);

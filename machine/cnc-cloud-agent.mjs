@@ -62,6 +62,15 @@ async function heartbeat() {
   catch (error) { health = { ok: false, connected: false, error: error.message }; }
   // Project receives a strict machine-state allowlist. External supervision data
   // must never be persisted, polled, or used as a Project control interlock.
+  const localJob = health?.job && typeof health.job === "object" ? health.job : null;
+  const projectJob = localJob ? {
+    state: String(localJob.state || "").slice(0, 24),
+    jobId: String(localJob.jobId || ""),
+    progress: Math.max(0, Math.min(100, Number(localJob.progress) || 0)),
+    message: String(localJob.message || "").slice(0, 300),
+    updatedAt: String(localJob.updatedAt || ""),
+  } : null;
+  if (projectJob?.jobId) projectJob.jobId = String(projectJob.jobId).replace(/-resume-\d+$/, "");
   const projectHealth = {
     ok: health?.ok === true,
     connected: health?.connected === true,
@@ -72,7 +81,7 @@ async function heartbeat() {
     workspace: health?.workspace || null,
     setup: health?.setup || null,
     xyRecovery: health?.xyRecovery || null,
-    job: health?.job || null,
+    job: projectJob,
   };
   await cloud("POST", { type: "heartbeat", at: new Date().toISOString(), health: projectHealth });
   return health;
