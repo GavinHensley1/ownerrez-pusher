@@ -50,3 +50,11 @@ test("power-cycle recovery rebases the saved work position without motion", () =
   assert.deepEqual(plan.rebasedOriginMPos, { X: -243.4, Y: -5.029 });
   assert.throws(() => planXyPowerCycleRecovery(lock, { MPos: "1.000,0.000,0.000,0.000" }, { X: 0, Y: 0, Z: -13.531 }), /before any post-reset X\/Y movement/);
 });
+
+test("repeated power cycles accept the saved persistent G54 origin and rebase the latest work position", () => {
+  const lock = { version: 1, locked: true, xyOriginMPos: { X: -243.4, Y: -5.029 }, lastKnownMPos: { X: -118.25, Y: 20.5 }, lockedAt: "2026-09-27T17:06:40.396Z", source: "Project guarded front-left X/Y origin" };
+  const plan = planXyPowerCycleRecovery(lock, { MPos: "0.000,0.000,10.000,0.000" }, { X: -243.4, Y: -5.029, Z: -13.531 });
+  assert.deepEqual(plan.savedWorkPosition, { X: 125.15, Y: 25.529 });
+  assert.deepEqual(plan.rebasedOriginMPos, { X: -125.15, Y: -25.529 });
+  assert.throws(() => planXyPowerCycleRecovery(lock, { MPos: "0.000,0.000,10.000,0.000" }, { X: -200, Y: -5.029, Z: -13.531 }), /do not match the saved project or reset state/);
+});

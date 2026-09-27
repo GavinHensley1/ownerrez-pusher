@@ -13,7 +13,7 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncRestoreXyBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
+  for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncRestoreXyBtn", "cncProbeTestBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
   assert.match(html, /cncQueueMachineAction\('jog'/);
   assert.match(html, /if\(action==='jog'\)return 'Move'/);
   assert.match(html, /One press sends one command/);
@@ -25,6 +25,8 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /Positioning paused/);
   assert.match(html, /Enable positioning/);
   assert.match(html, /Restore saved X\/Y/);
+  assert.match(html, /Reset X\/Y for new project/);
+  assert.match(html, /confirmNewProject:true/);
   assert.match(html, /confirmGantryUnmoved/);
   assert.match(html, /external router does not need to be installed/i);
   assert.match(html, /button\.disabled=!!baseBlocked/);
@@ -33,6 +35,8 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /<option value="0\.1">0\.1 mm<\/option>/);
   assert.match(html, /Z is limited to 5 mm per click/);
   assert.match(html, /probe_bed/);
+  assert.match(html, /test_probe/);
+  assert.match(html, /NO-MOTION PROBE TEST/);
   assert.match(html, /probe_stock/);
   assert.match(html, /lock_probe/);
   assert.match(html, /unlock_probe/);
@@ -116,6 +120,8 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /requestedStage/);
   assert.match(api, /Explicit confirmation is required to replace the locked Z calibration/);
   assert.match(api, /cmd\.confirmReprobe=b\.confirmReprobe===true/);
+  assert.match(api, /cmd\.confirmNewProject=true/);
+  assert.match(api, /Test the probe circuit with the plate touching the bit before probing the bed/);
   assert.match(api, /health\.xyRecovery/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
   assert.match(api, /const maxStep=axis==="Z"\?5:100/);
@@ -135,12 +141,14 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /stockWidthMm/);
   assert.match(agent, /manualRouter: command\.manualRouter === true/);
   assert.match(agent, /recover_probe: "\/probe\/recover"/);
+  assert.match(agent, /test_probe: "\/probe\/test"/);
   assert.match(agent, /lock_probe: "\/probe\/lock"/);
   assert.match(agent, /unlock_probe: "\/probe\/unlock"/);
   assert.match(agent, /zero_z: "\/zero\/z"/);
   assert.match(agent, /recover_controller: "\/controller\/recover-stopped"/);
   assert.match(agent, /restore_xy: "\/zero\/xy\/restore-after-power-cycle"/);
   assert.match(agent, /confirmReprobe: command\.confirmReprobe === true/);
+  assert.match(agent, /confirmNewProject: command\.confirmNewProject === true/);
   assert.ok(agent.includes('const isHealth = path === "/health"'));
   assert.match(agent, /headers: isHealth \? \{\} :/);
   assert.match(agent, /if \(!isHealth\) req\.write\(data\)/);
@@ -178,7 +186,11 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /\/controller\/recover-stopped/);
   assert.match(daemon, /\/job\/start-saved/);
   assert.match(daemon, /\/job\/import/);
-  assert.match(daemon, /restoreLockedXy\(result\.after, workOffset\)/);
+  assert.match(daemon, /restoreOrRebaseLockedXy\(result\.after, workOffset\)/);
+  assert.match(daemon, /auto_restored_after_power_cycle/);
+  assert.match(daemon, /Explicit new-project X\/Y reset confirmation is required/);
+  assert.match(daemon, /Probe circuit is open/);
+  assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress", true\);\s*workspace\.clear\(\);/);
   assert.match(daemon, /restoreLockedProbe\(result\.after, workOffset\)/);
   assert.match(daemon, /Controller positioning is paused/);
   assert.match(daemon, /external router may be removed/);
@@ -196,7 +208,8 @@ test("daemon persists per-line recovery checkpoints and validates position befor
 });
 
 test("bed re-probe atomically replaces only the locked Z calibration", () => {
-  assert.match(daemon, /kind !== "bed" \|\| payload\.confirmReprobe !== true/);
-  assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);\s*workspace\.clear\(\);/);
+  assert.match(daemon, /setup\.probeLocked && payload\.confirmReprobe !== true/);
+  assert.match(daemon, /if \(!probeCircuitIsFresh\(\)\) throw new Error\("Test the probe circuit/);
+  assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress", true\);\s*workspace\.clear\(\);/);
   assert.doesNotMatch(daemon, /removeXyLock\(XY_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\)/);
 });

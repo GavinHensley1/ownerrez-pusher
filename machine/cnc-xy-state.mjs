@@ -43,9 +43,10 @@ export function planXyPowerCycleRecovery(raw, status, workOffset, toleranceMm = 
   if (!["X", "Y"].every((axis) => Math.abs(current[axis]) <= toleranceMm)) {
     throw new Error("X/Y power-cycle recovery is available only before any post-reset X/Y movement");
   }
-  if (!workOffset || !["X", "Y"].every((axis) => finite(workOffset[axis]) && Math.abs(Number(workOffset[axis])) <= toleranceMm)) {
-    throw new Error("Controller X/Y work offsets are not in the expected reset state");
-  }
+  const offsetFinite = workOffset && ["X", "Y"].every((axis) => finite(workOffset[axis]));
+  const offsetAtReset = offsetFinite && ["X", "Y"].every((axis) => Math.abs(Number(workOffset[axis])) <= toleranceMm);
+  const offsetMatchesSavedOrigin = offsetFinite && xyContinuous(lock.xyOriginMPos, workOffset, toleranceMm);
+  if (!offsetAtReset && !offsetMatchesSavedOrigin) throw new Error("Controller X/Y work offsets do not match the saved project or reset state");
   const savedWorkPosition = {
     X: Number((lock.lastKnownMPos.X - lock.xyOriginMPos.X).toFixed(3)),
     Y: Number((lock.lastKnownMPos.Y - lock.xyOriginMPos.Y).toFixed(3)),

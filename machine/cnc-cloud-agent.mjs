@@ -82,7 +82,7 @@ async function report(command, state, message, extra = {}) {
 }
 
 async function execute(command) {
-  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
+  const routes = { test_probe: "/probe/test", probe_bed: "/probe/bed", probe_stock: "/probe/stock", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
   const axis = String(command.axis || "").toUpperCase();
   const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);
@@ -101,6 +101,7 @@ async function execute(command) {
       } else {
         const payload = (command.action === "probe_bed" || command.action === "probe_stock") ? { thicknessMm: command.probeThickness, confirmReprobe: command.confirmReprobe === true }
           : command.action === "restore_xy" ? { confirmGantryUnmoved: command.confirmGantryUnmoved === true }
+          : command.action === "zero_xy" ? { confirmNewProject: command.confirmNewProject === true }
           : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller") ? { confirm: command.confirm === true }
           : command.action === "start" ? { jobId: command.jobId, gcode: command.gcode, stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm, stockReserveMm: command.stockReserveMm, manualRouter: command.manualRouter === true } : {};
         result = await localRequest(path, payload);
