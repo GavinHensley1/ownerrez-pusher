@@ -1692,7 +1692,7 @@ function cncPlanChanged(reanalyze){
   }
   if(!reanalyze){cncPlanRenderMaskStatus();cncPlanRender();}
 }
-async function cncOpenPlan(src,job){job=job||cncCurrentJob();if(!job||!src)return;CNC_PLAN_SOURCE=src;var img=new Image();img.onload=async function(){CNC_PLAN_IMG=img;var p=null,raw=await cncFetchFile(job.id,'plan');try{p=raw?JSON.parse(raw):null;}catch(e){}if(!p||p.version!==1)p=cncPlanDefault(job,img);document.getElementById('cncPlanModal').classList.add('open');document.body.style.overflow='hidden';cncPlanBindCanvas();cncPlanPopulate(p);setTimeout(function(){document.getElementById('cncPlanW').focus();},50);};img.onerror=function(){alert('Could not open the uploaded artwork.');};img.src=src;}
+async function cncOpenPlan(src,job){job=job||cncCurrentJob();if(!job||!src)return;CNC_PLAN_SOURCE=src;var img=new Image();img.onload=async function(){CNC_PLAN_IMG=img;var p=null,raw=await cncFetchFile(job.id,'plan');try{p=raw?JSON.parse(raw):null;}catch(e){}if(!p||Number(p.version)!==3)p=cncPlanDefault(job,img);document.getElementById('cncPlanModal').classList.add('open');document.body.style.overflow='hidden';cncPlanBindCanvas();cncPlanPopulate(p);setTimeout(function(){document.getElementById('cncPlanW').focus();},50);};img.onerror=function(){alert('Could not open the uploaded artwork.');};img.src=src;}
 function cncClosePlan(){var m=document.getElementById('cncPlanModal');if(m)m.classList.remove('open');document.body.style.overflow='';CNC_PLAN_SELECTION=null;CNC_PLAN_DRAG=null;}
 function cncCurrentJob(){ return (CNC.jobs||[]).filter(function(j){return j&&j.id===CNC_CUR;})[0]||null; }
 function cncActionLabel(action,extra){
@@ -2185,7 +2185,7 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
   function targ(px,py){ var h=hm[py*cols+px]; if(!three) return (h<0.5)?-maxDepth:0; return -maxDepth*(1-h); }
   function rowRuns(py,ltr){var runs=[],run=[];for(var px=0;px<cols;px++){if(!planMask||planMask[py*cols+px])run.push(px);else if(run.length){runs.push(run);run=[];}}if(run.length)runs.push(run);if(!ltr){runs.reverse();for(var rr=0;rr<runs.length;rr++)runs[rr].reverse();}return runs;}
   var g=['; CNC Studio panel '+(o.label||'')+' ('+(three?'3D relief':'2D outline')+')',
-    '; '+panelW.toFixed(1)+'x'+panelH.toFixed(1)+' mm, depth '+maxDepth+' mm, '+cols+'x'+rows+' grid, ~'+(panelW/cols).toFixed(2)+' mm stepover, stage '+stage+(stage==='finish'?'':(', '+passes+' rough passes @ '+passDepth+' mm')),
+    '; '+panelW.toFixed(1)+'x'+panelH.toFixed(1)+' mm, depth '+maxDepth+' mm, '+cols+'x'+rows+' grid, ~'+(panelW/cols).toFixed(2)+' mm stepover, stage '+stage+((stage==='rough'||stage==='all')?(', '+passes+' rough passes @ '+passDepth+' mm'):''),
     '; RELIEF MODE: '+(stage==='detail'?'recessed V-carved detail':((stage==='finish'||stage==='all')?'continuous piecewise-linear depth':'banded bulk removal'))+(featureMm?(' | minimum feature '+featureMm.toFixed(2)+' mm'):''),
     '; TOOL COMPENSATION: '+(compensation||'profile')+' radius '+Number(o.bitR||0).toFixed(5)+' mm'+(stockToLeave?(' | stock to leave '+stockToLeave.toFixed(2)+' mm'):''),
     '; TOOL: '+String(o.tool||'selected bit')+(o.woodSpecies?(' | WOOD: '+String(o.woodSpecies)):'') ,

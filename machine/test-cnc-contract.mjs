@@ -62,6 +62,7 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /stockToLeaveMm:rough\?\.5:0/);
   assert.match(html, /function cncFinishFidelity/);
   assert.match(html, /function cncAppendDetailContours/);
+  assert.match(html, /Number\(p\.version\)!==3/);
   assert.match(html, /function cncDetailFidelity/);
   assert.match(html, /function cncAssertDetailFidelity/);
   assert.match(html, /Three-bit relief \+ detail/);
