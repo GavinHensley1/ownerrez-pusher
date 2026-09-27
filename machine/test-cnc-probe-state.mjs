@@ -29,6 +29,7 @@ test("probe lock rejects power-cycle coordinate discontinuity and malformed dept
   const lock = calibrationFromSetup(setup, status);
   assert.equal(positionContinuous(lock.lastKnownMPos, machinePosition(status)), true);
   assert.throws(() => applyProbeLock({}, lock, { MPos: "0.000,0.000,0.000,0.000" }), /coordinates reset to zero/);
+  assert.throws(() => applyProbeLock({}, lock, { MPos: "0.000,0.000,10.000,0.000" }, 0.05, { X: 0, Y: 0, Z: -14.859 }), /coordinates reset to zero/);
   assert.throws(() => validateProbeLock({ ...lock, maxCutDepthMm: 6 }), /maximum cut depth is invalid/);
 });
 

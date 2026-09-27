@@ -38,7 +38,9 @@ test("X/Y lock rejects a changed G54 origin even if the cutter is elsewhere", ()
 
 test("X/Y lock rejects a coordinate reset", () => {
   const lock = xyLockFromSetup(setup, status);
-  assert.throws(() => applyXyLock({}, lock, { MPos: "0.000,0.000,-22.759,0.000" }), /origin does not match this controller session/);
+  assert.throws(() => applyXyLock({}, lock, { MPos: "0.000,0.000,-22.759,0.000" }), /coordinates reset to zero/);
+  const originZeroLock = { version: 1, locked: true, xyOriginMPos: { X: 0, Y: 0 }, lastKnownMPos: { X: 243.4, Y: 5.029 }, lockedAt: "2026-09-26T19:32:20.244Z" };
+  assert.throws(() => applyXyLock({}, originZeroLock, { MPos: "0.000,0.000,10.000,0.000" }, 0.05, { X: 0, Y: 0, Z: -13.531 }), /coordinates reset to zero/);
 });
 
 test("power-cycle recovery rebases the saved work position without motion", () => {

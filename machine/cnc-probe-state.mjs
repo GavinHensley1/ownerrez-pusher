@@ -47,7 +47,13 @@ export function controllerFrameLooksReset(saved, current, zeroToleranceMm = 0.05
   if (!saved || !current) return true;
   const currentAtZero = ["X", "Y", "Z"].every((axis) => Math.abs(Number(current[axis])) <= zeroToleranceMm);
   const savedAwayFromZero = ["X", "Y", "Z"].some((axis) => Math.abs(Number(saved[axis])) > movementToleranceMm);
-  return currentAtZero && savedAwayFromZero;
+  // A GRBL power cycle can be followed by a safe Z retract before Project
+  // reconnects. X/Y are still reset even though Z is no longer zero. Treat
+  // that as a frame reset so an old G54 value cannot be mistaken for proof
+  // that machine coordinates survived the power cycle.
+  const currentXyAtZero = ["X", "Y"].every((axis) => Math.abs(Number(current[axis])) <= zeroToleranceMm);
+  const savedXyAwayFromZero = ["X", "Y"].some((axis) => Math.abs(Number(saved[axis])) > movementToleranceMm);
+  return (currentAtZero && savedAwayFromZero) || (currentXyAtZero && savedXyAwayFromZero);
 }
 
 export function lockedProbeZRange(setup) {
