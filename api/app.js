@@ -2627,7 +2627,7 @@ if(action==="email_recipients"){
       const commandKey="parkside:cnc:command", agentKey="parkside:cnc:agent";
       if(req.method!=="POST"){
         let command=null; try{ const raw=await redis.get(commandKey); command=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); }catch(e){}
-        if(command&&command.action==="start"&&command.jobId){ try{ const gc=await redis.get("parkside:cnc:gc:"+String(command.jobId)); command.gcode=(gc==null)?"":String(gc); }catch(e){ command.gcode=""; } }
+        if(command&&command.action==="start"&&command.jobId){ try{ const gc=await redis.get("parkside:cnc:gc:"+String(command.jobId)),text=(gc==null)?"":String(gc);if(text.startsWith("@gzip:")){command.gcodeGzip=text.slice(6);command.gcode="";}else command.gcode=text; }catch(e){ command.gcode=""; } }
         return res.status(200).json({ok:true,command:command});
       }
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
@@ -2663,6 +2663,7 @@ if(action==="email_recipients"){
         const gcKey=(requestedStage&&["rough","finish","profile","all"].indexOf(requestedStage)!==-1)?("parkside:cnc:gc:"+jid+":"+requestedStage):("parkside:cnc:gc:"+jid);
         const key=(q.file==="gc")?gcKey:((q.file==="depth")?("parkside:cnc:depth:"+jid):((q.file==="plan")?("parkside:cnc:plan:"+jid):("parkside:cnc:img:"+jid)));
         let val=""; try{ if(redis){ const v=await redis.get(key); val=(v==null)?"":(typeof v==="string"?v:JSON.stringify(v)); } }catch(e){ val=""; }
+        if(q.file==="gc"&&val.startsWith("@gzip:"))return res.status(200).json({file:"gc",jobId:jid,encoding:"gzip-base64",data:val.slice(6)});
         return res.status(200).json({file:String(q.file), jobId:jid, data:val});
       }
       let st={jobs:[],config:{}};
@@ -2787,6 +2788,12 @@ if(action==="email_recipients"){
             if(!order.length) return res.status(400).json({error:"at least one G-code stage is required"});
             const active=order[0]; try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
             job.hasGcode=true; job.gcodeStages=JSON.stringify(order); job.activeStage=active; job.gcodeName="auto-"+active+".nc"; job.planStatus="approved"; job.updatedAt=now;
+          }
+          if(b.gcodeStagesGzip&&typeof b.gcodeStagesGzip==="object"){
+            const order=[];for(const stage of ["rough","finish","all","profile"]){if(b.gcodeStagesGzip[stage]===undefined)continue;const data=String(b.gcodeStagesGzip[stage]||"");if(!data||data.length>3800000||!/^[A-Za-z0-9+/=]+$/.test(data))return res.status(data?413:400).json({error:"invalid compressed "+stage+" stage G-code"});order.push(stage);try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,"@gzip:"+data);}catch(e){return res.status(500).json({error:"db error"});}}
+            if(!order.length)return res.status(400).json({error:"at least one compressed G-code stage is required"});
+            const active=order[0];try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
+            job.hasGcode=true;job.gcodeStages=JSON.stringify(order);job.activeStage=active;job.gcodeName="auto-"+active+".nc";job.planStatus="approved";job.gcodeEncoding="gzip-base64";job.updatedAt=now;
           }
           if(b.activateStage!==undefined){
             const stage=String(b.activateStage||""); if(["rough","finish","profile","all"].indexOf(stage)===-1) return res.status(400).json({error:"invalid machining stage"});

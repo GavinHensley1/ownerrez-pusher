@@ -1,6 +1,7 @@
 import http from "node:http";
 import { execFileSync } from "node:child_process";
 import { splitJogDistance } from "./cnc-jog.mjs";
+import { decodeProgram } from "./cnc-program-codec.mjs";
 
 const PROJECT_URL = String(process.env.PROJECT_URL || "https://project-jvyw3.vercel.app").replace(/\/$/, "");
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
@@ -103,7 +104,7 @@ async function execute(command) {
           : command.action === "restore_xy" ? { confirmGantryUnmoved: command.confirmGantryUnmoved === true }
           : command.action === "zero_xy" ? { confirmNewProject: command.confirmNewProject === true }
           : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller") ? { confirm: command.confirm === true }
-          : command.action === "start" ? { jobId: command.jobId, gcode: command.gcode, stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm, stockReserveMm: command.stockReserveMm, manualRouter: command.manualRouter === true } : {};
+          : command.action === "start" ? { jobId: command.jobId, gcode: decodeProgram(command), stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm, stockReserveMm: command.stockReserveMm, manualRouter: command.manualRouter === true } : {};
         result = await localRequest(path, payload);
       }
       const finalState = command.action === "start" ? "done" : command.action === "pause" ? "paused" : command.action === "resume" ? "running" : command.action === "stop" ? "stopped" : "ready";

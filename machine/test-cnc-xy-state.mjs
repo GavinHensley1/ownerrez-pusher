@@ -58,3 +58,14 @@ test("repeated power cycles accept the saved persistent G54 origin and rebase th
   assert.deepEqual(plan.rebasedOriginMPos, { X: -125.15, Y: -25.529 });
   assert.throws(() => planXyPowerCycleRecovery(lock, { MPos: "0.000,0.000,10.000,0.000" }, { X: -200, Y: -5.029, Z: -13.531 }), /do not match the saved project or reset state/);
 });
+
+test("five consecutive power cycles preserve the same durable project X/Y frame", () => {
+  const expectedWork = { X: 125.15, Y: 25.529 };
+  let lock = { version: 1, locked: true, xyOriginMPos: { X: -243.4, Y: -5.029 }, lastKnownMPos: { X: -118.25, Y: 20.5 }, lockedAt: "2026-09-27T17:06:40.396Z", source: "Project guarded front-left X/Y origin" };
+  for (let cycle = 0; cycle < 5; cycle += 1) {
+    const plan = planXyPowerCycleRecovery(lock, { MPos: `0.000,0.000,${10 + cycle}.000,0.000` }, { X: lock.xyOriginMPos.X, Y: lock.xyOriginMPos.Y, Z: -13.531 });
+    assert.deepEqual(plan.savedWorkPosition, expectedWork);
+    assert.deepEqual(plan.rebasedOriginMPos, { X: -expectedWork.X, Y: -expectedWork.Y });
+    lock = { ...lock, xyOriginMPos: plan.rebasedOriginMPos, lastKnownMPos: { X: 0, Y: 0 } };
+  }
+});

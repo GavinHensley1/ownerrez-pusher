@@ -6,6 +6,7 @@ const root = new URL("../", import.meta.url);
 const html = readFileSync(new URL("index.html", root), "utf8");
 const api = readFileSync(new URL("api/app.js", root), "utf8");
 const agent = readFileSync(new URL("machine/cnc-cloud-agent.mjs", root), "utf8");
+const codec = readFileSync(new URL("machine/cnc-program-codec.mjs", root), "utf8");
 const daemon = readFileSync(new URL("machine/cnc-daemon.mjs", root), "utf8");
 const controller = readFileSync(new URL("machine/cnc-controller.mjs", root), "utf8");
 
@@ -48,7 +49,19 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /X\+ right/);
   assert.match(html, /Y\+ back/);
   assert.match(html, /recover_probe/);
-  assert.match(html, /budget:\(stage==='finish'\?38000:30000\)/);
+  assert.match(html, /budget:\(stage==='finish'\?700000:30000\)/);
+  assert.match(html, /function cncPlanContinuousDepth/);
+  assert.match(html, /RELIEF MODE:/);
+  assert.match(html, /continuous piecewise-linear depth/);
+  assert.match(html, /function cncMinimumFeatureMm/);
+  assert.match(html, /minimum feature/);
+  assert.match(html, /function cncCompensateToolpath/);
+  assert.match(html, /TOOL COMPENSATION:/);
+  assert.match(html, /stockToLeaveMm:rough\?\.5:0/);
+  assert.match(html, /function cncFinishFidelity/);
+  assert.match(html, /uniqueDepths<128/);
+  assert.match(html, /gcodeStagesGzip/);
+  assert.match(html, /CompressionStream\('gzip'\)/);
   assert.match(html, /cncGenReliefRegion\(img/);
   assert.match(html, /id="cncPlanModal"/);
   assert.match(html, /Approve plan &amp; generate G-code/);
@@ -115,6 +128,9 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /Approve the machining plan before Start/);
   assert.match(api, /parkside:cnc:plan:/);
   assert.match(api, /gcodeStages/);
+  assert.match(api, /gcodeStagesGzip/);
+  assert.match(api, /@gzip:/);
+  assert.match(api, /command\.gcodeGzip/);
   assert.match(api, /cmd\.manualRouter=job\.planStatus==="approved"/);
   assert.match(api, /requestedStage/);
   assert.match(api, /Explicit confirmation is required to replace the locked Z calibration/);
@@ -139,6 +155,9 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /completedSegments/);
   assert.match(agent, /stockWidthMm/);
   assert.match(agent, /manualRouter: command\.manualRouter === true/);
+  assert.match(agent, /from "\.\/cnc-program-codec\.mjs"/);
+  assert.match(codec, /gunzipSync/);
+  assert.match(agent, /decodeProgram\(command\)/);
   assert.match(agent, /recover_probe: "\/probe\/recover"/);
   assert.doesNotMatch(agent, /test_probe|\/probe\/test/);
   assert.match(agent, /lock_probe: "\/probe\/lock"/);
