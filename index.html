@@ -107,6 +107,9 @@
     #viewTabs .seg{flex:0 0 auto}
     #cncMain label{min-width:0;max-width:100%}
     #cncRelSrc{width:100%;max-width:100%}
+    #cncMain .cnc-preview-grid{grid-template-columns:1fr!important}
+    #cncMain .cnc-stage{flex-wrap:wrap;min-width:0}
+    #cncMain .cnc-stage>span{min-width:0;overflow-wrap:anywhere}
     .cnc-command-panel{padding:10px 11px}
     .cnc-plan-modal{padding:0}.cnc-plan-shell{min-height:100%;border-radius:0;border:0}.cnc-plan-body{grid-template-columns:1fr;padding:12px}.cnc-plan-head,.cnc-plan-foot{padding:12px}.cnc-plan-canvas-wrap{min-height:250px}.cnc-plan-grid{grid-template-columns:1fr 1fr}
   }
@@ -512,7 +515,7 @@
       </div>
     </div>
 
-    <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
+    <div class="cnc-preview-grid" style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px">
       <div><div class="muted" style="font-size:12px;margin-bottom:4px">Creative</div>
         <div id="cncCreativePrev" style="min-height:170px;border:1px solid rgba(255,255,255,.08);border-radius:10px;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.2);overflow:hidden"><span class="muted">No image yet</span></div></div>
       <div><div class="muted" style="font-size:12px;margin-bottom:4px">3 &middot; Design populates here <span style="opacity:.7">(what will cut)</span></div>

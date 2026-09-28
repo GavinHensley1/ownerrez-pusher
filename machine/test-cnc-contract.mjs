@@ -117,6 +117,9 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /previous command error is historical/i);
   assert.match(html, /use the visible Project controls to retry/i);
   assert.match(html, /healthAt-jobAt>=15000/);
+  assert.match(html, /class="cnc-preview-grid"/);
+  assert.match(html, /\.cnc-preview-grid\{grid-template-columns:1fr!important\}/);
+  assert.match(html, /\.cnc-stage\{flex-wrap:wrap;min-width:0\}/);
   assert.match(html, /Start position/);
   assert.match(html, /There is no upper Z ceiling/);
   assert.match(html, /axis!==['"]Z['"]/);
