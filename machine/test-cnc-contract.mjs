@@ -170,6 +170,10 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /Z jogs are limited to 5 mm per click/);
   assert.match(api, /job\.agentCommandId=cmd\.id/);
   assert.match(api, /do not press again/);
+  assert.match(api, /const runControls=\["pause","resume","stop"\]/);
+  assert.match(api, /Pause requires a running carve/);
+  assert.match(api, /Resume requires a paused carve/);
+  assert.match(api, /Stop requires an active carve/);
   assert.doesNotMatch(api, /fetch\(murl/);
 });
 

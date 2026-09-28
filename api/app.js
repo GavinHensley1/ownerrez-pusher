@@ -2838,7 +2838,12 @@ if(action==="email_recipients"){
                 if(designWidthMm>stockWidthMm-stockReserveMm+0.001||designHeightMm>stockHeightMm-stockReserveMm+0.001) return res.status(409).json({error:"The complete toolpath does not fit inside the entered stock dimensions",cnc:st});
               }
               let prior=null; try{const raw=await redis.get("parkside:cnc:command"); prior=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null);}catch(e){}
-              if(prior&&act!=="stop") return res.status(409).json({error:(String(prior.action||"CNC command").replace(/_/g," ")+" is already queued. Wait for its completion; do not press again."),pending:{id:String(prior.id||""),action:String(prior.action||""),createdAt:String(prior.createdAt||"")},cnc:st});
+              const runControls=["pause","resume","stop"];
+              if(prior&&runControls.indexOf(act)===-1) return res.status(409).json({error:(String(prior.action||"CNC command").replace(/_/g," ")+" is already queued. Wait for its completion; do not press again."),pending:{id:String(prior.id||""),action:String(prior.action||""),createdAt:String(prior.createdAt||"")},cnc:st});
+              const liveRunState=String((health.job||{}).state||job.agentState||"");
+              if(act==="pause"&&liveRunState!=="running") return res.status(409).json({error:"Pause requires a running carve",cnc:st});
+              if(act==="resume"&&liveRunState!=="paused") return res.status(409).json({error:"Resume requires a paused carve",cnc:st});
+              if(act==="stop"&&["running","paused","queued","accepted"].indexOf(liveRunState)===-1) return res.status(409).json({error:"Stop requires an active carve",cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
               if(act==="probe_bed"||act==="probe_stock"||act==="probe_tool"){
                 cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
