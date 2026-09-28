@@ -1,5 +1,8 @@
 import http from "node:http";
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { claimCommand, completeCommand } from "./cnc-command-ledger.mjs";
 import { splitJogDistance } from "./cnc-jog.mjs";
 import { decodeProgram } from "./cnc-program-codec.mjs";
 
@@ -10,6 +13,7 @@ const IDLE_POLL_MS = Number(process.env.CNC_AGENT_IDLE_POLL_MS || 1500);
 const ACTIVE_HEARTBEAT_MS = Number(process.env.CNC_AGENT_ACTIVE_HEARTBEAT_MS || 5000);
 const IDLE_HEARTBEAT_MS = Number(process.env.CNC_AGENT_IDLE_HEARTBEAT_MS || 60000);
 const KEYCHAIN_SERVICE = process.env.CNC_AGENT_KEYCHAIN_SERVICE || "openclaw-cnc-agent";
+const COMMAND_LEDGER_PATH = process.env.CNC_COMMAND_LEDGER || join(homedir(), ".openclaw", "state", "cnc-command-ledger.json");
 const token = process.env.CNC_AGENT_TOKEN || execFileSync("/usr/bin/security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 if (!token) throw new Error("CNC agent token is unavailable");
 
@@ -92,11 +96,18 @@ async function report(command, state, message, extra = {}) {
 }
 
 async function execute(command) {
-  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
+  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", probe_tool: "/probe/tool", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
   const axis = String(command.axis || "").toUpperCase();
   const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);
   if (command.action === "start" && activeStart) return report(command, "error", "A carve is already running");
+  const claim = claimCommand(COMMAND_LEDGER_PATH, command);
+  if (!claim.claimed) {
+    if (claim.terminal) return report(command, claim.entry.status, claim.entry.message || `${command.action} already completed`, { terminal: true });
+    const message = "Bridge restarted while this command outcome was unknown. It was not repeated. Reconcile the controller state before issuing another command.";
+    const uncertain = completeCommand(COMMAND_LEDGER_PATH, command.id, "uncertain", message);
+    return report(command, uncertain.status, uncertain.message, { terminal: true });
+  }
   await report(command, command.action === "start" ? "running" : "accepted", `${command.action} accepted`);
   const task = (async () => {
     try {
@@ -109,7 +120,7 @@ async function execute(command) {
         }
         result = { ...result, requestedDistanceMm: Number(command.distanceMm), completedSegments: segments.length };
       } else {
-        const payload = (command.action === "probe_bed" || command.action === "probe_stock") ? { thicknessMm: command.probeThickness, confirmReprobe: command.confirmReprobe === true }
+        const payload = new Set(["probe_bed", "probe_stock", "probe_tool"]).has(command.action) ? { thicknessMm: command.probeThickness, maxSearchMm: command.maxSearchMm, confirmReprobe: command.confirmReprobe === true }
           : command.action === "restore_xy" ? { confirmGantryUnmoved: command.confirmGantryUnmoved === true }
           : command.action === "zero_xy" ? { confirmNewProject: command.confirmNewProject === true }
           : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller") ? { confirm: command.confirm === true }
@@ -117,12 +128,16 @@ async function execute(command) {
         result = await localRequest(path, payload);
       }
       const finalState = command.action === "start" ? "done" : command.action === "pause" ? "paused" : command.action === "resume" ? "running" : command.action === "stop" ? "stopped" : "ready";
-      await report(command, finalState, command.action === "start" ? "Carve complete" : `${command.action} complete`, { result: { setup: result.setup, job: result.job } });
+      const ledgerState = new Set(["done", "stopped", "ready"]).has(finalState) ? finalState : "ready";
+      const message = command.action === "start" ? "Carve complete" : `${command.action} complete`;
+      completeCommand(COMMAND_LEDGER_PATH, command.id, ledgerState, message);
+      await report(command, finalState, message, { terminal: true, result: { setup: result.setup, job: result.job } });
       try { await heartbeat(); }
       catch (heartbeatError) { process.stderr.write(`post-command heartbeat: ${heartbeatError.message}\n`); }
     } catch (error) {
       process.stderr.write(`command ${command.action} ${command.axis || ""} ${command.distanceMm ?? ""}: ${error.message}\n`);
-      await report(command, "error", error.message);
+      completeCommand(COMMAND_LEDGER_PATH, command.id, "error", error.message);
+      await report(command, "error", error.message, { terminal: true });
     }
   })();
   if (command.action === "start") { activeStart = task; task.finally(() => { activeStart = undefined; }); }
@@ -131,7 +146,10 @@ async function execute(command) {
 
 async function loop() {
   let nextHeartbeat = 0;
+  let failureCount = 0;
+  let lastError = { message: "", at: 0 };
   while (!stopped) {
+    let loopFailed = false;
     try {
       const active = Boolean(activeStart);
       if (Date.now() >= nextHeartbeat) {
@@ -144,10 +162,20 @@ async function loop() {
       if (command?.id && !handled.has(command.id)) {
         handled.add(command.id);
         if (handled.size > 200) handled.delete(handled.values().next().value);
-        execute(command).catch((error) => process.stderr.write(`command ${command.id}: ${error.message}\n`));
+        execute(command).catch((error) => { handled.delete(command.id); process.stderr.write(`command ${command.id}: ${error.message}\n`); });
       }
-    } catch (error) { process.stderr.write(`CNC agent: ${error.message}\n`); }
-    await sleep(activeStart ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+      failureCount = 0;
+    } catch (error) {
+      loopFailed = true;
+      failureCount += 1;
+      const message = String(error?.message || "unknown");
+      if (lastError.message !== message || Date.now() - lastError.at >= 60_000) {
+        process.stderr.write(`CNC agent: ${message}; retry ${failureCount}\n`);
+        lastError = { message, at: Date.now() };
+      }
+    }
+    const base = activeStart ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+    await sleep(loopFailed ? Math.min(60_000, base * (2 ** Math.min(failureCount, 6))) : base);
   }
 }
 

@@ -2642,7 +2642,8 @@ if(action==="email_recipients"){
       if(b.type==="command"){
         const commandId=String(b.commandId||""), state=String(b.state||"").slice(0,24), now=new Date().toISOString();
         let queued=null; try{ const raw=await redis.get(commandKey); queued=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); }catch(e){}
-        if(queued&&String(queued.id)===commandId) try{await redis.del(commandKey);}catch(e){}
+        const terminal=b.terminal===true||["ready","done","error","stopped","uncertain"].includes(state);
+        if(terminal&&queued&&String(queued.id)===commandId) try{await redis.del(commandKey);}catch(e){}
         let st={jobs:[],config:{}}; try{ const raw=await redis.get("parkside:cnc"); const o=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); if(o&&typeof o==="object")st=o; }catch(e){}
         if(!Array.isArray(st.jobs))st.jobs=[];
         const jid=String(b.jobId||""); const target=st.jobs.find(function(x){return x&&x.id===jid;});
@@ -2810,11 +2811,13 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","probe_bed","probe_stock","lock_probe","unlock_probe","recover_probe","recover_controller","restore_xy","zero_xy","zero_z","start","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["jog","probe_bed","probe_stock","probe_tool","lock_probe","unlock_probe","recover_probe","recover_controller","restore_xy","zero_xy","zero_z","start","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
               if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
+              if(act==="probe_bed"&&job.stageRequiresProbe&&setup.materialReady) return res.status(409).json({error:"This stage changed bits. Use Changed bit · Touch off on stock; do not re-probe the bed or reset X/Y.",cnc:st});
               if(act==="probe_stock"&&!setup.bedProbeReady) return res.status(409).json({error:"Probe the exposed bed before probing the stock",cnc:st});
+              if(act==="probe_tool"&&!setup.materialReady&&!setup.stockThicknessMm) return res.status(409).json({error:"Complete one bed + stock setup before touching off a changed bit",cnc:st});
               if(act==="probe_stock"&&setup.probeLocked) return res.status(409).json({error:"Probe calibration is locked; re-probe the bed first to replace it",cnc:st});
               if(act==="probe_bed"&&setup.probeLocked&&b.confirmReprobe!==true) return res.status(400).json({error:"Explicit confirmation is required to replace the locked Z calibration",cnc:st});
               if(act==="lock_probe"&&(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady)) return res.status(409).json({error:"Probe both the bed and stock before locking calibration",cnc:st});
@@ -2837,7 +2840,10 @@ if(action==="email_recipients"){
               let prior=null; try{const raw=await redis.get("parkside:cnc:command"); prior=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null);}catch(e){}
               if(prior&&act!=="stop") return res.status(409).json({error:(String(prior.action||"CNC command").replace(/_/g," ")+" is already queued. Wait for its completion; do not press again."),pending:{id:String(prior.id||""),action:String(prior.action||""),createdAt:String(prior.createdAt||"")},cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
-              if(act==="probe_bed"||act==="probe_stock")cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
+              if(act==="probe_bed"||act==="probe_stock"||act==="probe_tool"){
+                cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
+                cmd.maxSearchMm=Math.max(5,Math.min(73,(Number(st.config.machZ)||78)-5));
+              }
               if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
               if(act==="start"){cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;}
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;

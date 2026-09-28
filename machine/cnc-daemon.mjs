@@ -3,34 +3,40 @@ import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
-import { limitVerticalPlungeFeed, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
+import { limitVerticalPlungeFeed, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
+import { applyMaterialProfile, materialProfileFromSetup, readMaterialProfile, removeMaterialProfile, writeMaterialProfile } from "./cnc-material-state.mjs";
 import { applyXyLock, planXyPowerCycleRecovery, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 import { readProgram, saveProgram } from "./cnc-program-state.mjs";
 import { buildBufferedStopResume, buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
 import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
+import { completeStockProbe, completeToolTouch } from "./cnc-setup-flow.mjs";
+import { appendCncEvent } from "./cnc-event-journal.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
 const SOCKET_PATH = process.env.CNC_DAEMON_SOCKET || "/tmp/openclaw-cnc.sock";
 const LOCAL_UI_PORT = Number(process.env.CNC_LOCAL_UI_PORT || 47832);
 const PROBE_STATE_PATH = process.env.CNC_PROBE_STATE || join(homedir(), ".openclaw", "state", "cnc-probe-calibration.json");
+const MATERIAL_STATE_PATH = process.env.CNC_MATERIAL_STATE || join(homedir(), ".openclaw", "state", "cnc-material-profile.json");
 const XY_STATE_PATH = process.env.CNC_XY_STATE || join(homedir(), ".openclaw", "state", "cnc-xy-origin.json");
 const PROGRAM_STATE_PATH = process.env.CNC_PROGRAM_STATE || join(homedir(), ".openclaw", "state", "cnc-last-program.json");
 const RUN_STATE_PATH = process.env.CNC_RUN_STATE || join(homedir(), ".openclaw", "state", "cnc-run-checkpoint.json");
+const EVENT_JOURNAL_PATH = process.env.CNC_EVENT_JOURNAL || join(homedir(), ".openclaw", "state", "cnc-events.jsonl");
 const MAX_BODY_BYTES = 900_000;
 let controller, lastControllerStatus, incident, moving = false, keepaliveBusy = false;
-let restartScheduled = false;
 let reconnectPromise;
 let nextReconnectAt = 0;
 const RECONNECT_BACKOFF_MS = 10_000;
 const workspace = new VirtualWorkspace();
-const setup = { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
+const setup = { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
+try { const material = readMaterialProfile(MATERIAL_STATE_PATH); if (material) applyMaterialProfile(setup, material); } catch (error) { process.stderr.write(`[cnc] ignored invalid material profile: ${error.message}\n`); }
 const job = { state: "idle", jobId: null, progress: 0, message: "", updatedAt: null };
 let activeRunCheckpoint;
 try { activeRunCheckpoint = readRunCheckpoint(RUN_STATE_PATH); } catch { activeRunCheckpoint = undefined; }
 
 const json = (res, status, value) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
+const recordEvent = (type, detail = {}) => { try { appendCncEvent(EVENT_JOURNAL_PATH, type, detail); } catch (error) { logConnectionEvent?.(`journal:${error.message}`, `[cnc] event journal: ${error.message}`); } };
 const motionGuard = async () => ({ state: "controller_and_software_guards" });
 
 const programGuard = async ({ before, analysis, programContext }) => {
@@ -63,7 +69,7 @@ const programGuard = async ({ before, analysis, programContext }) => {
   }
 };
 
-controller = new GrblTcpController({ host: HOST, port: PORT, statusTimeoutMs: 600, commandTimeoutMs: 15_000, motionGuard, workspaceGuard: (request) => workspace.assertJog(request), programGuard, maxJogMm: 25, maxJogFeed: 500, maxSessionTravelMm: 2000, maxSpindleTestRpm: 2000 });
+controller = new GrblTcpController({ host: HOST, port: PORT, statusTimeoutMs: 1500, commandTimeoutMs: 20_000, motionGuard, workspaceGuard: (request) => workspace.assertJog(request), programGuard, maxJogMm: 25, maxJogFeed: 500, maxSessionTravelMm: 2000, maxSpindleTestRpm: 2000 });
 const persistRunProgress = (patch) => {
   if (!activeRunCheckpoint) return null;
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { ...activeRunCheckpoint, ...patch, updatedAt: new Date().toISOString() });
@@ -73,8 +79,16 @@ controller.on("programProgress", (value) => {
   Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() });
   persistRunProgress({ state: "running", lastCompletedLine: value.line, totalLines: value.total, message: job.message });
 });
-const clearSetup = () => Object.assign(setup, { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
-const clearProbeSetup = (status = "unlocked_reprobe_required") => Object.assign(setup, { bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: status, probeLockedAt: null, probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+controller.on("probeProgress", (value) => {
+  Object.assign(setup, {
+    probePhase: String(value?.phase || "idle"),
+    probeTravelledMm: Number(value?.travelledMm) || 0,
+    probeSearchLimitMm: Number.isFinite(Number(value?.limitMm)) ? Number(value.limitMm) : null,
+    updatedAt: new Date().toISOString(),
+  });
+});
+const clearSetup = () => Object.assign(setup, { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const clearProbeSetup = (status = "unlocked_reprobe_required") => Object.assign(setup, { bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: status, probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
 const rebuildWorkspaceFromSetup = () => {
   if (!setup.xyReady || !setup.probeReady || !Number.isFinite(setup.xyOriginMPos?.X) || !Number.isFinite(setup.xyOriginMPos?.Y) || !Number.isFinite(setup.zOriginMPos) || !Number.isFinite(setup.maxCutDepthMm)) { workspace.clear(); return null; }
   return workspace.setBounds({ X: { min: setup.xyOriginMPos.X, max: setup.xyOriginMPos.X + 360 }, Y: { min: setup.xyOriginMPos.Y, max: setup.xyOriginMPos.Y + 360 }, Z: { min: setup.zOriginMPos - setup.maxCutDepthMm, max: null } });
@@ -133,9 +147,15 @@ const persistLockedProbe = (status) => {
   if (!setup.probeLocked) return null;
   const lock = calibrationFromSetup(setup, status);
   writeProbeLock(PROBE_STATE_PATH, lock);
-  setup.probeLockStatus = "locked";
+  if (!String(setup.probeLockStatus || "").startsWith("locked_after_")) setup.probeLockStatus = "locked";
   setup.probeLockedAt = lock.lockedAt;
   return lock;
+};
+const persistMaterialProfile = () => {
+  const profile = materialProfileFromSetup(setup);
+  writeMaterialProfile(MATERIAL_STATE_PATH, profile);
+  applyMaterialProfile(setup, profile);
+  return profile;
 };
 const restoreLockedProbe = (status, workOffset) => {
   const raw = readProbeLock(PROBE_STATE_PATH);
@@ -149,22 +169,33 @@ const restoreLockedProbe = (status, workOffset) => {
   }
 };
 const hazardousOperationActive = () => moving || ["running", "paused"].includes(job.state);
-const scheduleRestart = () => { if (restartScheduled) return; restartScheduled = true; setTimeout(() => process.exit(1), 750).unref(); };
+let lastConnectionLog = { key: "", at: 0 };
+const logConnectionEvent = (key, message) => {
+  const now = Date.now();
+  if (lastConnectionLog.key !== key || now - lastConnectionLog.at >= 60_000) {
+    process.stderr.write(`${message}\n`);
+    lastConnectionLog = { key, at: now };
+  }
+};
 controller.on("fault", (error) => {
   const hazardous = hazardousOperationActive();
   incident = error?.message || "CONTROLLER_FAULT";
-  process.stderr.write(`[cnc] controller fault hazardous=${hazardous}: ${incident}\n`);
-  workspace.clear();
-  clearSetup();
-  if (hazardous) scheduleRestart();
+  logConnectionEvent(`fault:${incident}`, `[cnc] controller fault hazardous=${hazardous}: ${incident}`);
+  recordEvent("controller.fault", { hazardous, incident, jobId: job.jobId, jobState: job.state });
+  if (["running", "paused"].includes(job.state)) {
+    Object.assign(job, { state: "interrupted", message: incident, updatedAt: new Date().toISOString() });
+    persistRunProgress({ state: "interrupted", message: incident });
+  }
 });
 controller.on("close", () => {
   const hazardous = hazardousOperationActive();
   if (hazardous) incident = "CONTROLLER_CONNECTION_LOST";
-  process.stderr.write(`[cnc] controller close hazardous=${hazardous}\n`);
-  workspace.clear();
-  clearSetup();
-  if (hazardous) scheduleRestart();
+  logConnectionEvent(`close:${hazardous}`, `[cnc] controller close hazardous=${hazardous}`);
+  recordEvent("controller.close", { hazardous, incident, jobId: job.jobId, jobState: job.state });
+  if (["running", "paused"].includes(job.state)) {
+    Object.assign(job, { state: "interrupted", message: incident || "Controller connection lost", updatedAt: new Date().toISOString() });
+    persistRunProgress({ state: "interrupted", message: job.message });
+  }
 });
 
 const readStatus = async () => (lastControllerStatus = parseStatus(await controller.status({ attempts: 5 })));
@@ -242,7 +273,9 @@ const setXyZero = async (payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   await motionGuard(); const before = await assertIdle(); await controller.setWorkOffset({ x: 0, y: 0 });
   removeProbeLock(PROBE_STATE_PATH);
+  removeMaterialProfile(MATERIAL_STATE_PATH);
   clearProbeSetup("new_project_reprobe_required");
+  Object.assign(setup, { materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null });
   setup.xyOriginMPos = coordinates(before); setup.xyReady = true; setup.updatedAt = new Date().toISOString();
   setup.xyLockStatus = "locked";
   persistLockedXy(before);
@@ -296,17 +329,34 @@ const setStockZZero = async (payload) => {
 };
 const probeSurface = async (kind, payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
-  if (!new Set(["bed", "stock"]).has(kind)) throw new Error("Unknown probe surface");
+  if (!new Set(["bed", "stock", "tool"]).has(kind)) throw new Error("Unknown probe surface");
+  let materialProfile;
   if (kind === "bed") {
     if (setup.probeLocked && payload.confirmReprobe !== true) throw new Error("Probe calibration is locked; confirm a bed re-probe to replace it");
     removeProbeLock(PROBE_STATE_PATH);
+    removeMaterialProfile(MATERIAL_STATE_PATH);
     clearProbeSetup("reprobe_in_progress");
+    Object.assign(setup, { materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null });
     workspace.clear();
   }
   if (kind === "stock" && !setup.bedProbeReady) throw new Error("Probe the exposed bed before probing the stock");
+  if (kind === "tool") {
+    materialProfile = readMaterialProfile(MATERIAL_STATE_PATH);
+    if (!materialProfile) throw new Error("Complete one bed + stock setup before touching off a changed bit");
+    removeProbeLock(PROBE_STATE_PATH);
+    clearProbeSetup("tool_touch_in_progress");
+    applyMaterialProfile(setup, materialProfile);
+    workspace.clear();
+  }
   moving = true; incident = undefined;
+  recordEvent("probe.started", { kind, maxSearchMm: payload.maxSearchMm, materialReady: setup.materialReady });
   try {
-    await motionGuard(); const result = await controller.probeZ({ thicknessMm: payload.thicknessMm }); const thickness = Number(result.thicknessMm);
+    await motionGuard();
+    const result = await controller.probeZ({
+      thicknessMm: payload.thicknessMm,
+      maxSearchMm: payload.maxSearchMm,
+    });
+    const thickness = Number(result.thicknessMm);
     const contactZ = coordinates(result.finalContact).Z;
     const surfaceZ = contactZ - thickness;
     setup.probeThickness = thickness;
@@ -322,22 +372,19 @@ const probeSurface = async (kind, payload) => {
       setup.safetyFloorMm = null;
       setup.maxCutDepthMm = null;
       setup.zOriginMPos = null;
+    } else if (kind === "stock") {
+      completeStockProbe(setup, surfaceZ);
     } else {
-      const protection = measuredStockProtection(setup.bedSurfaceMPos, surfaceZ);
-      setup.stockSurfaceMPos = surfaceZ;
-      setup.stockThicknessMm = protection.stockThicknessMm;
-      setup.safetyFloorMm = protection.safetyFloorMm;
-      setup.maxCutDepthMm = protection.maxCutDepthMm;
-      setup.zOriginMPos = surfaceZ;
-      setup.stockProbeReady = true;
-      setup.probeReady = true;
-      setup.probeLockStatus = "ready_to_lock";
+      completeToolTouch(setup, surfaceZ, materialProfile);
     }
     setup.updatedAt = new Date().toISOString(); lastControllerStatus = result.after;
+    if (kind === "stock") persistMaterialProfile();
+    if (kind !== "bed") persistLockedProbe(result.after);
     rebuildWorkspaceFromSetup();
     persistLockedXy(result.after);
+    recordEvent("probe.completed", { kind, searchedMm: result.searchedMm, stockThicknessMm: setup.stockThicknessMm, maxCutDepthMm: setup.maxCutDepthMm, lockStatus: setup.probeLockStatus });
     return { ...result, setup: { ...setup } };
-  } catch (error) { incident = error?.message || "PROBE_FAILED"; throw error; } finally { moving = false; }
+  } catch (error) { incident = error?.message || "PROBE_FAILED"; setup.probePhase = error?.code === "PROBE_SEARCH_EXHAUSTED" ? "returned_no_contact" : "error"; setup.updatedAt = new Date().toISOString(); recordEvent("probe.failed", { kind, code: error?.code, message: incident, travelledMm: setup.probeTravelledMm, limitMm: setup.probeSearchLimitMm }); throw error; } finally { moving = false; }
 };
 const lockProbeCalibration = async () => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
@@ -349,6 +396,7 @@ const lockProbeCalibration = async () => {
   setup.probeLockedAt = new Date().toISOString();
   setup.updatedAt = setup.probeLockedAt;
   const lock = persistLockedProbe(status);
+  persistMaterialProfile();
   return { ok: true, setup: { ...setup }, lock: { lockedAt: lock.lockedAt, lastKnownMPos: lock.lastKnownMPos } };
 };
 const unlockProbeCalibration = async (payload) => {
@@ -365,8 +413,9 @@ const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockRe
   const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true } });
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { version: 1, jobId: savedProgram.jobId, programCapturedAt: savedProgram.capturedAt, state: "running", lastCompletedLine: 0, totalLines: savedProgram.analysis.executableLines, message: "Preflight checks", updatedAt: new Date().toISOString() });
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
-  try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); persistRunProgress({ state: "done", lastCompletedLine: activeRunCheckpoint.totalLines, message: "Carve complete" }); return result; }
-  catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); persistRunProgress({ state: "interrupted", message: incident }); throw error; } finally { moving = false; }
+  recordEvent("program.started", { jobId, executableLines: savedProgram.analysis.executableLines, manualRouter: manualRouter === true });
+  try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); persistRunProgress({ state: "done", lastCompletedLine: activeRunCheckpoint.totalLines, message: "Carve complete" }); recordEvent("program.completed", { jobId, totalLines: activeRunCheckpoint.totalLines }); return result; }
+  catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); persistRunProgress({ state: "interrupted", message: incident }); recordEvent("program.interrupted", { jobId, message: incident, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine }); throw error; } finally { moving = false; }
 };
 const resumeSavedProgram = async (payload) => {
   if (payload.confirm !== true) throw new Error("Explicit resume confirmation is required");
@@ -425,6 +474,7 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && req.url === "/zero/z") return json(res, 200, await setStockZZero(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/probe/tool") return json(res, 200, await probeSurface("tool", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/lock") return json(res, 200, await lockProbeCalibration());
     if (req.method === "POST" && req.url === "/probe/unlock") return json(res, 200, await unlockProbeCalibration(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/recover") return json(res, 200, await controller.recoverProbeContact(await bodyJson(req)));
@@ -463,7 +513,7 @@ const restoreHardLimitsOnStartup = async (knownStatus) => {
   }
 };
 
-const keepalive = setInterval(async () => { if (moving || keepaliveBusy || !controller.connected) return; keepaliveBusy = true; try { await readStatus(); } catch (error) { incident = `KEEPALIVE_FAILED:${error?.message || "unknown"}`; workspace.clear(); clearSetup(); } finally { keepaliveBusy = false; } }, 1500);
+const keepalive = setInterval(async () => { if (moving || keepaliveBusy || !controller.connected) return; keepaliveBusy = true; try { await readStatus(); } catch (error) { incident = `KEEPALIVE_FAILED:${error?.message || "unknown"}`; logConnectionEvent(incident, `[cnc] ${incident}`); } finally { keepaliveBusy = false; } }, 1500);
 keepalive.unref();
 if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
 server.listen(SOCKET_PATH, () => { chmodSync(SOCKET_PATH, 0o600); process.stdout.write(JSON.stringify({ event: "CNC_DAEMON_READY", socket: SOCKET_PATH, host: HOST, port: PORT }) + "\n"); });

@@ -10,11 +10,11 @@ const codec = readFileSync(new URL("machine/cnc-program-codec.mjs", root), "utf8
 const daemon = readFileSync(new URL("machine/cnc-daemon.mjs", root), "utf8");
 const controller = readFileSync(new URL("machine/cnc-controller.mjs", root), "utf8");
 
-test("CNC page script parses and exposes guarded positioning and two-probe controls", () => {
+test("CNC page script parses and exposes guarded positioning, automatic material save, and tool touch-off", () => {
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncRestoreXyBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncPlanOffsetX", "cncPlanOffsetY", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
+  for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncRestoreXyBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeToolBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncPlanOffsetX", "cncPlanOffsetY", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
   assert.match(html, /cncQueueMachineAction\('jog'/);
   assert.match(html, /if\(action==='jog'\)return 'Move'/);
   assert.match(html, /One press sends one command/);
@@ -38,10 +38,13 @@ test("CNC page script parses and exposes guarded positioning and two-probe contr
   assert.match(html, /probe_bed/);
   assert.doesNotMatch(html, /test_probe|NO-MOTION PROBE TEST|Test probe circuit/);
   assert.match(html, /probe_stock/);
+  assert.match(html, /probe_tool/);
+  assert.match(html, /current\.activeStage!==previousStage/);
+  assert.match(html, /first_retract/);
   assert.match(html, /lock_probe/);
   assert.match(html, /unlock_probe/);
   assert.match(html, /zero_z/);
-  assert.match(html, /Re-probe bed/);
+  assert.match(html, /Re-measure bed/);
   assert.match(html, /confirmReprobe/);
   assert.match(html, /Required carve footprint/);
   assert.match(html, /Stock fit/);
@@ -153,6 +156,7 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /cmd\.confirmNewProject=true/);
   assert.doesNotMatch(api, /Test the probe circuit with the plate touching the bit before probing the bed/);
   assert.match(api, /health\.xyRecovery/);
+  assert.match(api, /This stage changed bits\. Use Changed bit/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
   assert.match(api, /const maxStep=axis==="Z"\?5:100/);
   assert.match(api, /Z jogs are limited to 5 mm per click/);
@@ -228,7 +232,7 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /auto_restored_after_power_cycle/);
   assert.match(daemon, /Explicit new-project X\/Y reset confirmation is required/);
   assert.doesNotMatch(daemon, /Probe circuit is open|probeCircuitIsFresh|\/probe\/test/);
-  assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);\s*workspace\.clear\(\);/);
+  assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*removeMaterialProfile\(MATERIAL_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);/);
   assert.match(daemon, /restoreLockedProbe\(result\.after, workOffset\)/);
   assert.match(daemon, /Controller positioning is paused/);
   assert.match(daemon, /external router may be removed/);
@@ -245,8 +249,8 @@ test("daemon persists per-line recovery checkpoints and validates position befor
   assert.match(daemon, /payload\.dryRun === true/);
 });
 
-test("bed re-probe atomically replaces only the locked Z calibration", () => {
+test("bed re-probe atomically replaces Z and material measurements but preserves X/Y", () => {
   assert.match(daemon, /setup\.probeLocked && payload\.confirmReprobe !== true/);
-  assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);\s*workspace\.clear\(\);/);
+  assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*removeMaterialProfile\(MATERIAL_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);/);
   assert.doesNotMatch(daemon, /removeXyLock\(XY_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\)/);
 });

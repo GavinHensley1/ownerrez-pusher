@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import net from "node:net";
 import test from "node:test";
-import { GrblTcpController, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
+import { GrblTcpController, parseProbeResult, parseStatus, parseWorkOffset, probeRetractTimeoutMs, VirtualWorkspace } from "./cnc-controller.mjs";
 
-const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, startProbeAlarm = false, startAlarm = false, startDoor = false, startHold = false } = {}) => {
-  let connections = 0, statusQueries = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm || startAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true;
+const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, probeContactAtMm = 1, failSlowProbe = false, startProbeAlarm = false, startAlarm = false, startDoor = false, startHold = false } = {}) => {
+  let connections = 0, statusQueries = 0, probeCommands = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, incremental = false, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm || startAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true, probeSucceeded = false, probeZ = z;
+  const probeSurfaceZ = -Math.abs(Number(probeContactAtMm));
   const writes = [];
   const server = net.createServer((socket) => {
     connections += 1;
@@ -35,6 +36,7 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
           if (char === "\r") {
             const command = buffer.trim(); buffer = "";
             if (command === "$G") setTimeout(() => socket.write(`[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]${delimiter}ok${delimiter}`), lateQueryAckMs);
+            else if (command === "$#") socket.write(`[G54:0.000,0.000,0.000]${delimiter}[PRB:${x.toFixed(3)},${y.toFixed(3)},${probeZ.toFixed(3)}:${probeSucceeded ? 1 : 0}]${delimiter}ok${delimiter}`);
             else if (command === "$$") {
               if (alarmed) socket.write(`error:9${delimiter}`);
               else socket.write(`$3=4${delimiter}$21=${hardLimits ? 1 : 0}${delimiter}$27=3.000${delimiter}ok${delimiter}`);
@@ -51,8 +53,23 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
             else if (command === "M5") { spindle = 0; socket.write(`ok${delimiter}`); }
             else if (/^\$(20|21|22)=[01]$/.test(command)) { if (command.startsWith("$21=")) hardLimits = command.endsWith("1"); socket.write(`ok${delimiter}`); }
             else if (command.startsWith("G10 L20 P1 ")) socket.write(`ok${delimiter}`);
-            else if (/^G38\.2 Z-/.test(command)) { z -= 1; probeActive = true; zLimitActive = probeAssertsZ; if (hardLimits && zLimitActive) alarmed = true; socket.write(`ok${delimiter}`); }
-            else if (/^(G21|G90|G17|G0\b|G1\b|G4\b|M2\b)/.test(command)) socket.write(`ok${delimiter}`);
+            else if (/^G38\.[23] Z-/.test(command)) {
+              probeCommands += 1;
+              const requested = Math.abs(Number(command.match(/Z(-?\d+(?:\.\d+)?)/)?.[1] || 0));
+              const target = z - requested;
+              probeSucceeded = !(failSlowProbe && probeCommands > 1) && target <= probeSurfaceZ;
+              z = probeSucceeded ? probeSurfaceZ : target;
+              probeZ = z;
+              probeActive = probeSucceeded;
+              zLimitActive = probeSucceeded && probeAssertsZ;
+              if (/^G38\.2/.test(command) && !probeSucceeded) { alarmed = true; socket.write(`ALARM:5${delimiter}`); }
+              else if (hardLimits && zLimitActive) { alarmed = true; socket.write(`ALARM:1${delimiter}`); }
+              else socket.write(`ok${delimiter}`);
+            }
+            else if (command === "G21 G91") { incremental = true; socket.write(`ok${delimiter}`); }
+            else if (command === "G90") { incremental = false; socket.write(`ok${delimiter}`); }
+            else if (/^G0 Z-?\d/.test(command)) { const value = Number(command.match(/Z(-?\d+(?:\.\d+)?)/)?.[1] || 0); z = incremental ? z + value : value; socket.write(`ok${delimiter}`); }
+            else if (/^(G21(?: G91)?|G90|G17|G0\b|G1\b|G4\b|M2\b)/.test(command)) socket.write(`ok${delimiter}`);
             else if (command === "$H") {
               homing = true; homePolls = 0;
               setTimeout(() => {
@@ -81,6 +98,18 @@ test("keeps one socket and retries ignored status", async () => {
 test("parses the persistent G54 work origin", () => {
   assert.deepEqual(parseWorkOffset(["[G54:-207.685,-25.000,-46.780,0.000]", "ok"]), { X: -207.685, Y: -25, Z: -46.78 });
   assert.throws(() => parseWorkOffset(["ok"]), /G54 work offset is unavailable/);
+});
+
+test("parses the official GRBL probe result", () => {
+  assert.deepEqual(parseProbeResult(["[PRB:1.250,-2.500,-31.125:1]", "ok"]), { position: { X: 1.25, Y: -2.5, Z: -31.125 }, succeeded: true });
+  assert.equal(parseProbeResult(["[PRB:0.000,0.000,-73.000:0]", "ok"]).succeeded, false);
+});
+
+test("probe retract timeout tolerates a slow Wi-Fi status stream", () => {
+  assert.equal(probeRetractTimeoutMs(1, 100), 20_000);
+  assert.equal(probeRetractTimeoutMs(3, 100), 20_000);
+  assert(probeRetractTimeoutMs(10, 20) >= 120_000);
+  assert.throws(() => probeRetractTimeoutMs(1, 0), /finite positive/);
 });
 
 test("parses CR-only records and serializes queries", async () => {
@@ -224,8 +253,41 @@ test("probe is motion guarded and establishes Z from a bounded two-pass cycle", 
   const result = await c.probeZ({ thicknessMm: 12.1 });
   assert.equal(result.thicknessMm, 12.1); assert.equal(result.after.state, "Idle"); assert(guards >= 4);
   assert(mock.bytes.includes(Buffer.from("$21=0\r"))); assert(mock.bytes.includes(Buffer.from("$21=1\r")));
-  assert(mock.bytes.includes(Buffer.from("G38.2 Z-20.000 F100\r"))); assert(mock.bytes.includes(Buffer.from("G10 L20 P1 Z12.100\r")));
+  assert(mock.bytes.includes(Buffer.from("G38.3 Z-5.000 F100\r"))); assert(mock.bytes.includes(Buffer.from("G10 L20 P1 Z12.100\r")));
   assert.equal(result.firstContact.Pn, "PZ"); assert.equal(result.after.Pn, undefined); assert.equal(result.hardLimitsRestored, true);
+  await c.close(); await mock.close();
+});
+
+test("adaptive probe reaches contact beyond the former 20 mm limit without ALARM:5", async () => {
+  const mock = await makeMock({ probeContactAtMm: 22, probeAssertsZ: false });
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {} });
+  const result = await c.probeZ({ thicknessMm: 12.1, maxSearchMm: 70, searchSegmentMm: 5 });
+  assert(result.firstProbe.succeeded);
+  assert(result.searchedMm >= 22);
+  assert(mock.bytes.includes(Buffer.from("G38.3 Z-5.000 F100\r")));
+  assert(!mock.bytes.includes(Buffer.from("G38.2")));
+  await c.close(); await mock.close();
+});
+
+test("adaptive probe exhausts its physical budget cleanly without alarming or latching a fault", async () => {
+  const mock = await makeMock({ probeContactAtMm: Infinity, probeAssertsZ: false });
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {} });
+  await assert.rejects(() => c.probeZ({ maxSearchMm: 25, searchSegmentMm: 5 }), /physical 25\.0 mm search budget/);
+  const returned = parseStatus(await c.status());
+  assert.equal(returned.state, "Idle");
+  assert.equal(returned.MPos, "0.000,0.000,0.000");
+  assert(mock.bytes.includes(Buffer.from("G0 Z25.000\r")));
+  assert(!mock.bytes.includes(Buffer.from("G38.2")));
+  await c.close(); await mock.close();
+});
+
+test("failed slow confirmation returns to starting height without latching a controller fault", async () => {
+  const mock = await makeMock({ probeContactAtMm: 1, probeAssertsZ: false, failSlowProbe: true });
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {} });
+  await assert.rejects(() => c.probeZ({ maxSearchMm: 25 }), /returned to its starting height/);
+  const returned = parseStatus(await c.status());
+  assert.equal(returned.state, "Idle");
+  assert.equal(returned.MPos, "0.000,0.000,0.000");
   await c.close(); await mock.close();
 });
 

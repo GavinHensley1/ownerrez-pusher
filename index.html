@@ -497,7 +497,7 @@
           <select id="cncSpeed" onchange="cncSaveSetup()"><option>Conservative (recommended)</option><option>Normal</option></select></label>
       </div>
       <div style="font-size:11px;color:#93a2b8;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin:12px 0 6px">No-cut-through protection</div>
-      <div class="muted" style="font-size:12px">Project measures the wood by probing the exposed bed and then the stock. Cut-through toolpaths are not permitted. The protected bottom layer is at least 0.8 mm and at least 5% of the measured thickness.</div>
+      <div class="muted" style="font-size:12px">For a new board, probe the exposed bed and then the stock once. Project saves the material thickness automatically. After a bit change, use one stock touch-off; the bed measurement and protected bottom remain saved. Cut-through toolpaths are not permitted.</div>
       <div class="muted" id="cncSetupHint" style="font-size:11px;margin-top:8px"></div>
     </div>
 
@@ -552,16 +552,17 @@
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <button id="cncZeroBtn" class="cncCommandBtn" onclick="cncSetXyZero(this)">Reset X/Y for new project</button>
         <button id="cncRestoreXyBtn" class="cncCommandBtn" onclick="cncRestoreSavedXy(this)" style="display:none">Restore saved X/Y</button>
-        <button id="cncProbeBedBtn" class="cncCommandBtn" onclick="cncProbe('bed',this)">1. Probe bed</button>
-        <button id="cncProbeStockBtn" class="cncCommandBtn" onclick="cncProbe('stock',this)">2. Probe stock</button>
-        <button id="cncProbeLockBtn" class="cncCommandBtn" onclick="cncLockProbe(this)">3. Lock probe calibration</button>
-        <button id="cncStockZZeroBtn" class="cncCommandBtn" onclick="cncSetStockZZero(this)">Set stock Z zero here</button>
+        <button id="cncProbeBedBtn" class="cncCommandBtn" onclick="cncProbe('bed',this)">New board · 1. Probe bed</button>
+        <button id="cncProbeStockBtn" class="cncCommandBtn" onclick="cncProbe('stock',this)" disabled>New board · 2. Probe stock &amp; save</button>
+        <button id="cncProbeToolBtn" class="cncCommandBtn" onclick="cncProbe('tool',this)" disabled>Changed bit · Touch off on stock</button>
+        <button id="cncProbeLockBtn" class="cncCommandBtn" onclick="cncLockProbe(this)" style="display:none">Lock probe calibration</button>
+        <button id="cncStockZZeroBtn" class="cncCommandBtn" onclick="cncSetStockZZero(this)" style="display:none">Advanced manual stock Z zero</button>
         <button id="cncProbeUnlockBtn" class="cncCommandBtn" onclick="cncUnlockProbe(this)">Unlock calibration</button>
         <button id="cncProbeRecoverBtn" class="cncCommandBtn" onclick="cncMachineAction('recover_probe',{},this)">Retract from probe</button>
         <span id="cncMeasuredStock" class="muted" style="font-size:11.5px">Thickness not measured.</span>
       </div>
       <div id="cncOriginFootprint" style="font-size:12px;margin-top:10px;padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.16)"></div>
-      <div class="muted" style="font-size:11.5px;margin-top:8px">Probe the exposed spoilboard first, then the top of the wood with the same plate and clip. Lock the measurements before removing the plate. If the plate's absolute offset is wrong, use the fine Z jogs to bring the stopped bit to the bare stock surface, then choose <b>Set stock Z zero here</b>; Project preserves the measured thickness and protected bottom. X/Y zero is separate.</div>
+      <div class="muted" style="font-size:11.5px;margin-top:8px">Project searches downward in short no-alarm segments using the configured machine Z travel, then returns to the starting height if no plate is found. A successful stock probe saves and locks calibration automatically. After changing bits, touch off only the stock; do not re-probe the bed or reset X/Y.</div>
     </div>
     <div style="margin-top:14px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.09);border-radius:10px;padding:13px">
       <div style="font-weight:600;margin-bottom:9px">4 &middot; Run</div>
@@ -1616,7 +1617,7 @@ function switchView(v){
 var CNC={jobs:[],config:{}}; var CNC_CUR=null;
 var CNC_COMMAND_IN_FLIGHT=false, CNC_COMMAND_BUTTON=null, CNC_COMMAND_BUTTON_HTML='', CNC_LAST_COMMAND_ID='';
 var CNC_PLAN=null, CNC_PLAN_IMG=null, CNC_PLAN_PIXELS=null, CNC_PLAN_MASK=null, CNC_PLAN_SELECTION=null, CNC_PLAN_DRAG=null, CNC_PLAN_SOURCE='';
-var CNC_ACTION_LABELS={jog:'Move',probe_bed:'Probe bed',probe_stock:'Probe stock',lock_probe:'Lock calibration',unlock_probe:'Unlock calibration',recover_probe:'Retract probe',recover_controller:'Enable positioning',restore_xy:'Restore saved X/Y',zero_xy:'Set X/Y zero',zero_z:'Set stock Z zero',start:'Start carve',pause:'Pause',resume:'Resume',stop:'Stop'};
+var CNC_ACTION_LABELS={jog:'Move',probe_bed:'Probe bed',probe_stock:'Probe stock',probe_tool:'Touch off changed bit',lock_probe:'Lock calibration',unlock_probe:'Unlock calibration',recover_probe:'Retract probe',recover_controller:'Enable positioning',restore_xy:'Restore saved X/Y',zero_xy:'Set X/Y zero',zero_z:'Set stock Z zero',start:'Start carve',pause:'Pause',resume:'Resume',stop:'Stop'};
 var CNC_MATS={
  'C752 nickel silver':{feed:250,plunge:80,step:0.08,depth:0.8,rpm:9000},
  'Aluminum / soft metal':{feed:300,plunge:100,step:0.10,depth:1.0,rpm:9000},
@@ -1732,8 +1733,9 @@ function cncLockCommandControls(locked,button){
 }
 function cncRestoreCommandButton(){ document.querySelectorAll('.cncCommandBtn').forEach(function(btn){btn.classList.remove('cnc-control-busy');btn.removeAttribute('aria-busy');}); if(CNC_COMMAND_BUTTON){ CNC_COMMAND_BUTTON.innerHTML=CNC_COMMAND_BUTTON_HTML; CNC_COMMAND_BUTTON=null; CNC_COMMAND_BUTTON_HTML=''; } }
 async function cncRefreshMachineState(){
+  var previous=cncCurrentJob(), previousStage=previous&&previous.activeStage;
   var r=await fetch(api('cnc')+'&cb='+Date.now(),{headers:{'x-app-password':PW,'cache-control':'no-store'}}), j=await r.json(); if(!r.ok) throw Error((j&&j.error)||('Project HTTP '+r.status));
-  CNC=(j&&j.cnc)||{jobs:[],config:{}}; if(!CNC.jobs)CNC.jobs=[]; if(!CNC.config)CNC.config={}; renderCncJobs(); renderCncActiveSelect(); cncRenderAgent(cncCurrentJob()); return CNC;
+  CNC=(j&&j.cnc)||{jobs:[],config:{}}; if(!CNC.jobs)CNC.jobs=[]; if(!CNC.config)CNC.config={}; var current=cncCurrentJob(); renderCncJobs(); renderCncActiveSelect(); if(current&&current.activeStage!==previousStage)cncRenderStages(current); cncRenderAgent(current); return CNC;
 }
 async function cncQueueMachineAction(action,extra,button){
   var job=cncCurrentJob(); if(!job){alert('Pick a job first.');return null;}
@@ -1869,14 +1871,15 @@ function cncRenderAgent(job){
   document.querySelectorAll('.cncJogBtn').forEach(function(btn){btn.disabled=motionBlocked;});
   var zero=document.getElementById('cncZeroBtn'); if(zero) zero.disabled=motionBlocked;
   var restoreXy=document.getElementById('cncRestoreXyBtn'),xyRecovery=h.xyRecovery||{};if(restoreXy){restoreXy.style.display=xyRecovery.available?'':'none';restoreXy.disabled=motionBlocked||!xyRecovery.available;restoreXy.textContent=xyRecovery.available?('Restore saved X/Y ('+Number((xyRecovery.savedWorkPosition||{}).X).toFixed(3)+', '+Number((xyRecovery.savedWorkPosition||{}).Y).toFixed(3)+')'):'Restore saved X/Y';}
-  var bed=document.getElementById('cncProbeBedBtn'); if(bed){ bed.disabled=motionBlocked; bed.textContent=su.probeLocked?'1. Re-probe bed':'1. Probe bed'; }
+  var bed=document.getElementById('cncProbeBedBtn'); if(bed){ bed.disabled=motionBlocked; bed.textContent=su.materialReady?'New board · Re-measure bed':'New board · 1. Probe bed'; }
   var stock=document.getElementById('cncProbeStockBtn'); if(stock) stock.disabled=motionBlocked||!su.bedProbeReady||!!su.probeLocked;
+  var toolProbe=document.getElementById('cncProbeToolBtn'); if(toolProbe) toolProbe.disabled=motionBlocked||!su.materialReady;
   var lock=document.getElementById('cncProbeLockBtn'); if(lock) lock.disabled=motionBlocked||!!su.probeLocked||!su.bedProbeReady||!su.stockProbeReady;
   var stockZero=document.getElementById('cncStockZZeroBtn'); if(stockZero) stockZero.disabled=motionBlocked||!su.probeLocked||!su.stockProbeReady;
   var unlock=document.getElementById('cncProbeUnlockBtn'); if(unlock) unlock.disabled=motionBlocked||!su.probeLocked;
   var recoverProbe=document.getElementById('cncProbeRecoverBtn'); if(recoverProbe) recoverProbe.disabled=motionBlocked;
-  var probeInput=document.getElementById('cncProbeThickness'); if(probeInput) probeInput.disabled=!!su.probeLocked;
-  var measured=document.getElementById('cncMeasuredStock'); if(measured) measured.textContent=su.stockProbeReady?((su.probeLocked?'🔒 Locked · ':'Ready to lock · ')+'measured '+Number(su.stockThicknessMm).toFixed(3)+' mm; protected floor '+Number(su.safetyFloorMm).toFixed(3)+' mm; max cut '+Number(su.maxCutDepthMm).toFixed(3)+' mm.'):'Thickness not measured.';
+  var probeInput=document.getElementById('cncProbeThickness'); if(probeInput) probeInput.disabled=motionBlocked;
+  var measured=document.getElementById('cncMeasuredStock'); if(measured){var probing=['searching','contact','first_retract','verifying','final_retract'].includes(String(su.probePhase||''));measured.textContent=probing?('Probing: '+String(su.probePhase).replace(/_/g,' ')+' · '+Number(su.probeTravelledMm||0).toFixed(1)+' / '+Number(su.probeSearchLimitMm||0).toFixed(1)+' mm'):su.probePhase==='returned_no_contact'?'No plate contact. Z returned to its starting height; check plate and clip, then retry.':su.stockProbeReady?('🔒 Saved · measured '+Number(su.stockThicknessMm).toFixed(3)+' mm; protected floor '+Number(su.safetyFloorMm).toFixed(3)+' mm; max cut '+Number(su.maxCutDepthMm).toFixed(3)+' mm.'):(su.materialReady?'Material thickness saved; touch off the current bit on the stock.':'Thickness not measured.');}
   cncRenderOriginFootprint(job,su);
   if(!CNC_COMMAND_IN_FLIGHT){
     var label=cncActionLabel(job&&job.agentAction||'',{}), detail=(job&&job.agentMsg)||'';
@@ -2311,7 +2314,7 @@ async function cncJog(axis,dir,button){
   var distance=step*(dir<0?-1:1), feed=axis==='Z'?100:300, st=document.getElementById('cncJogStatus'); if(st)st.textContent='One move requested: '+axis+(distance>0?'+':'−')+Math.abs(distance)+' mm.';
   return cncQueueMachineAction('jog',{axis:axis,distanceMm:distance,feedMmPerMin:feed},button);
 }
-async function cncProbe(kind,button){ var t=cncClamp((document.getElementById('cncProbeThickness')||{}).value||12.1,1,30), label=kind==='bed'?'exposed bed':'top of the wood'; var su=((CNC.agent||{}).health||{}).setup||{}, replacing=kind==='bed'&&!!su.probeLocked; var warning=replacing?'\n\nThis will replace the old Z calibration while preserving the X/Y stock zero. If probing fails, Start will remain locked until both surfaces are re-probed.':''; if(!confirm('Probe the '+label+' with the '+t.toFixed(1)+' mm plate?\nPlace the plate at that location, attach the clip, and keep hands clear.'+warning))return; await cncSaveProbeThickness(); return cncMachineAction(kind==='bed'?'probe_bed':'probe_stock',{confirmReprobe:replacing},button); }
+async function cncProbe(kind,button){ var t=cncClamp((document.getElementById('cncProbeThickness')||{}).value||12.1,1,30), label=kind==='bed'?'exposed bed':'top of the wood', su=((CNC.agent||{}).health||{}).setup||{}, replacing=kind==='bed'&&(!!su.probeLocked||!!su.materialReady), action=kind==='bed'?'probe_bed':kind==='tool'?'probe_tool':'probe_stock', explanation=kind==='tool'?'Project will preserve the saved material thickness and X/Y origin, then save the new bit\'s Z automatically.':'Project will search in short no-alarm segments and return to the starting height if it does not find the plate.'; var warning=replacing?'\n\nThis starts a new material measurement and replaces the saved bed/stock profile. X/Y remains unchanged.':''; if(!confirm((kind==='tool'?'Touch off the changed bit on the ':'Probe the ')+label+' with the '+t.toFixed(1)+' mm plate?\nPlace the plate, attach the clip, and keep hands clear.\n\n'+explanation+warning))return; await cncSaveProbeThickness(); return cncMachineAction(action,{confirmReprobe:replacing},button); }
 async function cncSaveProbeThickness(){ var e=document.getElementById('cncProbeThickness'); var t=cncClamp(e&&e.value||12.1,1,30); if(e)e.value=t.toFixed(1); var j=await cncPost({config:{probeThickness:t}}); if(j&&j.cnc)CNC=j.cnc; }
 async function cncSaveDepthToken(){ var v=(document.getElementById('cncDepthTok')||{}).value||''; var s=document.getElementById('cncTokState'); if(s) s.textContent='Saving...'; var j=await cncPost({secret:{depthToken:v}}); if(j&&j.cnc){ CNC=j.cnc; var el=document.getElementById('cncDepthTok'); if(el) el.value=''; if(s) s.textContent=CNC.config.hasDepthToken?'✓ token saved':'no token yet'; } else if(s) s.textContent='Error.'; }
 async function cncSaveDepthModel(){ var v=(document.getElementById('cncDepthModel')||{}).value||''; var j=await cncPost({config:{depthModel:v}}); if(j&&j.cnc) CNC=j.cnc; }

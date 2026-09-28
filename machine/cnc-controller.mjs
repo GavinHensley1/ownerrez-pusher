@@ -14,6 +14,44 @@ export function parseWorkOffset(lines, name = "G54") {
   return { X: values[0], Y: values[1], Z: values[2] };
 }
 
+export function parseProbeResult(lines) {
+  const match = (Array.isArray(lines) ? lines : [])
+    .map((line) => String(line).match(/^\[PRB:([^\]]+):(0|1)\]$/))
+    .find(Boolean);
+  if (!match) throw new Error("GRBL probe result is unavailable");
+  const values = match[1].split(",").slice(0, 3).map(Number);
+  if (values.length !== 3 || values.some((value) => !Number.isFinite(value))) throw new Error("GRBL probe result is invalid");
+  return { position: { X: values[0], Y: values[1], Z: values[2] }, succeeded: match[2] === "1" };
+}
+
+export class ProbeSearchExhaustedError extends Error {
+  constructor(travelledMm, limitMm) {
+    super(`Probe did not contact within the physical ${Number(limitMm).toFixed(1)} mm search budget (searched ${Number(travelledMm).toFixed(1)} mm). Reposition the plate and retry; the controller remains Idle.`);
+    this.name = "ProbeSearchExhaustedError";
+    this.code = "PROBE_SEARCH_EXHAUSTED";
+    this.travelledMm = Number(travelledMm);
+    this.limitMm = Number(limitMm);
+  }
+}
+
+export class ProbeVerificationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProbeVerificationError";
+    this.code = "PROBE_VERIFICATION_FAILED";
+  }
+}
+
+export function probeRetractTimeoutMs(distanceMm, feedMmPerMin) {
+  const distance = Math.abs(Number(distanceMm));
+  const feed = Math.abs(Number(feedMmPerMin));
+  if (!Number.isFinite(distance) || !Number.isFinite(feed) || feed <= 0) throw new Error("Probe retract timing requires finite positive distance and feed");
+  // The Genmitsu Wi-Fi bridge can acknowledge the jog before its status stream
+  // settles. Keep a generous floor so a completed 1-3 mm retract is not turned
+  // into a false probe failure by a temporarily stale Jog status.
+  return Math.max(20_000, (distance / feed) * 240_000 + 7_500);
+}
+
 export class GrblTcpController extends EventEmitter {
   constructor({ host, port = 10086, connectTimeoutMs = 5000, statusTimeoutMs = 800, commandTimeoutMs = 4000, motionGuard, workspaceGuard, programGuard, maxJogMm = 25, maxJogFeed = 500, maxSessionTravelMm = 2000, maxSpindleTestRpm = 2000, maxSpindleTestMs = 5000 } = {}) {
     super();
@@ -310,7 +348,7 @@ export class GrblTcpController extends EventEmitter {
     if (before.state !== "Idle") throw new Error(`Controller must be Idle before probe retract, got ${before.state}`);
     const beforeZ = coordinateAxis(before, "Z");
     const reply = await this.#guardedMotionLine(`$J=G91 G21 Z${distance.toFixed(3)} F${Math.round(feed)}`, 20_000);
-    const deadline = now() + Math.max(5_000, (distance / feed) * 180_000 + 3_000);
+    const deadline = now() + probeRetractTimeoutMs(distance, feed);
     const samples = [];
     while (now() < deadline) {
       await this.motionGuard();
@@ -376,12 +414,13 @@ export class GrblTcpController extends EventEmitter {
     });
   }
 
-  probeZ({ thicknessMm = 12.1, fastTravelMm = 20, fastFeed = 100, slowTravelMm = 2, slowFeed = 10, retractMm = 3 } = {}) {
+  probeZ({ thicknessMm = 12.1, maxSearchMm = 70, searchSegmentMm = 5, fastFeed = 100, slowTravelMm = 2, slowFeed = 10, retractMm = 3 } = {}) {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for probing");
-      const thickness = Number(thicknessMm), fastTravel = Math.abs(Number(fastTravelMm)), fast = Number(fastFeed), slowTravel = Math.abs(Number(slowTravelMm)), slow = Number(slowFeed), retract = Number(retractMm);
+      const thickness = Number(thicknessMm), searchLimit = Math.abs(Number(maxSearchMm)), searchSegment = Math.abs(Number(searchSegmentMm)), fast = Number(fastFeed), slowTravel = Math.abs(Number(slowTravelMm)), slow = Number(slowFeed), retract = Number(retractMm);
       if (!Number.isFinite(thickness) || thickness < 1 || thickness > 30) throw new Error("Probe thickness must be 1-30 mm");
-      if (!Number.isFinite(fastTravel) || fastTravel < 2 || fastTravel > 25) throw new Error("Fast probe travel must be 2-25 mm");
+      if (!Number.isFinite(searchLimit) || searchLimit < 5 || searchLimit > 73) throw new Error("Probe search budget must be 5-73 mm");
+      if (!Number.isFinite(searchSegment) || searchSegment < 1 || searchSegment > 10) throw new Error("Probe search segment must be 1-10 mm");
       if (!Number.isFinite(slowTravel) || slowTravel < 0.5 || slowTravel > 5) throw new Error("Slow probe travel must be 0.5-5 mm");
       if (!Number.isFinite(fast) || fast < 20 || fast > 250 || !Number.isFinite(slow) || slow < 5 || slow > 50) throw new Error("Probe feed is outside the safe range");
       if (!Number.isFinite(retract) || retract < 1 || retract > 10) throw new Error("Probe retract must be 1-10 mm");
@@ -391,6 +430,7 @@ export class GrblTcpController extends EventEmitter {
       const [feed, spindle] = feedAndSpindle(before);
       if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before probe: ${before.FS}`);
       if (before.Pn) throw new Error(`Active input pins before probe: ${before.Pn}`);
+      this.emit("probeProgress", { phase: "searching", travelledMm: 0, limitMm: searchLimit });
       const hardLimitsWereEnabled = await this.#booleanSettingUnlocked(21);
       let hardLimitsSuppressed = false;
       try {
@@ -400,16 +440,72 @@ export class GrblTcpController extends EventEmitter {
           hardLimitsSuppressed = true;
         }
         await this.#lineCommandUnlocked("G21 G91", false);
-        const fastReply = await this.#guardedMotionLine(`G38.2 Z-${fastTravel.toFixed(3)} F${Math.round(fast)}`, 25_000);
-        const firstContact = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
-        if (!String(firstContact.Pn || "").includes("P")) throw new Error(`Fast probe ended without probe contact: ${firstContact.raw}`);
-        const firstRetract = await this.#probeRetractUnlocked(1, fast);
+        const search = [];
+        let searchedMm = 0;
+        let fastReply;
+        let firstContact;
+        let firstProbe;
+        while (searchedMm < searchLimit - 0.0005) {
+          const segmentMm = Math.min(searchSegment, searchLimit - searchedMm);
+          const beforeSegment = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+          const beforeZ = coordinateAxis(beforeSegment, "Z");
+          const reply = await this.#guardedMotionLine(`G38.3 Z-${segmentMm.toFixed(3)} F${Math.round(fast)}`, 30_000);
+          const afterSegment = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+          const probe = parseProbeResult(await this.#lineCommandUnlocked("$#", false));
+          const deltaMm = beforeZ - coordinateAxis(afterSegment, "Z");
+          search.push({ requestedMm: segmentMm, deltaMm, probe, before: beforeSegment, after: afterSegment });
+          searchedMm += Math.max(0, deltaMm);
+          this.emit("probeProgress", { phase: probe.succeeded ? "contact" : "searching", travelledMm: searchedMm, limitMm: searchLimit, segmentMm, position: probe.position });
+          if (probe.succeeded) {
+            fastReply = reply;
+            firstContact = afterSegment;
+            firstProbe = probe;
+            break;
+          }
+          if (Math.abs(deltaMm - segmentMm) > 0.75) throw new Error(`Probe search delta mismatch: requested ${segmentMm.toFixed(3)} mm, moved ${deltaMm.toFixed(3)} mm`);
+        }
+        if (!firstProbe?.succeeded) {
+          if (searchedMm > 0.0005) await this.#guardedMotionLine(`G0 Z${searchedMm.toFixed(3)}`, 30_000);
+          const returned = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+          const returnErrorMm = Math.abs(coordinateAxis(returned, "Z") - coordinateAxis(before, "Z"));
+          if (returnErrorMm > 0.05) throw new Error(`Probe return-to-start verification failed by ${returnErrorMm.toFixed(3)} mm`);
+          await this.#lineCommandUnlocked("G90", false);
+          if (hardLimitsWereEnabled) {
+            await this.#lineCommandUnlocked("$21=1", false);
+            hardLimitsSuppressed = false;
+          }
+          this.emit("probeProgress", { phase: "returned_no_contact", travelledMm: searchedMm, limitMm: searchLimit });
+          throw new ProbeSearchExhaustedError(searchedMm, searchLimit);
+        }
+        this.emit("probeProgress", { phase: "first_retract", travelledMm: searchedMm, limitMm: searchLimit });
+        let firstRetract;
+        try { firstRetract = await this.#probeRetractUnlocked(1, fast); }
+        catch (error) { throw new Error(`First probe retract failed: ${error.message}`); }
         if (/[PZ]/.test(String(firstRetract.after.Pn || ""))) throw new Error(`Probe/limit input did not clear after first retract: ${firstRetract.after.Pn}`);
-        const slowReply = await this.#guardedMotionLine(`G38.2 Z-${slowTravel.toFixed(3)} F${Math.round(slow)}`, 20_000);
+        this.emit("probeProgress", { phase: "verifying", travelledMm: searchedMm, limitMm: searchLimit });
+        const slowReply = await this.#guardedMotionLine(`G38.3 Z-${slowTravel.toFixed(3)} F${Math.round(slow)}`, 20_000);
         const finalContact = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
-        if (!String(finalContact.Pn || "").includes("P")) throw new Error(`Slow probe ended without probe contact: ${finalContact.raw}`);
+        const finalProbe = parseProbeResult(await this.#lineCommandUnlocked("$#", false));
+        if (!finalProbe.succeeded) {
+          await this.#guardedMotionLine(`G0 Z${slowTravel.toFixed(3)}`, 20_000);
+          const slowReturned = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+          const returnToStartMm = coordinateAxis(before, "Z") - coordinateAxis(slowReturned, "Z");
+          if (returnToStartMm > 0.0005) await this.#guardedMotionLine(`G0 Z${returnToStartMm.toFixed(3)}`, 30_000);
+          const returned = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+          const returnErrorMm = Math.abs(coordinateAxis(returned, "Z") - coordinateAxis(before, "Z"));
+          if (returnErrorMm > 0.05) throw new Error(`Probe return-to-start verification failed by ${returnErrorMm.toFixed(3)} mm`);
+          await this.#lineCommandUnlocked("G90", false);
+          if (hardLimitsWereEnabled) {
+            await this.#lineCommandUnlocked("$21=1", false);
+            hardLimitsSuppressed = false;
+          }
+          throw new ProbeVerificationError(`The slow confirmation touch did not see the plate. Z returned to its starting height; check the clip and plate, then retry.`);
+        }
         await this.#lineCommandUnlocked(`G10 L20 P1 Z${thickness.toFixed(3)}`, false);
-        const finalRetract = await this.#probeRetractUnlocked(retract, fast);
+        this.emit("probeProgress", { phase: "final_retract", travelledMm: searchedMm, limitMm: searchLimit });
+        let finalRetract;
+        try { finalRetract = await this.#probeRetractUnlocked(retract, fast); }
+        catch (error) { throw new Error(`Final probe retract failed: ${error.message}`); }
         if (/[PZ]/.test(String(finalRetract.after.Pn || ""))) throw new Error(`Probe/limit input did not clear after final retract: ${finalRetract.after.Pn}`);
         await this.#lineCommandUnlocked("G90", false);
         if (hardLimitsWereEnabled) {
@@ -417,11 +513,13 @@ export class GrblTcpController extends EventEmitter {
           hardLimitsSuppressed = false;
         }
         const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+        this.emit("probeProgress", { phase: "complete", travelledMm: searchedMm, limitMm: searchLimit });
         await this.motionGuard();
-        return { thicknessMm: thickness, before, fastReply, firstContact, firstRetract, slowReply, finalContact, finalRetract, after, hardLimitsRestored: hardLimitsWereEnabled };
+        return { thicknessMm: thickness, before, search, searchedMm, fastReply, firstContact, firstProbe, firstRetract, slowReply, finalContact, finalProbe, finalRetract, after, hardLimitsRestored: hardLimitsWereEnabled };
       } catch (error) {
         await this.#lineCommandUnlocked("G90", false).catch(() => {});
         if (hardLimitsWereEnabled && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
+        if (new Set(["PROBE_SEARCH_EXHAUSTED", "PROBE_VERIFICATION_FAILED"]).has(error?.code) && !this.fault) throw error;
         if (!this.fault) await this.#emergencyStop(`PROBE_FAILED:${error.message}`);
         throw this.fault || error;
       }
