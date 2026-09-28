@@ -1854,12 +1854,17 @@ function cncStartFrameCheck(health){
   for(var i=0;i<3;i++){var axis=axes[i],b=bounds[axis],v=parts[i],min=Number(b&&b.min),max=Number(b&&b.max);if(!b||!isFinite(min)||(axis!=='Z'&&!isFinite(max)))return {ok:false,reason:axis+' calibrated boundary is unavailable.'};if(v<min-.001||(axis!=='Z'&&v>max+.001)){var delta=v<min?min-v:v-max;return {ok:false,axis:axis,delta:delta,reason:axis==='Z'?('Z is '+delta.toFixed(3)+' mm below the protected floor. Retract with Z+ before Start.'):('Current '+axis+' position '+v.toFixed(3)+' mm is outside the calibrated frame.')};}}
   return {ok:true,reason:'Current controller position is inside the calibrated frame.'};
 }
+function cncPresentationState(job,health,controller){
+  var state=String(job&&job.agentState||''),jobAt=Date.parse(job&&job.agentAt||''),healthAt=Date.parse(CNC.agent&&CNC.agent.at||'');
+  var recovered=state==='error'&&controller&&controller.idle&&!health.moving&&!health.incident&&Number.isFinite(jobAt)&&Number.isFinite(healthAt)&&healthAt-jobAt>=15000;
+  return {state:recovered?'ready':state,recoveredError:recovered,errorMessage:recovered?String(job&&job.agentMsg||''):''};
+}
 function cncRenderAgent(job){
   var as=document.getElementById('cncAgentStatus'), box=document.getElementById('cncReadiness');
   var h=(CNC.agent&&CNC.agent.health)||{}, ws=h.workspace||{}, su=h.setup||{};
   cncControllerReadout(h);
   var fit=cncStockFit(job);
-  var state=job&&job.agentState||'',baseBlocked=CNC_COMMAND_IN_FLIGHT||!CNC.agent||!h.connected||!!h.moving||['queued','accepted','running','paused'].includes(state),controller=cncRenderPositioning(h,baseBlocked),frame=cncStartFrameCheck(h);
+  var storedState=job&&job.agentState||'',baseBlocked=CNC_COMMAND_IN_FLIGHT||!CNC.agent||!h.connected||!!h.moving||['queued','accepted','running','paused'].includes(storedState),controller=cncRenderPositioning(h,baseBlocked),presentation=cncPresentationState(job,h,controller),state=presentation.state,frame=cncStartFrameCheck(h);
   var checks=[['Bridge',!!CNC.agent],['Controller ready',!!controller.idle],['Machine boundaries',!!ws.calibrated],['Start position',!!frame.ok],['Stock fit',!!fit.ok],['X/Y stock zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked]];
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
   var ready=checks.every(function(c){return c[1];});
@@ -1888,6 +1893,7 @@ function cncRenderAgent(job){
     else if(state==='running') cncCommandBanner('running','Machine running',detail||('Carve progress '+Math.round(Number(job&&job.progress)||0)+'%'));
     else if(state==='paused') cncCommandBanner('accepted','Machine paused',detail||'Use Resume or Stop once.');
     else if(state==='error') cncCommandBanner('error','Machine command failed',detail||'The controller rejected the command.');
+    else if(state==='ready'&&presentation.recoveredError) cncCommandBanner('ready','Controls ready','The previous command error is historical. Fresh controller health is green; use the visible Project controls to retry.');
     else if(state==='ready') cncCommandBanner('ready',(label||'Command')+' complete ✓',detail||'The controller confirmed completion.');
     else if(state==='done') cncCommandBanner('done','Carve complete ✓',detail||'The controller finished the program.');
     else if(state==='stopped') cncCommandBanner('stopped','Machine stopped',detail||'No program is running.');
@@ -1897,7 +1903,8 @@ function cncRenderAgent(job){
     if(!['queued','accepted','running','paused'].includes(state)) cncRestoreCommandButton();
   }
   if(!as) return;
-  if(job&&state){ var m={queued:'⏳ Command queued',accepted:'⏳ Machine preparing',running:'▶ Machine running'+((job.progress!=null)?(' — '+Math.round(job.progress)+'%'):''),paused:'⏸ Machine paused',stopped:'■ Machine stopped',done:'✅ Carve complete',error:'⚠ Machine error'}[state]||state; as.innerHTML=m+(job.agentMsg?(' <span style="opacity:.7">— '+cncEsc(job.agentMsg)+'</span>'):''); }
+  if(presentation.recoveredError) as.innerHTML='✅ Machine ready <span style="opacity:.7">— previous command reported: '+cncEsc(presentation.errorMessage)+'</span>';
+  else if(job&&state){ var m={queued:'⏳ Command queued',accepted:'⏳ Machine preparing',running:'▶ Machine running'+((job.progress!=null)?(' — '+Math.round(job.progress)+'%'):''),paused:'⏸ Machine paused',stopped:'■ Machine stopped',done:'✅ Carve complete',error:'⚠ Machine error'}[state]||state; as.innerHTML=m+(job.agentMsg?(' <span style="opacity:.7">— '+cncEsc(job.agentMsg)+'</span>'):''); }
   else as.textContent=ready?'Machine is ready.':'Start is locked until every required readiness check is green.';
 }
 function cncRenderOriginFootprint(job,su){

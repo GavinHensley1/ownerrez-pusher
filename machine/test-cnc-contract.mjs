@@ -113,6 +113,10 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /prev\.style\.display='block'/);
   assert.match(html, /Previewing does not load or arm the stage/);
   assert.match(html, /function cncStartFrameCheck/);
+  assert.match(html, /function cncPresentationState/);
+  assert.match(html, /previous command error is historical/i);
+  assert.match(html, /use the visible Project controls to retry/i);
+  assert.match(html, /healthAt-jobAt>=15000/);
   assert.match(html, /Start position/);
   assert.match(html, /There is no upper Z ceiling/);
   assert.match(html, /axis!==['"]Z['"]/);
