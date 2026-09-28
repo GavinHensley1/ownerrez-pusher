@@ -197,6 +197,9 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /stockWidthMm/);
   assert.match(agent, /manualRouter: command\.manualRouter === true/);
   assert.match(agent, /from "\.\/cnc-program-codec\.mjs"/);
+  assert.match(agent, /from "\.\/cnc-command-policy\.mjs"/);
+  assert.match(agent, /agentStartedAtMs/);
+  assert.match(agent, /activeProgram: Boolean\(activeStart\)/);
   assert.match(codec, /gunzipSync/);
   assert.match(agent, /decodeProgram\(command\)/);
   assert.match(agent, /recover_probe: "\/probe\/recover"/);

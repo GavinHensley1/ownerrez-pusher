@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { claimCommand, completeCommand } from "./cnc-command-ledger.mjs";
+import { commandRejectionReason } from "./cnc-command-policy.mjs";
 import { splitJogDistance } from "./cnc-jog.mjs";
 import { decodeProgram } from "./cnc-program-codec.mjs";
 
@@ -19,6 +20,7 @@ if (!token) throw new Error("CNC agent token is unavailable");
 
 let stopped = false;
 let activeStart;
+const agentStartedAtMs = Date.now();
 const handled = new Set();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -102,13 +104,20 @@ async function execute(command) {
   const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);
   const programAction = new Set(["start", "resume_saved"]).has(command.action);
-  if (programAction && activeStart) return report(command, "error", "A carve is already running");
   const claim = claimCommand(COMMAND_LEDGER_PATH, command);
   if (!claim.claimed) {
     if (claim.terminal) return report(command, claim.entry.status, claim.entry.message || `${command.action} already completed`, { terminal: true });
     const message = "Bridge restarted while this command outcome was unknown. It was not repeated. Reconcile the controller state before issuing another command.";
     const uncertain = completeCommand(COMMAND_LEDGER_PATH, command.id, "uncertain", message);
     return report(command, uncertain.status, uncertain.message, { terminal: true });
+  }
+  const rejection = commandRejectionReason(command, {
+    agentStartedAtMs,
+    activeProgram: Boolean(activeStart),
+  });
+  if (rejection) {
+    const rejected = completeCommand(COMMAND_LEDGER_PATH, command.id, "error", rejection);
+    return report(command, rejected.status, rejected.message, { terminal: true });
   }
   await report(command, programAction ? "running" : "accepted", `${command.action} accepted`);
   const task = (async () => {
