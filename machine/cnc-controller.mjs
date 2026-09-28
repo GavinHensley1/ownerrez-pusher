@@ -299,7 +299,7 @@ export class GrblTcpController extends EventEmitter {
     });
   }
 
-  recoverStoppedController() {
+  recoverStoppedController({ allowHeldResume = true } = {}) {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for controller recovery");
       if (this.programRunning) throw new Error("Cannot recover the controller while a program is active");
@@ -312,7 +312,10 @@ export class GrblTcpController extends EventEmitter {
       if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before controller recovery: ${before.FS}`);
       if (before.Pn) throw new Error(`Active input pins before controller recovery: ${before.Pn}`);
       if (baseState === "Alarm") await this.#lineCommandUnlocked("$X", false);
-      else this.socket.write("~");
+      else {
+        if (!allowHeldResume) throw new Error("Held program buffer was not cleared; refusing to resume axis motion");
+        this.socket.write("~");
+      }
       const deadline = now() + 5_000, samples = [];
       while (now() < deadline) {
         const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
@@ -557,10 +560,12 @@ export class GrblTcpController extends EventEmitter {
           if (guardError) throw this.fault || guardError;
           if (this.abortRequested) throw new Error("PROGRAM_ABORTED");
           while (this.pauseRequested) {
+            if (this.abortRequested) throw new Error("PROGRAM_ABORTED");
             if (guardError) throw this.fault || guardError;
             await this.motionGuard();
             await sleep(200);
           }
+          if (this.abortRequested) throw new Error("PROGRAM_ABORTED");
           await this.#lineCommandUnlocked(analysis.lines[index], true, { timeoutMs: 15_000 });
           const progress = Math.round(((index + 1) / analysis.lines.length) * 1000) / 10;
           this.emit("programProgress", { progress, line: index + 1, total: analysis.lines.length });
@@ -606,7 +611,13 @@ export class GrblTcpController extends EventEmitter {
 
   async stopProgramNow(reason = "PROGRAM_STOP_REQUESTED") {
     this.abortRequested = true;
+    // A paused program waits in the pause loop. Release that loop so the abort
+    // can unwind the run promise instead of leaving Project permanently moving.
+    this.pauseRequested = false;
     await this.#emergencyStop(reason);
+    const deadline = now() + 5_000;
+    while (this.programRunning && now() < deadline) await sleep(20);
+    if (this.programRunning) throw new Error("PROGRAM_STOP_DID_NOT_SETTLE");
   }
 
   home({ timeoutMs = 90_000 } = {}) {

@@ -32,6 +32,13 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /confirmGantryUnmoved/);
   assert.match(html, /external router does not need to be installed/i);
   assert.match(html, /button\.disabled=!!baseBlocked/);
+  assert.match(html, /Controller stopped · recovery required/);
+  assert.match(html, /function cncResume/);
+  assert.match(html, /resume_saved/);
+  assert.match(html, /Restart stage from beginning/);
+  assert.match(html, /RESTART FROM LINE 1/);
+  assert.match(html, /Fixed 20 millimeter Genmitsu probe puck/);
+  assert.doesNotMatch(html, /value="12\.1"/);
   assert.match(html, /var motionBlocked=baseBlocked\|\|!controller\.idle/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
   assert.match(html, /<option value="0\.1">0\.1 mm<\/option>/);
@@ -171,6 +178,9 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /job\.agentCommandId=cmd\.id/);
   assert.match(api, /do not press again/);
   assert.match(api, /const runControls=\["pause","resume","stop"\]/);
+  assert.match(api, /Explicit saved-carve resume confirmation is required/);
+  assert.match(api, /st\.config\.probeThickness=20/);
+  assert.match(api, /cmd\.probeThickness=20/);
   assert.match(api, /Pause requires a running carve/);
   assert.match(api, /Resume requires a paused carve/);
   assert.match(api, /Stop requires an active carve/);
@@ -195,6 +205,8 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /unlock_probe: "\/probe\/unlock"/);
   assert.match(agent, /zero_z: "\/zero\/z"/);
   assert.match(agent, /recover_controller: "\/controller\/recover-stopped"/);
+  assert.match(agent, /resume_saved: "\/job\/resume-saved"/);
+  assert.match(agent, /resume: health\?\.resume \|\| null/);
   assert.match(agent, /restore_xy: "\/zero\/xy\/restore-after-power-cycle"/);
   assert.match(agent, /confirmReprobe: command\.confirmReprobe === true/);
   assert.match(agent, /confirmNewProject: command\.confirmNewProject === true/);
@@ -273,6 +285,13 @@ test("daemon persists per-line recovery checkpoints and validates position befor
   assert.match(daemon, /Resume position mismatch on/);
   assert.match(daemon, /buildResumeProgram/);
   assert.match(daemon, /payload\.dryRun === true/);
+  assert.match(controller, /if \(this\.abortRequested\) throw new Error\("PROGRAM_ABORTED"\);\s*if \(guardError\)/);
+  assert.match(controller, /this\.pauseRequested = false;\s*await this\.#emergencyStop\(reason\)/);
+  assert.match(controller, /Held program buffer was not cleared; refusing to resume axis motion/);
+  assert.match(daemon, /persistRunProgress\(\{ state: "interrupted", message: "Stopped by Project" \}\)/);
+  assert.match(daemon, /DISCARD_BUFFERED_PROGRAM_AFTER_PROJECT_STOP/);
+  assert.match(daemon, /PROBE_PUCK_THICKNESS_MM = 20/);
+  assert.match(daemon, /saved probe puck is/);
 });
 
 test("bed re-probe atomically replaces Z and material measurements but preserves X/Y", () => {

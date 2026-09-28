@@ -495,7 +495,7 @@
         <label class="muted" style="font-size:12px">Bit<br>
           <select id="cncBit" onchange="cncSaveSetup()"><option>30&deg; V-bit 0.1mm</option><option>3.175mm ball nose</option><option>3.175mm flat end mill</option></select></label>
         <label class="muted" style="font-size:12px">Z-probe plate thickness (mm)<br>
-          <input id="cncProbeThickness" type="number" min="1" max="30" step="0.1" value="12.1" style="width:120px" onchange="cncSaveProbeThickness()"></label>
+          <input id="cncProbeThickness" type="number" min="20" max="20" step="0.1" value="20.0" readonly style="width:120px" aria-label="Fixed 20 millimeter Genmitsu probe puck"></label>
         <label class="muted" style="font-size:12px">Speed<br>
           <select id="cncSpeed" onchange="cncSaveSetup()"><option>Conservative (recommended)</option><option>Normal</option></select></label>
       </div>
@@ -572,7 +572,7 @@
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <button id="cncStartBtn" class="cncCommandBtn" onclick="cncStart(this)" disabled style="font-size:16px;padding:12px 22px;font-weight:700">&#9654; Start carve</button>
         <button id="cncPauseBtn" class="cncCommandBtn" onclick="cncMachineAction('pause',{},this)">Pause</button>
-        <button id="cncResumeBtn" class="cncCommandBtn" onclick="cncMachineAction('resume',{},this)">Resume</button>
+        <button id="cncResumeBtn" class="cncCommandBtn" onclick="cncResume(this)">Resume</button>
         <button id="cncStopBtn" class="cncCommandBtn" onclick="cncMachineAction('stop',{},this)" style="background:#b93a3a;color:white">Stop</button>
         <span id="cncRunStatus" class="muted"></span>
       </div>
@@ -1620,7 +1620,7 @@ function switchView(v){
 var CNC={jobs:[],config:{}}; var CNC_CUR=null;
 var CNC_COMMAND_IN_FLIGHT=false, CNC_COMMAND_BUTTON=null, CNC_COMMAND_BUTTON_HTML='', CNC_LAST_COMMAND_ID='';
 var CNC_PLAN=null, CNC_PLAN_IMG=null, CNC_PLAN_PIXELS=null, CNC_PLAN_MASK=null, CNC_PLAN_SELECTION=null, CNC_PLAN_DRAG=null, CNC_PLAN_SOURCE='';
-var CNC_ACTION_LABELS={jog:'Move',probe_bed:'Probe bed',probe_stock:'Probe stock',probe_tool:'Touch off changed bit',lock_probe:'Lock calibration',unlock_probe:'Unlock calibration',recover_probe:'Retract probe',recover_controller:'Enable positioning',restore_xy:'Restore saved X/Y',zero_xy:'Set X/Y zero',zero_z:'Set stock Z zero',start:'Start carve',pause:'Pause',resume:'Resume',stop:'Stop'};
+var CNC_ACTION_LABELS={jog:'Move',probe_bed:'Probe bed',probe_stock:'Probe stock',probe_tool:'Touch off changed bit',lock_probe:'Lock calibration',unlock_probe:'Unlock calibration',recover_probe:'Retract probe',recover_controller:'Enable positioning',restore_xy:'Restore saved X/Y',zero_xy:'Set X/Y zero',zero_z:'Set stock Z zero',start:'Start carve',resume_saved:'Resume saved carve',pause:'Pause',resume:'Resume',stop:'Stop'};
 var CNC_MATS={
  'C752 nickel silver':{feed:250,plunge:80,step:0.08,depth:0.8,rpm:9000},
  'Aluminum / soft metal':{feed:300,plunge:100,step:0.10,depth:1.0,rpm:9000},
@@ -1727,6 +1727,7 @@ function cncRenderPositioning(health,baseBlocked){
   if(!box||!title||!detail||!button)return info;
   if(info.idle){box.dataset.state='ready';title.textContent='Positioning enabled ✓';detail.textContent='GRBL is Idle with commanded feed and spindle at zero. The external router does not need to be installed.';button.textContent='Enabled';button.disabled=true;}
   else if(info.recoverable){box.dataset.state='paused';title.textContent='Positioning paused · '+info.state;detail.textContent='The removed router is not the issue. Enable positioning releases this safe controller pause without moving an axis.';button.textContent='Enable positioning';button.disabled=!!baseBlocked;}
+  else if(health&&!health.connected&&!health.moving&&health.incident){box.dataset.state='paused';title.textContent='Controller stopped · recovery required';detail.textContent='Project can reconnect the stopped controller without moving an axis, then verify Idle and restore the saved coordinate frame.';button.textContent='Enable positioning';button.disabled=CNC_COMMAND_IN_FLIGHT||!CNC.agent;}
   else{box.dataset.state='blocked';title.textContent=health&&health.connected?'Positioning locked · '+info.state:'Positioning unavailable';detail.textContent=health&&health.connected?'Project will not move until GRBL reports Idle with commanded feed and spindle at zero.':'Waiting for the CNC bridge and controller.';button.textContent='Enable positioning';button.disabled=true;}
   return info;
 }
@@ -1768,7 +1769,7 @@ async function loadCnc(){
   var el=document.getElementById('cncJobs'); if(el) el.textContent='Loading…';
   try{ var r=await fetch(api('cnc')+'&cb='+Date.now(),{headers:{'x-app-password':PW}}); var j=await r.json();
     CNC=(j&&j.cnc)||{jobs:[],config:{}}; if(!CNC.jobs) CNC.jobs=[]; if(!CNC.config) CNC.config={};
-    var pt=document.getElementById('cncProbeThickness'); if(pt) pt.value=CNC.config.probeThickness||12.1;
+    var pt=document.getElementById('cncProbeThickness'); if(pt) pt.value='20.0';
     var rw=document.getElementById('cncRW'); if(rw&&CNC.config.reliefWidth) rw.value=CNC.config.reliefWidth;
     var rd=document.getElementById('cncRD'); if(rd&&CNC.config.reliefDepth) rd.value=CNC.config.reliefDepth;
     var dm=document.getElementById('cncDepthModel'); if(dm) dm.value=CNC.config.depthModel||''; cncFillMachine();
@@ -1870,10 +1871,10 @@ function cncRenderAgent(job){
   var storedState=job&&job.agentState||'',baseBlocked=CNC_COMMAND_IN_FLIGHT||!CNC.agent||!h.connected||!!h.moving||['queued','accepted','running','paused'].includes(storedState),controller=cncRenderPositioning(h,baseBlocked),presentation=cncPresentationState(job,h,controller),state=presentation.state,frame=cncStartFrameCheck(h);
   var checks=[['Bridge',!!CNC.agent],['Controller ready',!!controller.idle],['Machine boundaries',!!ws.calibrated],['Start position',!!frame.ok],['Stock fit',!!fit.ok],['X/Y stock zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked]];
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
-  var ready=checks.every(function(c){return c[1];});
-  var start=document.getElementById('cncStartBtn'); if(start) start.disabled=!(ready&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&state!=='running'&&state!=='queued');
+  var ready=checks.every(function(c){return c[1];}),resumePoint=h.resume||{},hasSavedResume=String(resumePoint.state||'')==='interrupted'&&Number(resumePoint.lastCompletedLine)>0;
+  var start=document.getElementById('cncStartBtn'); if(start){start.disabled=!(ready&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&state!=='running'&&state!=='queued');start.textContent=hasSavedResume?'▶ Restart stage from beginning':'▶ Start carve';}
   var pause=document.getElementById('cncPauseBtn'); if(pause) pause.disabled=state!=='running';
-  var resume=document.getElementById('cncResumeBtn'); if(resume) resume.disabled=state!=='paused';
+  var resume=document.getElementById('cncResumeBtn'); if(resume){resume.disabled=state!=='paused'&&!(hasSavedResume&&controller.idle&&!h.moving);resume.textContent=hasSavedResume&&state!=='paused'?'Resume saved carve':'Resume';}
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!['queued','accepted','running','paused'].includes(state);
   var motionBlocked=baseBlocked||!controller.idle;
   document.querySelectorAll('.cncJogBtn').forEach(function(btn){btn.disabled=motionBlocked;});
@@ -2306,11 +2307,12 @@ async function cncStart(button){ var job=cncCurrentJob(); if(!job){ alert('Pick 
   var h=(CNC.agent&&CNC.agent.health)||{}, w=h.workspace||{}, s=h.setup||{};
   if(!CNC.agent||!h.connected||!w.calibrated||!s.xyReady||!s.bedProbeReady||!s.stockProbeReady||!s.probeReady||!s.probeLocked){ alert('Start is locked until Bridge, Controller, Boundaries, X/Y zero, Bed probe, Stock probe, and Probe lock are all green.'); return; }
   var frame=cncStartFrameCheck(h);if(!frame.ok){alert('Start is locked: '+frame.reason);return;}
-  var tools={};try{tools=JSON.parse(job.planTools||'{}');}catch(e){}var stage=job.activeStage||'all',rough=(stage==='rough'||stage==='profile'),tool=rough?tools.roughBit:tools.finishBit,targetRpm=rough?tools.roughRpm:tools.finishRpm,routerNote=targetRpm?('\n\nEXTERNAL ROUTER: Install '+(tool||'the selected bit')+', set the Genmitsu 710W to '+Math.round(targetRpm)+' RPM'+(Math.round(targetRpm)===18000?' (gear 4)':'')+', and switch it ON before confirming. Project cannot start or stop this AC router; switch it OFF after completion or any Stop.') : '';
-  if(!confirm('Start the '+stage+' stage for “'+(job.project||'job')+'”?\n\nStock: '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm\nToolpath: '+fit.f.W.toFixed(1)+' × '+fit.f.H.toFixed(1)+' mm from the locked stock-corner zero'+routerNote+'\n\nConfirm the stock cannot move, the probe plate and clip are removed, the full path is clear, and the e-stop is reachable.')) return;
+  var tools={};try{tools=JSON.parse(job.planTools||'{}');}catch(e){}var stage=job.activeStage||'all',rough=(stage==='rough'||stage==='profile'),tool=rough?tools.roughBit:tools.finishBit,targetRpm=rough?tools.roughRpm:tools.finishRpm,routerNote=targetRpm?('\n\nEXTERNAL ROUTER: Install '+(tool||'the selected bit')+', set the Genmitsu 710W to '+Math.round(targetRpm)+' RPM'+(Math.round(targetRpm)===18000?' (gear 4)':'')+', and switch it ON before confirming. Project cannot start or stop this AC router; switch it OFF after completion or any Stop.') : '',point=h.resume||{},restartNote=String(point.state||'')==='interrupted'?'\n\nRESTART FROM LINE 1: This does not resume the interrupted checkpoint; it replaces that checkpoint with a fresh run.':'';
+  if(!confirm('Start the '+stage+' stage for “'+(job.project||'job')+'”?'+restartNote+'\n\nStock: '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm\nToolpath: '+fit.f.W.toFixed(1)+' × '+fit.f.H.toFixed(1)+' mm from the locked stock-corner zero'+routerNote+'\n\nConfirm the stock cannot move, the probe plate and clip are removed, the full path is clear, and the e-stop is reachable.')) return;
   return cncQueueMachineAction('start',{},button);
 }
 async function cncMachineAction(action,extra,button){ return cncQueueMachineAction(action,extra||{},button); }
+async function cncResume(button){var job=cncCurrentJob(),h=(CNC.agent&&CNC.agent.health)||{},state=String(job&&job.agentState||''),point=h.resume||{};if(state==='paused')return cncMachineAction('resume',{},button);if(String(point.state||'')!=='interrupted'||!(Number(point.lastCompletedLine)>0)){alert('No interrupted carve checkpoint is available.');return;}if(!confirm('Resume the saved carve after line '+Number(point.lastCompletedLine).toLocaleString()+'?\n\nProject will use the saved toolpath and coordinate frame, retract safely from the current position, replay the current raster row, and continue. Keep the external router ON and the path clear.'))return;return cncMachineAction('resume_saved',{confirm:true},button);}
 async function cncRecoverController(button){if(!confirm('Enable manual positioning?\n\nGRBL is paused with commanded feed and spindle already at zero. The external router does not need to be installed. Project will release only a safe Hold:0/Door:0 state, verify Idle, and restore saved origins. No axis moves during this step.'))return;return cncMachineAction('recover_controller',{confirm:true},button);}
 async function cncRestoreSavedXy(button){var h=(CNC.agent&&CNC.agent.health)||{},r=h.xyRecovery||{},p=r.savedWorkPosition||{};if(!r.available){alert('Exact saved X/Y recovery is not available.');return;}if(!confirm('Restore the original stock X/Y after this power cycle?\n\nSaved pre-shutdown work position: X '+Number(p.X).toFixed(3)+' mm, Y '+Number(p.Y).toFixed(3)+' mm.\n\nThis changes only the coordinate frame and does not move an axis. Continue only if the gantry was NOT pushed or moved while controller power was off.'))return;return cncMachineAction('restore_xy',{confirmGantryUnmoved:true},button);}
 async function cncSetXyZero(button){ var job=cncCurrentJob(); if(!job){alert('Pick a job first.');return;} var f=cncFinished(job), footprint=f?(Number(f.W).toFixed(1)+' × '+Number(f.H).toFixed(1)+' mm'):'the generated design'; if(!confirm('RESET X/Y FOR A NEW PROJECT?\n\nThe current point becomes the new FRONT-LEFT carve origin and replaces the durable X/Y saved from the current project. It will remain through controller power cycles until this button is used again.\n\n'+footprint+' will extend X+ right and Y+ back. Existing Z probes will be cleared. Confirm that the full rectangle fits on the stock and avoids clamps.'))return; return cncMachineAction('zero_xy',{confirmNewProject:true},button); }
@@ -2324,8 +2326,8 @@ async function cncJog(axis,dir,button){
   var distance=step*(dir<0?-1:1), feed=axis==='Z'?100:300, st=document.getElementById('cncJogStatus'); if(st)st.textContent='One move requested: '+axis+(distance>0?'+':'−')+Math.abs(distance)+' mm.';
   return cncQueueMachineAction('jog',{axis:axis,distanceMm:distance,feedMmPerMin:feed},button);
 }
-async function cncProbe(kind,button){ var t=cncClamp((document.getElementById('cncProbeThickness')||{}).value||12.1,1,30), label=kind==='bed'?'exposed bed':'top of the wood', su=((CNC.agent||{}).health||{}).setup||{}, replacing=kind==='bed'&&(!!su.probeLocked||!!su.materialReady), action=kind==='bed'?'probe_bed':kind==='tool'?'probe_tool':'probe_stock', explanation=kind==='tool'?'Project will preserve the saved material thickness and X/Y origin, then save the new bit\'s Z automatically.':'Project will search in short no-alarm segments and return to the starting height if it does not find the plate.'; var warning=replacing?'\n\nThis starts a new material measurement and replaces the saved bed/stock profile. X/Y remains unchanged.':''; if(!confirm((kind==='tool'?'Touch off the changed bit on the ':'Probe the ')+label+' with the '+t.toFixed(1)+' mm plate?\nPlace the plate, attach the clip, and keep hands clear.\n\n'+explanation+warning))return; await cncSaveProbeThickness(); return cncMachineAction(action,{confirmReprobe:replacing},button); }
-async function cncSaveProbeThickness(){ var e=document.getElementById('cncProbeThickness'); var t=cncClamp(e&&e.value||12.1,1,30); if(e)e.value=t.toFixed(1); var j=await cncPost({config:{probeThickness:t}}); if(j&&j.cnc)CNC=j.cnc; }
+async function cncProbe(kind,button){ var t=20, label=kind==='bed'?'exposed bed':'top of the wood', su=((CNC.agent||{}).health||{}).setup||{}, replacing=kind==='bed'&&(!!su.probeLocked||!!su.materialReady), action=kind==='bed'?'probe_bed':kind==='tool'?'probe_tool':'probe_stock', explanation=kind==='tool'?'Project will preserve the saved material thickness and X/Y origin, then save the new bit\'s Z automatically.':'Project will search in short no-alarm segments and return to the starting height if it does not find the plate.'; var warning=replacing?'\n\nThis starts a new material measurement and replaces the saved bed/stock profile. X/Y remains unchanged.':''; if(!confirm((kind==='tool'?'Touch off the changed bit on the ':'Probe the ')+label+' with the fixed '+t.toFixed(1)+' mm Genmitsu puck?\nPlace the puck flat on the surface, attach the clip, and keep hands clear.\n\n'+explanation+warning))return; await cncSaveProbeThickness(); return cncMachineAction(action,{confirmReprobe:replacing},button); }
+async function cncSaveProbeThickness(){ var e=document.getElementById('cncProbeThickness'); if(e)e.value='20.0'; var j=await cncPost({config:{probeThickness:20}}); if(j&&j.cnc)CNC=j.cnc; }
 async function cncSaveDepthToken(){ var v=(document.getElementById('cncDepthTok')||{}).value||''; var s=document.getElementById('cncTokState'); if(s) s.textContent='Saving...'; var j=await cncPost({secret:{depthToken:v}}); if(j&&j.cnc){ CNC=j.cnc; var el=document.getElementById('cncDepthTok'); if(el) el.value=''; if(s) s.textContent=CNC.config.hasDepthToken?'✓ token saved':'no token yet'; } else if(s) s.textContent='Error.'; }
 async function cncSaveDepthModel(){ var v=(document.getElementById('cncDepthModel')||{}).value||''; var j=await cncPost({config:{depthModel:v}}); if(j&&j.cnc) CNC=j.cnc; }
 async function saveReliefCfg(){ var w=document.getElementById('cncRW').value, d=document.getElementById('cncRD').value, s=document.getElementById('cncRelStatus'); if(s) s.textContent='Saving…';

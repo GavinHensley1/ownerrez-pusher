@@ -330,6 +330,15 @@ test("recovers an idle stopped Hold state without jog or spindle motion", async 
   await c.close(); await mock.close();
 });
 
+test("never releases a held program when recovery requires the buffered path discarded", async () => {
+  const mock = await makeMock({ startHold: true });
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {} });
+  await assert.rejects(() => c.recoverStoppedController({ allowHeldResume: false }), /refusing to resume axis motion/);
+  assert(!mock.bytes.includes("~".charCodeAt(0)));
+  assert(!mock.bytes.includes(Buffer.from("$J=")));
+  await c.close(); await mock.close();
+});
+
 test("clears a probe-miss alarm without axis or spindle motion", async () => {
   const mock = await makeMock({ startAlarm: true }); let guards = 0;
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });

@@ -29,6 +29,7 @@ const MAX_BODY_BYTES = 900_000;
 // loopback-only Unix socket. Keep ordinary control requests tightly bounded,
 // but allow machine-program endpoints to receive the generated payload.
 const MAX_PROGRAM_BODY_BYTES = 10_000_000;
+const PROBE_PUCK_THICKNESS_MM = 20;
 let controller, lastControllerStatus, lastWorkOffset, incident, moving = false, keepaliveBusy = false;
 let reconnectPromise;
 let nextReconnectAt = 0;
@@ -166,7 +167,12 @@ const persistMaterialProfile = () => {
 const restoreLockedProbe = (status, workOffset) => {
   const raw = readProbeLock(PROBE_STATE_PATH);
   if (!raw) return null;
-  try { return applyProbeLock(setup, raw, status, 0.05, workOffset); }
+  try {
+    if (Math.abs(Number(raw.probeThickness) - PROBE_PUCK_THICKNESS_MM) > 0.05) {
+      throw new Error(`saved probe puck is ${Number(raw.probeThickness).toFixed(1)} mm; this machine requires ${PROBE_PUCK_THICKNESS_MM.toFixed(1)} mm`);
+    }
+    return applyProbeLock(setup, raw, status, 0.05, workOffset);
+  }
   catch (error) {
     setup.probeLocked = false;
     setup.probeLockStatus = `rejected: ${error.message}`;
@@ -449,11 +455,19 @@ const resumeSavedProgram = async (payload) => {
   const result = await startProgram({ jobId: `${saved.jobId}-resume-${completedLine}`, gcode: resumed.gcode, ...saved.context });
   return { ...result, resume: resumed };
 };
-const recoverStoppedController = async (payload) => {
-  if (payload.confirm !== true) throw new Error("Explicit stopped-controller recovery confirmation is required");
-  if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
+const restoreStoppedControllerState = async ({ discardBufferedProgram = false } = {}) => {
   await controller.resetConnection();
-  const result = await controller.recoverStoppedController();
+  if (discardBufferedProgram) {
+    const beforeDiscard = parseStatus(await controller.status({ attempts: 5 }));
+    if (new Set(["Run", "Hold", "Door"]).has(beforeDiscard.state.split(":")[0])) {
+      // Never release a feed hold that belongs to an interrupted program: "~"
+      // would execute already-buffered motion. Abort/reset the planner, reconnect,
+      // and then accept only Idle or a no-motion Alarm unlock.
+      await controller.emergencyStop("DISCARD_BUFFERED_PROGRAM_AFTER_PROJECT_STOP");
+      await controller.resetConnection();
+    }
+  }
+  const result = await controller.recoverStoppedController({ allowHeldResume: !discardBufferedProgram });
   lastControllerStatus = result.after;
   await restoreHardLimitsOnStartup(result.after);
   const workOffset = parseWorkOffset(await controller.query("$#"));
@@ -462,7 +476,24 @@ const recoverStoppedController = async (payload) => {
   restoreLockedProbe(result.after, workOffset);
   rebuildWorkspaceFromSetup();
   incident = undefined;
-  return { ok: true, result, workOffset, setup: { ...setup }, workspace: workspace.snapshot() };
+  return { result, workOffset };
+};
+const stopProgram = async () => {
+  await controller.stopProgramNow();
+  const deadline = Date.now() + 5_000;
+  while (moving && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  if (moving) throw new Error("PROGRAM_STOP_DID_NOT_SETTLE");
+  persistRunProgress({ state: "interrupted", message: "Stopped by Project" });
+  const recovery = await restoreStoppedControllerState({ discardBufferedProgram: true });
+  Object.assign(job, { state: "stopped", message: "Stopped", updatedAt: new Date().toISOString() });
+  recordEvent("program.stopped", { jobId: job.jobId, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine });
+  return { ok: true, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null, recovery };
+};
+const recoverStoppedController = async (payload) => {
+  if (payload.confirm !== true) throw new Error("Explicit stopped-controller recovery confirmation is required");
+  if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
+  const recovered = await restoreStoppedControllerState({ discardBufferedProgram: activeRunCheckpoint?.state === "interrupted" });
+  return { ok: true, ...recovered, setup: { ...setup }, workspace: workspace.snapshot() };
 };
 const bodyJson = async (req, maxBytes = MAX_BODY_BYTES) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > maxBytes) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
 
@@ -492,7 +523,7 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && req.url === "/job/start") return json(res, 200, await startProgram(await bodyJson(req, MAX_PROGRAM_BODY_BYTES)));
     if (req.method === "POST" && req.url === "/job/pause") { controller.pauseProgramNow(); Object.assign(job, { state: "paused", message: "Paused", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
     if (req.method === "POST" && req.url === "/job/resume") { controller.resumeProgramNow(); Object.assign(job, { state: "running", message: "Running", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
-    if (req.method === "POST" && req.url === "/job/stop") { await controller.stopProgramNow(); Object.assign(job, { state: "stopped", message: "Stopped", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
+    if (req.method === "POST" && req.url === "/job/stop") return json(res, 200, await stopProgram());
     if (req.method === "POST" && req.url === "/spindle/test") return json(res, 200, await spindleTest());
     if (req.method === "POST" && req.url === "/spindle/stop") { const lines = await controller.spindleOff(); lastControllerStatus = await readStatus(); return json(res, 200, { lines, status: lastControllerStatus }); }
     if (req.method === "POST" && req.url === "/controller/acknowledge-power-on") {

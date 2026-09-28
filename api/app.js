@@ -2647,7 +2647,7 @@ if(action==="email_recipients"){
         let st={jobs:[],config:{}}; try{ const raw=await redis.get("parkside:cnc"); const o=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); if(o&&typeof o==="object")st=o; }catch(e){}
         if(!Array.isArray(st.jobs))st.jobs=[];
         const jid=String(b.jobId||""); const target=st.jobs.find(function(x){return x&&x.id===jid;});
-        if(target){ target.agentState=state; target.agentMsg=String(b.message||"").slice(0,500); target.agentAt=now; target.agentCommandId=commandId||target.agentCommandId||""; target.agentAction=String(b.action||target.agentAction||"").slice(0,32); target.updatedAt=now; if(state==="running"&&String(b.action)==="start")target.status="Carving"; if(state==="done"&&String(b.action)==="start"){target.status="Done";target.progress=100;} if(state==="stopped")target.status="Relief"; }
+        if(target){ target.agentState=state; target.agentMsg=String(b.message||"").slice(0,500); target.agentAt=now; target.agentCommandId=commandId||target.agentCommandId||""; target.agentAction=String(b.action||target.agentAction||"").slice(0,32); target.updatedAt=now; if(state==="running"&&["start","resume_saved"].includes(String(b.action)))target.status="Carving"; if(state==="done"&&["start","resume_saved"].includes(String(b.action))){target.status="Done";target.progress=100;} if(state==="stopped")target.status="Relief"; }
         try{await redis.set("parkside:cnc",JSON.stringify(st));}catch(e){return res.status(500).json({error:"db error"});}
         return res.status(200).json({ok:true});
       }
@@ -2672,6 +2672,10 @@ if(action==="email_recipients"){
       if(!st||typeof st!=="object") st={jobs:[],config:{}};
       if(!Array.isArray(st.jobs)) st.jobs=[];
       if(!st.config||typeof st.config!=="object") st.config={};
+      // This 4040-PRO uses the fixed 20 mm Genmitsu Z-probe puck. Treating it
+      // as the old generic 12.1 mm plate raises stock zero by 7.9 mm and causes
+      // shallow relief programs to air-cut.
+      st.config.probeThickness=20;
       let cncAgent=null; try{ if(redis){ const raw=await redis.get("parkside:cnc:agent"); cncAgent=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); } }catch(e){}
       st.agent=cncAgent||null;
       const now=new Date().toISOString();
@@ -2695,7 +2699,7 @@ if(action==="email_recipients"){
           const c=b.config;
           if(c.reliefWidth!==undefined) st.config.reliefWidth=Math.max(20,Math.min(600,Number(c.reliefWidth)||100));
           if(c.reliefDepth!==undefined) st.config.reliefDepth=Math.max(0.1,Math.min(10,Number(c.reliefDepth)||1.5));
-          if(c.probeThickness!==undefined) st.config.probeThickness=Math.max(1,Math.min(30,Number(c.probeThickness)||12.1));
+          if(c.probeThickness!==undefined) st.config.probeThickness=20;
           if(c.depthModel!==undefined) st.config.depthModel=String(c.depthModel||"").slice(0,120);
           if(c.machX!==undefined) st.config.machX=Math.max(50,Math.min(2000,Number(c.machX)||400));
           if(c.machY!==undefined) st.config.machY=Math.max(50,Math.min(2000,Number(c.machY)||400));
@@ -2811,9 +2815,9 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","probe_bed","probe_stock","probe_tool","lock_probe","unlock_probe","recover_probe","recover_controller","restore_xy","zero_xy","zero_z","start","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["jog","probe_bed","probe_stock","probe_tool","lock_probe","unlock_probe","recover_probe","recover_controller","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
-              if(!st.agent||!health.connected) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
+              if(!st.agent||(act!=="recover_controller"&&!health.connected)) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
               if(act==="probe_bed"&&job.stageRequiresProbe&&setup.materialReady) return res.status(409).json({error:"This stage changed bits. Use Changed bit · Touch off on stock; do not re-probe the bed or reset X/Y.",cnc:st});
               if(act==="probe_stock"&&!setup.bedProbeReady) return res.status(409).json({error:"Probe the exposed bed before probing the stock",cnc:st});
@@ -2837,6 +2841,11 @@ if(action==="email_recipients"){
                 if(!(stockWidthMm>0&&stockHeightMm>0)) return res.status(409).json({error:"Enter the actual stock X/Y dimensions before Start",cnc:st});
                 if(designWidthMm>stockWidthMm-stockReserveMm+0.001||designHeightMm>stockHeightMm-stockReserveMm+0.001) return res.status(409).json({error:"The complete toolpath does not fit inside the entered stock dimensions",cnc:st});
               }
+              if(act==="resume_saved"){
+                if(b.confirm!==true) return res.status(400).json({error:"Explicit saved-carve resume confirmation is required",cnc:st});
+                if(!health.resume||String(health.resume.state)!=="interrupted") return res.status(409).json({error:"No interrupted carve checkpoint is available",cnc:st});
+                if(!health.connected||health.moving) return res.status(409).json({error:"Controller must be connected and stationary before saved-carve resume",cnc:st});
+              }
               let prior=null; try{const raw=await redis.get("parkside:cnc:command"); prior=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null);}catch(e){}
               const runControls=["pause","resume","stop"];
               if(prior&&runControls.indexOf(act)===-1) return res.status(409).json({error:(String(prior.action||"CNC command").replace(/_/g," ")+" is already queued. Wait for its completion; do not press again."),pending:{id:String(prior.id||""),action:String(prior.action||""),createdAt:String(prior.createdAt||"")},cnc:st});
@@ -2846,7 +2855,7 @@ if(action==="email_recipients"){
               if(act==="stop"&&["running","paused","queued","accepted"].indexOf(liveRunState)===-1) return res.status(409).json({error:"Stop requires an active carve",cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
               if(act==="probe_bed"||act==="probe_stock"||act==="probe_tool"){
-                cmd.probeThickness=Math.max(1,Math.min(30,Number(st.config.probeThickness)||12.1));
+                cmd.probeThickness=20;
                 cmd.maxSearchMm=Math.max(5,Math.min(73,(Number(st.config.machZ)||78)-5));
               }
               if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
@@ -2854,6 +2863,7 @@ if(action==="email_recipients"){
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="zero_z")cmd.confirm=b.confirm===true;
               if(act==="recover_controller")cmd.confirm=b.confirm===true;
+              if(act==="resume_saved")cmd.confirm=b.confirm===true;
               if(act==="restore_xy"){
                 if(!health.xyRecovery||health.xyRecovery.available!==true) return res.status(409).json({error:"Exact saved X/Y recovery is not available in the current controller state",cnc:st});
                 if(b.confirmGantryUnmoved!==true) return res.status(400).json({error:"Confirm the gantry was not moved while controller power was off",cnc:st});

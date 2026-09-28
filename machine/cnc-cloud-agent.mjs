@@ -41,7 +41,7 @@ function localRequest(path, body = {}) {
         resolve(parsed);
       });
     });
-    req.setTimeout(path === "/job/start" ? 12 * 60 * 60 * 1000 : 30_000, () => req.destroy(new Error("Local CNC request timeout")));
+    req.setTimeout(new Set(["/job/start", "/job/resume-saved"]).has(path) ? 12 * 60 * 60 * 1000 : 30_000, () => req.destroy(new Error("Local CNC request timeout")));
     req.on("error", reject);
     if (!isHealth) req.write(data);
     req.end();
@@ -86,6 +86,7 @@ async function heartbeat() {
     setup: health?.setup || null,
     xyRecovery: health?.xyRecovery || null,
     job: projectJob,
+    resume: health?.resume || null,
   };
   await cloud("POST", { type: "heartbeat", at: new Date().toISOString(), health: projectHealth });
   return health;
@@ -96,11 +97,12 @@ async function report(command, state, message, extra = {}) {
 }
 
 async function execute(command) {
-  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", probe_tool: "/probe/tool", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
+  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", probe_tool: "/probe/tool", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", resume_saved: "/job/resume-saved", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
   const axis = String(command.axis || "").toUpperCase();
   const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);
-  if (command.action === "start" && activeStart) return report(command, "error", "A carve is already running");
+  const programAction = new Set(["start", "resume_saved"]).has(command.action);
+  if (programAction && activeStart) return report(command, "error", "A carve is already running");
   const claim = claimCommand(COMMAND_LEDGER_PATH, command);
   if (!claim.claimed) {
     if (claim.terminal) return report(command, claim.entry.status, claim.entry.message || `${command.action} already completed`, { terminal: true });
@@ -108,7 +110,7 @@ async function execute(command) {
     const uncertain = completeCommand(COMMAND_LEDGER_PATH, command.id, "uncertain", message);
     return report(command, uncertain.status, uncertain.message, { terminal: true });
   }
-  await report(command, command.action === "start" ? "running" : "accepted", `${command.action} accepted`);
+  await report(command, programAction ? "running" : "accepted", `${command.action} accepted`);
   const task = (async () => {
     try {
       let result;
@@ -123,13 +125,13 @@ async function execute(command) {
         const payload = new Set(["probe_bed", "probe_stock", "probe_tool"]).has(command.action) ? { thicknessMm: command.probeThickness, maxSearchMm: command.maxSearchMm, confirmReprobe: command.confirmReprobe === true }
           : command.action === "restore_xy" ? { confirmGantryUnmoved: command.confirmGantryUnmoved === true }
           : command.action === "zero_xy" ? { confirmNewProject: command.confirmNewProject === true }
-          : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller") ? { confirm: command.confirm === true }
+          : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller" || command.action === "resume_saved") ? { confirm: command.confirm === true }
           : command.action === "start" ? { jobId: command.jobId, gcode: decodeProgram(command), stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm, stockReserveMm: command.stockReserveMm, manualRouter: command.manualRouter === true } : {};
         result = await localRequest(path, payload);
       }
-      const finalState = command.action === "start" ? "done" : command.action === "pause" ? "paused" : command.action === "resume" ? "running" : command.action === "stop" ? "stopped" : "ready";
+      const finalState = programAction ? "done" : command.action === "pause" ? "paused" : command.action === "resume" ? "running" : command.action === "stop" ? "stopped" : "ready";
       const ledgerState = new Set(["done", "stopped", "ready"]).has(finalState) ? finalState : "ready";
-      const message = command.action === "start" ? "Carve complete" : `${command.action} complete`;
+      const message = programAction ? "Carve complete" : `${command.action} complete`;
       completeCommand(COMMAND_LEDGER_PATH, command.id, ledgerState, message);
       await report(command, finalState, message, { terminal: true, result: { setup: result.setup, job: result.job } });
       try { await heartbeat(); }
@@ -140,7 +142,7 @@ async function execute(command) {
       await report(command, "error", error.message, { terminal: true });
     }
   })();
-  if (command.action === "start") { activeStart = task; task.finally(() => { activeStart = undefined; }); }
+  if (programAction) { activeStart = task; task.finally(() => { activeStart = undefined; }); }
   else await task;
 }
 
