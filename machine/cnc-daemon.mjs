@@ -85,6 +85,14 @@ controller.on("programProgress", (value) => {
   Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() });
   persistRunProgress({ state: "running", lastCompletedLine: value.line, totalLines: value.total, message: job.message });
 });
+controller.on("programTransportRefreshed", (value) => {
+  recordEvent("controller.transport-refreshed", {
+    line: value.line,
+    total: value.total,
+    before: value.before,
+    after: value.after,
+  });
+});
 controller.on("probeProgress", (value) => {
   Object.assign(setup, {
     probePhase: String(value?.phase || "idle"),

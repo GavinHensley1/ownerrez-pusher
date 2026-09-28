@@ -53,10 +53,10 @@ export function probeRetractTimeoutMs(distanceMm, feedMmPerMin) {
 }
 
 export class GrblTcpController extends EventEmitter {
-  constructor({ host, port = 10086, connectTimeoutMs = 5000, statusTimeoutMs = 800, commandTimeoutMs = 4000, motionGuard, workspaceGuard, programGuard, maxJogMm = 25, maxJogFeed = 500, maxSessionTravelMm = 2000, maxSpindleTestRpm = 2000, maxSpindleTestMs = 5000 } = {}) {
+  constructor({ host, port = 10086, connectTimeoutMs = 5000, statusTimeoutMs = 800, commandTimeoutMs = 4000, motionGuard, workspaceGuard, programGuard, maxJogMm = 25, maxJogFeed = 500, maxSessionTravelMm = 2000, maxSpindleTestRpm = 2000, maxSpindleTestMs = 5000, maxProgramSocketLines = 20_000 } = {}) {
     super();
     if (!host) throw new Error("CNC host is required");
-    Object.assign(this, { host, port, connectTimeoutMs, statusTimeoutMs, commandTimeoutMs, motionGuard, workspaceGuard, programGuard, maxJogMm, maxJogFeed, maxSessionTravelMm, maxSpindleTestRpm, maxSpindleTestMs });
+    Object.assign(this, { host, port, connectTimeoutMs, statusTimeoutMs, commandTimeoutMs, motionGuard, workspaceGuard, programGuard, maxJogMm, maxJogFeed, maxSessionTravelMm, maxSpindleTestRpm, maxSpindleTestMs, maxProgramSocketLines });
     this.sessionTravelMm = 0;
     this.socket = undefined;
     this.socketGeneration = 0;
@@ -556,6 +556,7 @@ export class GrblTcpController extends EventEmitter {
       }, 250);
       monitor.unref?.();
       try {
+        let lastSocketRefreshLine = 0;
         for (let index = 0; index < analysis.lines.length; index += 1) {
           if (guardError) throw this.fault || guardError;
           if (this.abortRequested) throw new Error("PROGRAM_ABORTED");
@@ -570,6 +571,12 @@ export class GrblTcpController extends EventEmitter {
           const progress = Math.round(((index + 1) / analysis.lines.length) * 1000) / 10;
           this.emit("programProgress", { progress, line: index + 1, total: analysis.lines.length });
           if (typeof onProgress === "function" && (index === analysis.lines.length - 1 || index % 20 === 0)) await onProgress({ progress, line: index + 1, total: analysis.lines.length });
+          const safeRetract = /^G0*0\b/.test(analysis.lines[index]) && Number(analysis.lines[index].match(/\bZ([-+]?(?:\d+(?:\.\d*)?|\.\d+))\b/)?.[1]) >= 0;
+          if (Number.isInteger(this.maxProgramSocketLines) && this.maxProgramSocketLines > 0 && index + 1 - lastSocketRefreshLine >= this.maxProgramSocketLines && safeRetract) {
+            const refreshed = await this.#refreshProgramSocketUnlocked();
+            lastSocketRefreshLine = index + 1;
+            this.emit("programTransportRefreshed", { line: index + 1, total: analysis.lines.length, ...refreshed });
+          }
         }
         const deadline = now() + 60_000;
         let after;
@@ -713,6 +720,48 @@ export class GrblTcpController extends EventEmitter {
     if (this.statusWaiter?.generation === generation) this.statusWaiter = undefined;
     this.#latchFault(new Error(`No GRBL status after ${attempts} same-socket attempts`), true);
     throw this.fault;
+  }
+
+  async #refreshProgramSocketUnlocked({ timeoutMs = 60_000 } = {}) {
+    const deadline = now() + timeoutMs;
+    let before;
+    while (now() < deadline) {
+      if (this.abortRequested) throw new Error("PROGRAM_ABORTED");
+      if (this.pauseRequested) { await sleep(200); continue; }
+      before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      const state = before.state.split(":")[0];
+      if (state === "Idle") break;
+      if (!new Set(["Run", "Hold", "Door"]).has(state)) throw new Error(`Unexpected state before transport refresh: ${before.raw}`);
+      await sleep(200);
+    }
+    if (!before || before.state !== "Idle") throw new Error("PROGRAM_TRANSPORT_REFRESH_IDLE_TIMEOUT");
+    const [feed, spindle] = feedAndSpindle(before);
+    if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero controller feed/spindle before transport refresh: ${before.FS}`);
+    const beforePosition = coordinates(before);
+
+    const socket = this.socket;
+    ++this.socketGeneration;
+    this.connectionState = "closing";
+    this.socket = undefined;
+    this.connectPromise = undefined;
+    this.buffer = "";
+    this.#rejectWaiters(new Error("Refreshing CNC program transport"));
+    if (socket && !socket.destroyed) socket.destroy();
+    this.connectionState = "disconnected";
+    this.fault = undefined;
+    await sleep(250);
+
+    await this.connect();
+    const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+    if (after.state !== "Idle") throw new Error(`Controller must remain Idle after transport refresh, got ${after.state}`);
+    const [afterFeed, afterSpindle] = feedAndSpindle(after);
+    if (afterFeed !== 0 || afterSpindle !== 0) throw new Error(`Non-zero controller feed/spindle after transport refresh: ${after.FS}`);
+    const afterPosition = coordinates(after);
+    for (const axis of ["X", "Y", "Z"]) {
+      if (Math.abs(afterPosition[axis] - beforePosition[axis]) > 0.05) throw new Error(`Controller ${axis} moved during transport refresh`);
+    }
+    for (const modal of ["G21", "G90", "G17"]) await this.#lineCommandUnlocked(modal, true, { timeoutMs: 15_000 });
+    return { before: before.raw, after: after.raw };
   }
 
   async #lineCommandUnlocked(command, motion, { timeoutMs = this.commandTimeoutMs } = {}) {

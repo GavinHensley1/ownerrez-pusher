@@ -321,6 +321,28 @@ test("manual-router program streams without controller spindle commands only whe
   await c.close(); await mock.close();
 });
 
+test("long programs refresh the Wi-Fi transport only at a safe Idle retract boundary", async () => {
+  const mock = await makeMock();
+  const c = new GrblTcpController({
+    host: "127.0.0.1",
+    port: mock.port,
+    statusTimeoutMs: 25,
+    motionGuard: async () => {},
+    programGuard: async () => {},
+    maxProgramSocketLines: 4,
+  });
+  const refreshes = [];
+  c.on("programTransportRefreshed", (value) => refreshes.push(value));
+  const source = "G21\nG90\nG17\nG0 Z2\nG0 X1 Y1\nG1 Z-1 F60\nG1 X2 F100\nG0 Z2\nG0 X3 Y3\nG1 Z-1 F60\nG1 X4 F100\nG0 Z2\nM2";
+  const result = await c.runProgram(source, { programContext: { manualRouter: true } });
+  assert.equal(result.after.state, "Idle");
+  assert.equal(refreshes.length, 3);
+  assert.deepEqual(refreshes.map((value) => value.line), [4, 8, 12]);
+  assert.equal(mock.connections, 4);
+  assert(mock.bytes.includes(Buffer.from("G21\rG90\rG17\r")));
+  await c.close(); await mock.close();
+});
+
 test("recovers an idle stopped Hold state without jog or spindle motion", async () => {
   const mock = await makeMock({ startHold: true }); let guards = 0;
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
