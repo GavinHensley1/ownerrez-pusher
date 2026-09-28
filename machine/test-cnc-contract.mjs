@@ -213,6 +213,8 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /restore_xy: "\/zero\/xy\/restore-after-power-cycle"/);
   assert.match(agent, /confirmReprobe: command\.confirmReprobe === true/);
   assert.match(agent, /confirmNewProject: command\.confirmNewProject === true/);
+  assert.match(agent, /CNC_AGENT_PROBE_TIMEOUT_MS \|\| 180_000/);
+  assert.match(agent, /"\/probe\/bed", "\/probe\/stock", "\/probe\/tool", "\/probe\/recover"/);
   assert.ok(agent.includes('const isHealth = path === "/health"'));
   assert.match(agent, /headers: isHealth \? \{\} :/);
   assert.match(agent, /if \(!isHealth\) req\.write\(data\)/);

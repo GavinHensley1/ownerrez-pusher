@@ -13,6 +13,7 @@ const ACTIVE_POLL_MS = Number(process.env.CNC_AGENT_ACTIVE_POLL_MS || 1000);
 const IDLE_POLL_MS = Number(process.env.CNC_AGENT_IDLE_POLL_MS || 1500);
 const ACTIVE_HEARTBEAT_MS = Number(process.env.CNC_AGENT_ACTIVE_HEARTBEAT_MS || 5000);
 const IDLE_HEARTBEAT_MS = Number(process.env.CNC_AGENT_IDLE_HEARTBEAT_MS || 60000);
+const PROBE_LOCAL_TIMEOUT_MS = Number(process.env.CNC_AGENT_PROBE_TIMEOUT_MS || 180_000);
 const KEYCHAIN_SERVICE = process.env.CNC_AGENT_KEYCHAIN_SERVICE || "openclaw-cnc-agent";
 const COMMAND_LEDGER_PATH = process.env.CNC_COMMAND_LEDGER || join(homedir(), ".openclaw", "state", "cnc-command-ledger.json");
 const token = process.env.CNC_AGENT_TOKEN || execFileSync("/usr/bin/security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
@@ -43,7 +44,12 @@ function localRequest(path, body = {}) {
         resolve(parsed);
       });
     });
-    req.setTimeout(new Set(["/job/start", "/job/resume-saved"]).has(path) ? 12 * 60 * 60 * 1000 : 30_000, () => req.destroy(new Error("Local CNC request timeout")));
+    const timeoutMs = new Set(["/job/start", "/job/resume-saved"]).has(path)
+      ? 12 * 60 * 60 * 1000
+      : new Set(["/probe/bed", "/probe/stock", "/probe/tool", "/probe/recover"]).has(path)
+        ? PROBE_LOCAL_TIMEOUT_MS
+        : 30_000;
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Local CNC request timeout after ${timeoutMs} ms`)));
     req.on("error", reject);
     if (!isHealth) req.write(data);
     req.end();
