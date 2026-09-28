@@ -32,6 +32,25 @@ test("buffered stop rewinds to the current row after stopping mid-motion", () =>
   assert.match(resumed.gcode, /G21\nG90\nG17\nG0 Z3\.6\nG0 X10 Y10/);
 });
 
+test("buffered stop accepts a controller position one line ahead of the durable checkpoint", () => {
+  const oneBufferedLineAhead = { X: 0, Y: 10, Z: 0 };
+  const resumed = buildBufferedStopResume(PROGRAM, 7, oneBufferedLineAhead, { spindleMode: "manual" });
+  assert.equal(resumed.acknowledgedLine, 7);
+  assert.equal(resumed.interruptedLine, 8);
+  assert.equal(resumed.acknowledgedDeltaLines, 1);
+  assert.equal(resumed.resumeAtLine, 4);
+  assert.equal(resumed.replayedLines, 4);
+  assert.equal(resumed.positionErrorMm, 0);
+});
+
+test("buffered stop rejects a controller position beyond the bounded forward window", () => {
+  const longerProgram = ["G21", "G90", "G17", "G0 Z3.6", ...Array.from({ length: 24 }, (_, index) => `G1 X${index + 1} Z-1`), "G0 Z3.6", "M2"].join("\n");
+  assert.throws(
+    () => buildBufferedStopResume(longerProgram, 5, { X: 22, Y: 0, Z: -1 }, { spindleMode: "manual", forwardSearchWindow: 4 }),
+    /guarded checkpoint window/,
+  );
+});
+
 test("buffered stop recovers the interrupted row after Z was safely retracted", () => {
   const stoppedAndRetracted = { X: 7.5, Y: 10, Z: 20 };
   const resumed = buildBufferedStopResume(PROGRAM, 8, stoppedAndRetracted, { spindleMode: "manual" });

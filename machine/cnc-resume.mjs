@@ -87,7 +87,7 @@ const distanceToXySegment = (point, start, end) => {
   return { distance: Math.hypot(point.X - nearest.X, point.Y - nearest.Y), progress };
 };
 
-export function buildBufferedStopResume(source, acknowledgedLine, currentPosition, { spindleMode = "controller", toleranceMm = 0.05, searchWindow = 128 } = {}) {
+export function buildBufferedStopResume(source, acknowledgedLine, currentPosition, { spindleMode = "controller", toleranceMm = 0.05, searchWindow = 128, forwardSearchWindow = 16 } = {}) {
   if (spindleMode !== "manual") throw new Error("Automatic resume is currently limited to manual-router stages");
   const analysis = analyzeProgram(source, { spindleMode });
   const acknowledged = Number(acknowledgedLine);
@@ -97,7 +97,13 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
   const segments = [];
   let position = { X: 0, Y: 0, Z: 0 };
   const firstCandidate = Math.max(0, acknowledged - searchWindow);
-  for (let index = 0; index < acknowledged; index += 1) {
+  // GRBL may physically finish a few commands that were already buffered after
+  // the last progress checkpoint reached durable storage. Search a small,
+  // explicit window beyond the acknowledged line as well as the historical
+  // window behind it. The physical controller position still has to land on an
+  // exact program segment within tolerance before any resume program is built.
+  const lastCandidate = Math.min(analysis.lines.length, acknowledged + forwardSearchWindow);
+  for (let index = 0; index < lastCandidate; index += 1) {
     const command = analysis.lines[index];
     const next = positionAfter(position, command);
     if (index >= firstCandidate && /^G0*[01]\b/.test(command)) {
@@ -111,7 +117,7 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
   let matchMode = "xyz";
   if (!segments.length && currentPosition.Z >= analysis.bounds.Z.max - toleranceMm) {
     position = { X: 0, Y: 0, Z: 0 };
-    for (let index = 0; index < acknowledged; index += 1) {
+    for (let index = 0; index < lastCandidate; index += 1) {
       const command = analysis.lines[index];
       const next = positionAfter(position, command);
       if (index >= firstCandidate && /^G0*1\b/.test(command)) {
@@ -124,8 +130,8 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
     }
     if (segments.length) matchMode = "xy-retracted";
   }
-  if (!segments.length) throw new Error(`Stopped position does not match any of the last ${Math.min(searchWindow, acknowledged)} acknowledged motion lines`);
-  segments.sort((a, b) => a.distance - b.distance || a.index - b.index);
+  if (!segments.length) throw new Error(`Stopped position does not match the guarded checkpoint window (${Math.min(searchWindow, acknowledged)} lines behind, ${Math.min(forwardSearchWindow, analysis.lines.length - acknowledged)} ahead)`);
+  segments.sort((a, b) => a.distance - b.distance || Math.abs(a.index - acknowledged) - Math.abs(b.index - acknowledged) || b.index - a.index);
   const interrupted = segments[0];
 
   let rewindIndex = -1;
@@ -150,6 +156,7 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
   return {
     gcode,
     acknowledgedLine: acknowledged,
+    acknowledgedDeltaLines: interrupted.index + 1 - acknowledged,
     interruptedLine: interrupted.index + 1,
     interruptedCommand: interrupted.command,
     segmentProgress: interrupted.progress,
