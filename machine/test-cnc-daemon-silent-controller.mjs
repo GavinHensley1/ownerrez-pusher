@@ -7,7 +7,11 @@ import os from "node:os";
 import path from "node:path";
 
 const socketPath = path.join(os.tmpdir(), `cnc-daemon-silent-${process.pid}.sock`);
-const silent = net.createServer(() => {});
+const silentSockets = new Set();
+const silent = net.createServer((socket) => {
+  silentSockets.add(socket);
+  socket.once("close", () => silentSockets.delete(socket));
+});
 await new Promise((resolve) => silent.listen(0, "127.0.0.1", resolve));
 
 const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.url).pathname], {
@@ -58,5 +62,6 @@ try {
     child.kill("SIGTERM");
     await exited;
   }
+  for (const socket of silentSockets) socket.destroy();
   await new Promise((resolve) => silent.close(resolve));
 }

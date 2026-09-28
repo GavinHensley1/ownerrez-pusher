@@ -9,6 +9,7 @@ const agent = readFileSync(new URL("machine/cnc-cloud-agent.mjs", root), "utf8")
 const codec = readFileSync(new URL("machine/cnc-program-codec.mjs", root), "utf8");
 const daemon = readFileSync(new URL("machine/cnc-daemon.mjs", root), "utf8");
 const controller = readFileSync(new URL("machine/cnc-controller.mjs", root), "utf8");
+const program = readFileSync(new URL("machine/cnc-program.mjs", root), "utf8");
 
 test("CNC page script parses and exposes guarded positioning, automatic material save, and tool touch-off", () => {
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
@@ -230,6 +231,9 @@ test("high-resolution G-code gets a program-only transport allowance", () => {
   assert.match(daemon, /req\.url === "\/job\/import"[\s\S]*bodyJson\(req, MAX_PROGRAM_BODY_BYTES\)/);
   assert.match(daemon, /req\.url === "\/job\/start"[\s\S]*bodyJson\(req, MAX_PROGRAM_BODY_BYTES\)/);
   assert.match(daemon, /req\.url === "\/query"[\s\S]*bodyJson\(req\)/);
+  assert.match(program, /maxBytes = 10_000_000/);
+  assert.match(program, /maxLines = 750_000/);
+  assert.match(html, /budget:\(stage==='finish'\?700000:/);
 });
 
 test("local Project recovery UI can restore stopped controller state without cloud storage", () => {

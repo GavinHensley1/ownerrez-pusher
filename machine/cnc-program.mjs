@@ -20,7 +20,10 @@ export function limitVerticalPlungeFeed(source, maxFeedMmMin = 60) {
   }).join("\n");
 }
 
-export function analyzeProgram(source, { maxBytes = 800_000, maxLines = 120_000, maxSpindleRpm = 9_000, spindleMode = "controller" } = {}) {
+// The generated Finish stage intentionally uses hundreds of thousands of
+// short, bounded moves to preserve relief detail. Transport and parsing remain
+// byte/line bounded, but the defaults must cover the generator's 700k budget.
+export function analyzeProgram(source, { maxBytes = 10_000_000, maxLines = 750_000, maxSpindleRpm = 9_000, spindleMode = "controller" } = {}) {
   const text = String(source || "");
   if (!text.trim()) throw new Error("G-code is empty");
   if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error(`G-code exceeds ${maxBytes} bytes`);
