@@ -223,6 +223,15 @@ test("CNC agent acknowledges controls quickly and accepted programs persist loca
   assert.doesNotMatch(html, /setInterval\(function\(\)\{ var m=document\.getElementById\('cncMain'\)/);
 });
 
+test("high-resolution G-code gets a program-only transport allowance", () => {
+  assert.match(daemon, /const MAX_BODY_BYTES = 900_000/);
+  assert.match(daemon, /const MAX_PROGRAM_BODY_BYTES = 10_000_000/);
+  assert.match(daemon, /bodyJson = async \(req, maxBytes = MAX_BODY_BYTES\)/);
+  assert.match(daemon, /req\.url === "\/job\/import"[\s\S]*bodyJson\(req, MAX_PROGRAM_BODY_BYTES\)/);
+  assert.match(daemon, /req\.url === "\/job\/start"[\s\S]*bodyJson\(req, MAX_PROGRAM_BODY_BYTES\)/);
+  assert.match(daemon, /req\.url === "\/query"[\s\S]*bodyJson\(req\)/);
+});
+
 test("local Project recovery UI can restore stopped controller state without cloud storage", () => {
   assert.match(daemon, /Project CNC · Local recovery/);
   assert.match(daemon, /\/controller\/recover-stopped/);

@@ -25,6 +25,10 @@ const RUN_STATE_PATH = process.env.CNC_RUN_STATE || join(homedir(), ".openclaw",
 const EVENT_JOURNAL_PATH = process.env.CNC_EVENT_JOURNAL || join(homedir(), ".openclaw", "state", "cnc-events.jsonl");
 const STATUS_TIMEOUT_MS = Number(process.env.CNC_STATUS_TIMEOUT_MS || 1500);
 const MAX_BODY_BYTES = 900_000;
+// High-resolution Finish programs are transported as decoded G-code over the
+// loopback-only Unix socket. Keep ordinary control requests tightly bounded,
+// but allow machine-program endpoints to receive the generated payload.
+const MAX_PROGRAM_BODY_BYTES = 10_000_000;
 let controller, lastControllerStatus, lastWorkOffset, incident, moving = false, keepaliveBusy = false;
 let reconnectPromise;
 let nextReconnectAt = 0;
@@ -460,14 +464,14 @@ const recoverStoppedController = async (payload) => {
   incident = undefined;
   return { ok: true, result, workOffset, setup: { ...setup }, workspace: workspace.snapshot() };
 };
-const bodyJson = async (req) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > MAX_BODY_BYTES) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
+const bodyJson = async (req, maxBytes = MAX_BODY_BYTES) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > maxBytes) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
 
 const localUi = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Project CNC · Local</title><style>body{font:16px system-ui;background:#111827;color:#eef2ff;max-width:820px;margin:30px auto;padding:16px}button{font:inherit;padding:12px 16px;margin:5px;border-radius:8px;border:1px solid #64748b;background:#1e293b;color:white}button.danger{background:#991b1b}pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:8px}</style><h1>Project CNC · Local recovery</h1><p>This console uses Project's local daemon and safety guards without the cloud queue.</p><div><button onclick="recover()">Enable positioning</button><button onclick="start()">Start saved carve</button><button onclick="cmd('/job/pause')">Pause</button><button onclick="cmd('/job/resume')">Resume</button><button class="danger" onclick="cmd('/job/stop')">Stop</button><button onclick="refresh()">Refresh</button></div><pre id="s">Loading…</pre><script>async function req(path,body){let r=await fetch(path,{method:body?'POST':'GET',headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined}),j=await r.json();if(!r.ok)throw Error(j.error||r.status);return j}async function refresh(){try{let h=await req('/health'),p=await req('/job/last');s.textContent=JSON.stringify({controller:h.lastControllerStatus,connected:h.connected,moving:h.moving,incident:h.incident,workspace:h.workspace,setup:h.setup,job:h.job,savedProgram:p.program},null,2)}catch(e){s.textContent='ERROR: '+e.message}}async function cmd(p,b={}){try{await req(p,b);await refresh()}catch(e){alert(e.message);await refresh()}}async function recover(){if(confirm('Enable positioning from a safe Hold:0/Door:0 state? The external router need not be installed and no axis moves during this step.'))await cmd('/controller/recover-stopped',{confirm:true})}async function start(){if(confirm('Start the locally saved carve from line 1 through Project guards?'))await cmd('/job/start-saved',{})}refresh();setInterval(refresh,2000)</script>`;
 const requestHandler = async (req, res) => {
   try {
     if (req.method === "GET" && (req.url === "/" || req.url === "/ui")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); return res.end(localUi); }
     if (req.method === "OPTIONS" && req.url === "/job/import") { const origin=String(req.headers.origin||""); if(origin!=="https://project-jvyw3.vercel.app") return json(res,403,{ok:false,error:"Origin denied"}); res.writeHead(204,{"access-control-allow-origin":origin,"access-control-allow-methods":"POST,OPTIONS","access-control-allow-headers":"content-type","access-control-allow-private-network":"true"}); return res.end(); }
-    if (req.method === "POST" && req.url === "/job/import") { const origin=String(req.headers.origin||""); if(origin!=="https://project-jvyw3.vercel.app") return json(res,403,{ok:false,error:"Origin denied"}); const saved=saveProgram(PROGRAM_STATE_PATH,{version:1,...await bodyJson(req),capturedAt:new Date().toISOString(),state:"imported"}); res.writeHead(200,{"content-type":"application/json","cache-control":"no-store","access-control-allow-origin":origin}); return res.end(JSON.stringify({ok:true,program:{...saved,gcode:undefined}})); }
+    if (req.method === "POST" && req.url === "/job/import") { const origin=String(req.headers.origin||""); if(origin!=="https://project-jvyw3.vercel.app") return json(res,403,{ok:false,error:"Origin denied"}); const saved=saveProgram(PROGRAM_STATE_PATH,{version:1,...await bodyJson(req, MAX_PROGRAM_BODY_BYTES),capturedAt:new Date().toISOString(),state:"imported"}); res.writeHead(200,{"content-type":"application/json","cache-control":"no-store","access-control-allow-origin":origin}); return res.end(JSON.stringify({ok:true,program:{...saved,gcode:undefined}})); }
     if (req.method === "GET" && req.url === "/health") return json(res, 200, await health());
     if (req.method === "GET" && req.url === "/job/last") { const saved = readProgram(PROGRAM_STATE_PATH); return json(res, 200, { ok: true, program: saved ? { ...saved, gcode: undefined } : null }); }
     if (req.method === "POST" && req.url === "/job/start-saved") { const saved=readProgram(PROGRAM_STATE_PATH); if(!saved) throw new Error("No locally saved carve is available"); return json(res,200,await startProgram({jobId:saved.jobId,gcode:saved.gcode,...saved.context})); }
@@ -485,7 +489,7 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && req.url === "/probe/lock") return json(res, 200, await lockProbeCalibration());
     if (req.method === "POST" && req.url === "/probe/unlock") return json(res, 200, await unlockProbeCalibration(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/recover") return json(res, 200, await controller.recoverProbeContact(await bodyJson(req)));
-    if (req.method === "POST" && req.url === "/job/start") return json(res, 200, await startProgram(await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/job/start") return json(res, 200, await startProgram(await bodyJson(req, MAX_PROGRAM_BODY_BYTES)));
     if (req.method === "POST" && req.url === "/job/pause") { controller.pauseProgramNow(); Object.assign(job, { state: "paused", message: "Paused", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
     if (req.method === "POST" && req.url === "/job/resume") { controller.resumeProgramNow(); Object.assign(job, { state: "running", message: "Running", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
     if (req.method === "POST" && req.url === "/job/stop") { await controller.stopProgramNow(); Object.assign(job, { state: "stopped", message: "Stopped", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
