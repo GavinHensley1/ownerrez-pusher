@@ -239,6 +239,8 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /Enable positioning/);
   assert.match(daemon, /\/zero\/xy\/restore-after-power-cycle/);
   assert.match(daemon, /planXyPowerCycleRecovery/);
+  assert.match(daemon, /reconnecting: Boolean\(reconnectPromise\)/);
+  assert.doesNotMatch(daemon, /controller\.connected \? await xyRecoverySnapshot/);
 });
 
 test("daemon persists per-line recovery checkpoints and validates position before resume", () => {
