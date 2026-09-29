@@ -206,7 +206,7 @@ test("raised-metal safety gate rejects surface cutting and below-surface XY rapi
   assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.1000 over 20.000 mm", "G1 Z0.5000 F40", "G1 X21.000 Y1.000 Z-0.1000", "G0 X2.000 Y1.000"].join("\n")), /XY rapid below safe Z/);
 });
 
-test("RU2100 sacrificial profile uses 0.025 mm ramped passes, six tabs, and the exact approved depth", () => {
+test("RU2100 sacrificial profile uses one continuous 0.025 mm-per-lap spiral, six tabs, and the exact approved depth", () => {
   const clampSource = extractNamedFunction(html, "cncClamp");
   const appendSource = extractNamedFunction(html, "cncAppendCutout");
   const checkSource = extractNamedFunction(html, "cncAssertRu2100ProfileSafety");
@@ -214,15 +214,19 @@ test("RU2100 sacrificial profile uses 0.025 mm ramped passes, six tabs, and the 
   const check = new Function(`${checkSource}; return cncAssertRu2100ProfileSafety;`)();
   const g = [];
   append(g, 114, 88, { matThick: 4.014, cutout: "tabs", tabs: 6, tabHeight: 1.5, bitR: 3.175, feed: 400, plunge: 80, safeZ: 3.2, passDepth: 0.025, rampLengthMm: 20, points: [[2,2],[112,2],[112,86],[2,86],[2,2]], noOvercut: true });
-  const text = g.join("\n"), targets = [...text.matchAll(/^; PROFILE RAMP ENTRY previous Z-?[\d.]+ approach Z-?[\d.]+ target Z(-?[\d.]+)/gm)].map((m) => Number(m[1]));
+  const text = g.join("\n"), targets = [...text.matchAll(/^; PROFILE SPIRAL LOOP start Z-?[\d.]+ target Z(-?[\d.]+)/gm)].map((m) => Number(m[1]));
   assert.match(text, /with 6 tabs 1\.5mm through 4\.014mm stock/);
-  assert.match(text, /PROFILE ENTRY POLICY: 20\.0 mm ramp/);
+  assert.match(text, /PROFILE ENTRY POLICY: one continuous contour spiral/);
+  assert.match(text, /PROFILE SPIRAL POLICY: descend no more than 0\.0250 mm per complete contour lap/);
   assert.equal(targets.length, Math.ceil(4.014 / 0.025));
   assert.equal(Math.min(...targets), -4.014);
   for (let i = 1; i < targets.length; i++) assert.ok(Math.abs(targets[i] - targets[i - 1]) <= 0.0251);
   assert.doesNotThrow(() => check(text));
   assert.equal(g[0].startsWith("; --- Profile cut-out"), true);
   assert.equal(g.at(-1), "G0 Z3.20");
+  assert.match(text, /G0 X2\.000 Y2\.000\nG1 Z0\.5000 F80/);
+  assert.doesNotMatch(text, /^G1 Z-/m);
+  assert.equal((text.match(/^G0 Z/mg) || []).length, 1);
 });
 
 test("RU2100 rough safety gate requires the exact chip-load contract and cleared-Z ramps", () => {
