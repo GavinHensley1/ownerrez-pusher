@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeProgram, cleanProgramLine, limitVerticalPlungeFeed, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
+import { analyzeProgram, approvedProgramDepth, cleanProgramLine, limitVerticalPlungeFeed, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 
 const safe = `; sample\nG21\nG90\nG17\nG0 Z2\nM3 S9000\nG0 X0 Y0\nG1 Z-1 F100\nG1 X100 Y80 F200\nG0 Z2\nM5\nM2`;
 
@@ -65,4 +65,12 @@ test("derives a protected no-cut-through depth from two measured surfaces", () =
   assert.deepEqual(measuredStockProtection(10, 22), { stockThicknessMm: 12, safetyFloorMm: 0.8, maxCutDepthMm: 11.2 });
   assert.deepEqual(measuredStockProtection(-30, -10), { stockThicknessMm: 20, safetyFloorMm: 1, maxCutDepthMm: 19 });
   assert.throws(() => measuredStockProtection(10, 10.5), /outside the safe/);
+});
+
+test("permits a bounded sacrificial through-cut only for the profile operation", () => {
+  const setup = { stockThicknessMm: 3.914, maxCutDepthMm: 3.114 };
+  assert.equal(approvedProgramDepth(setup, { operation: "rough", allowSacrificialCutThrough: true, sacrificialBackingConfirmed: true, profileDepthMm: 4.014 }), 3.114);
+  assert.equal(approvedProgramDepth(setup, { operation: "profile", allowSacrificialCutThrough: true, sacrificialBackingConfirmed: true, profileDepthMm: 4.014 }), 4.014);
+  assert.throws(() => approvedProgramDepth(setup, { operation: "profile", allowSacrificialCutThrough: true, profileDepthMm: 4.014 }), /Sacrificial backing confirmation/);
+  assert.throws(() => approvedProgramDepth(setup, { operation: "profile", allowSacrificialCutThrough: true, sacrificialBackingConfirmed: true, profileDepthMm: 4.2 }), /outside the approved/);
 });

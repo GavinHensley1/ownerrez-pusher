@@ -113,6 +113,18 @@ export function validateProgramStockEnvelope(analysis, { widthMm, heightMm, rese
   return true;
 }
 
+export function approvedProgramDepth(setup = {}, context = {}) {
+  const protectedDepth = Number(setup.maxCutDepthMm);
+  if (!(protectedDepth > 0)) throw new Error("Measured stock depth is unavailable");
+  if (context.operation !== "profile" || context.allowSacrificialCutThrough !== true) return protectedDepth;
+  if (context.sacrificialBackingConfirmed !== true) throw new Error("Sacrificial backing confirmation is required for profile cut-through");
+  const stockThickness = Number(setup.stockThicknessMm), targetDepth = Number(context.profileDepthMm);
+  if (!(stockThickness > 0) || !(targetDepth > 0)) throw new Error("Measured stock thickness and profile depth are required");
+  const allowance = targetDepth - stockThickness;
+  if (allowance < -0.001 || allowance > 0.201) throw new Error(`Profile cut-through allowance ${allowance.toFixed(3)} mm is outside the approved 0-0.200 mm range`);
+  return targetDepth;
+}
+
 export function measuredStockProtection(bedSurfaceMPos, stockSurfaceMPos) {
   const bed = Number(bedSurfaceMPos), stock = Number(stockSurfaceMPos), thickness = stock - bed;
   if (!Number.isFinite(thickness) || thickness < 1 || thickness > 70) throw new Error(`Measured stock thickness ${Number.isFinite(thickness) ? thickness.toFixed(3) : "invalid"} mm is outside the safe 1-70 mm range`);

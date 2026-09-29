@@ -2717,7 +2717,7 @@ if(action==="email_recipients"){
           st.jobs.push(rec);if(st.jobs.length>200)st.jobs=st.jobs.slice(-200);
         } else if(b.updateJob&&typeof b.updateJob==="object"){
           const u=b.updateJob; const id=String(u.id||"");
-          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","metalMode","depthApprovalStatus","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","originOffsetXMm","originOffsetYMm","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight","xyOriginXMPos","xyOriginYMPos","xyLockedAt","stockThicknessMm","maxCutDepthMm","probeLockedAt"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); if(u.invalidatePlan===true){x.planStatus="draft";x.hasGcode=false;delete x.planHash;delete x.gcodeStages;delete x.activeStage;} x.updatedAt=now; } return x; });
+          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","metalMode","depthApprovalStatus","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","originOffsetXMm","originOffsetYMm","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight","xyOriginXMPos","xyOriginYMPos","xyLockedAt","stockThicknessMm","maxCutDepthMm","probeLockedAt","profileMode","profileDepthMm","profilePassDepthMm","sacrificialBackingConfirmed"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); if(u.invalidatePlan===true){x.planStatus="draft";x.hasGcode=false;delete x.planHash;delete x.gcodeStages;delete x.activeStage;} x.updatedAt=now; } return x; });
           if(u.invalidatePlan===true) try{if(redis){await redis.del("parkside:cnc:plan:"+id);await redis.del("parkside:cnc:gc:"+id);for(const stage of ["rough","finish","detail","profile","all"])await redis.del("parkside:cnc:gc:"+id+":"+stage);}}catch(e){}
         } else if(b.delJob){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
@@ -2895,7 +2895,11 @@ if(action==="email_recipients"){
                 cmd.maxSearchMm=Math.max(5,Math.min(73,(Number(st.config.machZ)||78)-5));
               }
               if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
-              if(act==="start"){cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;}
+              if(act==="start"){
+                cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;cmd.operation=String(job.activeStage||"");
+                const throughProfile=cmd.operation==="profile"&&job.profileMode==="sacrificial-through"&&job.sacrificialBackingConfirmed==="true";
+                if(throughProfile){const stock=Number(setup.stockThicknessMm),target=Number(job.profileDepthMm),allowance=target-stock;if(!(stock>0&&target>=stock&&allowance>=0&&allowance<=.2001))return res.status(409).json({error:"Approved sacrificial profile depth no longer matches the measured stock",cnc:st});cmd.allowSacrificialCutThrough=true;cmd.sacrificialBackingConfirmed=true;cmd.profileDepthMm=target;}
+              }
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="zero_z")cmd.confirm=b.confirm===true;
               if(act==="recover_controller")cmd.confirm=b.confirm===true;

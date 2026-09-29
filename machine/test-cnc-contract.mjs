@@ -88,7 +88,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /stockToLeaveMm:rough\?\.5:0/);
   assert.match(html, /function cncFinishFidelity/);
   assert.match(html, /function cncAppendDetailContours/);
-  assert.match(html, /Number\(p\.version\)!==4/);
+  assert.match(html, /Number\(p\.version\)!==5/);
   assert.match(html, /Prepare raised-metal copy/);
   assert.match(html, /C752 nickel silver/);
   assert.match(html, /SpeTool W03010 · 1\/8″ single-flute O-flute upcut · 1\/8″ shank/);
@@ -140,8 +140,9 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Red · deepest detail/);
   assert.match(html, /Buckle edge · automatic/);
   assert.match(html, /Profile depth · automatic/);
-  assert.match(html, /Project will not cut into the base/);
-  assert.match(html, /CNC_PLAN\.cutout\.thicknessMm=locked&&safe>0\?safe:0/);
+  assert.match(html, /through-cut into sacrificial backing/);
+  assert.match(html, /profileDepth=through&&locked/);
+  assert.match(html, /profilePassDepthMm=\.12/);
   assert.doesNotMatch(html, /id="cncPlanMask"/);
   assert.doesNotMatch(html, /id="cncPlanCutThick"/);
   assert.match(html, /function cncPreviewStage/);
@@ -194,6 +195,21 @@ test("raised-metal safety gate rejects surface cutting and below-surface XY rapi
   assert.throws(() => check([...contract, "G0 Z3.000", "G0 X1.000 Y1.000", "G1 Z-0.100 F40", "G0 X2.000 Y1.000"].join("\n")), /XY rapid below safe Z/);
 });
 
+test("sacrificial profile uses 0.120 mm passes, six tabs, and the exact approved depth", () => {
+  const clampSource = extractNamedFunction(html, "cncClamp");
+  const appendSource = extractNamedFunction(html, "cncAppendCutout");
+  const append = new Function(`${clampSource};${appendSource}; return cncAppendCutout;`)();
+  const g = [];
+  append(g, 114, 88, { matThick: 4.014, cutout: "tabs", tabs: 6, tabHeight: 1.5, bitR: 1.5875, feed: 180, plunge: 40, safeZ: 3.2, passDepth: 0.12, points: [[2,2],[112,2],[112,86],[2,86],[2,2]], noOvercut: true });
+  const text = g.join("\n"), plunges = [...text.matchAll(/^G1 Z(-?[\d.]+)/gm)].map((m) => Number(m[1]));
+  assert.match(text, /with 6 tabs 1\.5mm through 4\.014mm stock/);
+  assert.equal(plunges.length, Math.ceil(4.014 / 0.12));
+  assert.equal(Math.min(...plunges), -4.014);
+  for (let i = 1; i < plunges.length; i++) assert.ok(Math.abs(plunges[i] - plunges[i - 1]) <= 0.121);
+  assert.equal(g[0].startsWith("; --- Profile cut-out"), true);
+  assert.equal(g.at(-1), "G0 Z3.20");
+});
+
 test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /action==="cnc_agent"/);
   assert.match(api, /process\.env\.CNC_AGENT_TOKEN/);
@@ -211,6 +227,8 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /@gzip:/);
   assert.match(api, /command\.gcodeGzip/);
   assert.match(api, /cmd\.manualRouter=job\.planStatus==="approved"/);
+  assert.match(api, /allowSacrificialCutThrough/);
+  assert.match(api, /sacrificialBackingConfirmed/);
   assert.match(api, /requestedStage/);
   assert.match(api, /Explicit confirmation is required to replace the locked Z calibration/);
   assert.match(api, /cmd\.confirmReprobe=b\.confirmReprobe===true/);
@@ -251,6 +269,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /completedSegments/);
   assert.match(agent, /stockWidthMm/);
   assert.match(agent, /manualRouter: command\.manualRouter === true/);
+  assert.match(agent, /profileDepthMm: command\.profileDepthMm/);
   assert.match(agent, /from "\.\/cnc-program-codec\.mjs"/);
   assert.match(agent, /from "\.\/cnc-command-policy\.mjs"/);
   assert.match(agent, /agentStartedAtMs/);

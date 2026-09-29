@@ -3,7 +3,7 @@ import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
-import { limitVerticalPlungeFeed, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
+import { approvedProgramDepth, limitVerticalPlungeFeed, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 import { applyMaterialProfile, materialProfileFromSetup, readMaterialProfile, removeMaterialProfile, writeMaterialProfile } from "./cnc-material-state.mjs";
 import { applyXyLock, planXyPowerCycleRecovery, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
@@ -52,8 +52,8 @@ const programGuard = async ({ before, analysis, programContext }) => {
   if (!setup.xyReady) throw new Error("Set X/Y zero before starting");
   if (!setup.bedProbeReady || !setup.stockProbeReady || !setup.probeReady) throw new Error("Probe the bed and stock before starting");
   if (!setup.probeLocked) throw new Error("Lock the probe calibration before starting");
-  if (!Number.isFinite(setup.maxCutDepthMm) || setup.maxCutDepthMm <= 0) throw new Error("Measured stock depth is unavailable");
-  validateProgramEnvelope(analysis, { widthMm: 360, heightMm: 360, maxDepthMm: setup.maxCutDepthMm, maxSafeZMm: 6 });
+  const allowedProgramDepthMm = approvedProgramDepth(setup, programContext);
+  validateProgramEnvelope(analysis, { widthMm: 360, heightMm: 360, maxDepthMm: allowedProgramDepthMm, maxSafeZMm: 6 });
   validateProgramStockEnvelope(analysis, { widthMm: programContext?.stockWidthMm, heightMm: programContext?.stockHeightMm, reserveMm: programContext?.stockReserveMm });
   const current = coordinates(before);
   for (const axis of ["X", "Y", "Z"]) {
@@ -68,9 +68,10 @@ const programGuard = async ({ before, analysis, programContext }) => {
   for (const axis of ["X", "Y", "Z"]) {
     if (!Number.isFinite(origins[axis])) throw new Error(`${axis} work origin is unavailable`);
     const low = origins[axis] + analysis.bounds[axis].min, high = origins[axis] + analysis.bounds[axis].max, allowed = snap.bounds[axis];
+    const allowedMin = axis === "Z" && allowedProgramDepthMm > setup.maxCutDepthMm ? origins.Z - allowedProgramDepthMm : allowed.min;
     const aboveFiniteMaximum = axis !== "Z" && Number.isFinite(allowed.max) && high > allowed.max + 0.001;
-    if (low < allowed.min - 0.001 || aboveFiniteMaximum) {
-      const allowedText = axis === "Z" ? `${allowed.min.toFixed(3)} or higher` : `${allowed.min.toFixed(3)}..${allowed.max.toFixed(3)}`;
+    if (low < allowedMin - 0.001 || aboveFiniteMaximum) {
+      const allowedText = axis === "Z" ? `${allowedMin.toFixed(3)} or higher` : `${allowed.min.toFixed(3)}..${allowed.max.toFixed(3)}`;
       throw new Error(`${axis} program envelope ${low.toFixed(3)}..${high.toFixed(3)} exceeds virtual boundary ${allowedText}`);
     }
   }
@@ -500,9 +501,9 @@ const unlockProbeCalibration = async (payload) => {
   workspace.clear();
   return { ok: true, setup: { ...setup } };
 };
-const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false }) => {
+const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
-  const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true } });
+  const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true, operation: String(operation || ""), allowSacrificialCutThrough: allowSacrificialCutThrough === true, sacrificialBackingConfirmed: sacrificialBackingConfirmed === true, profileDepthMm: Number.isFinite(Number(profileDepthMm)) ? Number(profileDepthMm) : null } });
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { version: 1, jobId: savedProgram.jobId, programCapturedAt: savedProgram.capturedAt, state: "running", lastCompletedLine: 0, totalLines: savedProgram.analysis.executableLines, message: "Preflight checks", updatedAt: new Date().toISOString() });
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
   recordEvent("program.started", { jobId, executableLines: savedProgram.analysis.executableLines, manualRouter: manualRouter === true });
