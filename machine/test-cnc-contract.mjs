@@ -78,6 +78,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /budget:\(stage==='finish'\?700000:\(stage==='detail'\?180000:\(stage==='rough'&&metal\?700000:30000\)\)\)/);
   assert.match(html, /async function cncGenFromImage[\s\S]*?metal=cncIsMetalJob\(job\)\|\|\(plan&&plan\.reliefMode==='raised-surface'\)/);
   assert.match(html, /function cncPlanContinuousDepth/);
+  assert.match(html, /addJob:\{project:\(p\|\|'Job'\),material:material\}/);
   assert.match(html, /RELIEF MODE:/);
   assert.match(html, /continuous piecewise-linear depth/);
   assert.match(html, /function cncMinimumFeatureMm/);
@@ -106,6 +107,8 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /roughStepoverMm:\.8/);
   assert.match(html, /roughFeedMmMin:400/);
   assert.match(html, /roughRampLengthMm:20/);
+  assert.match(html, /var routeZ=approachZ/);
+  assert.match(html, /z=Math\.max\(rawZ,routeZ-passDepth\);routeZ=z/);
   assert.match(html, /function cncFitTwoBuckles/);
   assert.match(html, /Center first of two buckles on this stock/);
   assert.match(html, /reserved second buckle/);

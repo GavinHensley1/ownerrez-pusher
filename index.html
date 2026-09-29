@@ -1869,7 +1869,7 @@ async function cncSaveSetup(){
   var j=await cncPost(b); if(j&&j.cnc){ CNC=j.cnc; renderCncActiveSelect(); cncRenderPanelPlan(); }
 }
 function cncSetActive(id){ CNC_CUR=id||null; cncRenderActive(); }
-async function cncNewJob(){ var p=prompt('New job — project name?','Belt Buckle'); if(p===null) return; var j=await cncPost({addJob:{project:(p||'Job')}}); if(j&&j.cnc){ CNC=j.cnc; CNC_CUR=CNC.jobs[CNC.jobs.length-1].id; renderCncJobs(); await cncRenderActive(); } }
+async function cncNewJob(){ var p=prompt('New job — project name?','Belt Buckle'); if(p===null) return; var material=String((document.getElementById('cncMat')||{}).value||'').trim(); var j=await cncPost({addJob:{project:(p||'Job'),material:material}}); if(j&&j.cnc){ CNC=j.cnc; CNC_CUR=CNC.jobs[CNC.jobs.length-1].id; renderCncJobs(); await cncRenderActive(); } }
 async function cncPrepareMetalJob(){var source=cncCurrentJob();if(!source||!source.hasCreative){alert('Choose the completed buckle job with its artwork first.');return;}if(!confirm('Create a new raised-metal buckle job from this artwork?\n\nThis copies only the artwork and dimensions. It does not copy wood G-code, depth, probes, zeroes, checkpoints, or machine commands. Metal relief depth stays locked until the actual C752 blank is probed.'))return;var r=await cncPost({prepareMetalJob:{sourceJobId:source.id}});if(!r||!r.cnc||r.error){alert((r&&r.error)||'Could not prepare the metal job');return;}CNC=r.cnc;CNC_CUR=String(r.jobId||'');renderCncJobs();await cncRenderActive();var st=document.getElementById('cncRunStatus');if(st)st.textContent='Raised-metal job prepared. Artwork is copied; no G-code or machine command was created.';}
 async function cncEnsureJob(){ var j=cncCurrentJob(); if(j) return j; var r=await cncPost({addJob:{project:'Belt Buckle'}}); if(r&&r.cnc){ CNC=r.cnc; CNC_CUR=CNC.jobs[CNC.jobs.length-1].id; renderCncJobs(); return cncCurrentJob(); } return null; }
 async function cncRenderActive(){
@@ -2280,7 +2280,8 @@ function cncGenReliefRegion(img, reg, o, cb){ try{
         var route=path.slice(),routeLength=pathLength,routeAtEnd=true;while(routeLength+1e-6<rampLengthMm){var shuttle=routeAtEnd?path.slice(0,-1).reverse():path.slice(1);Array.prototype.push.apply(route,shuttle);routeLength+=pathLength;routeAtEnd=!routeAtEnd;}var coverage=routeAtEnd?path.slice(0,-1).reverse():path.slice(1);Array.prototype.push.apply(route,coverage);
         var firstPt=route[0],target0=Math.max(targ(firstPt.px,firstPt.py),level),approachZ=.5,travelled=0,rampFeed=Math.min(feed,300),atFullFeed=false;
         if(ruRampCount)g.push('G0 Z'+safeZ.toFixed(2));g.push('G0 X'+(firstPt.px*dxmm).toFixed(3)+' Y'+(panelH-firstPt.py*dymm).toFixed(3),'; RAMP ENTRY approach Z'+approachZ.toFixed(4)+' target Z'+target0.toFixed(4)+' over '+rampLengthMm.toFixed(3)+' mm','G1 Z'+approachZ.toFixed(4)+' F'+plunge);ruRampCount++;
-        for(kk=1;kk<route.length;kk++){var prevPt=route[kk-1],pt=route[kk],mx=(pt.px-prevPt.px)*dxmm,my=(pt.py-prevPt.py)*dymm;travelled+=Math.sqrt(mx*mx+my*my);var desired=Math.max(targ(pt.px,pt.py),level),rf=Math.min(1,travelled/rampLengthMm);z=approachZ+(desired-approachZ)*rf;var ff=kk===1?(' F'+rampFeed):(!atFullFeed&&rf>=1?(' F'+feed):'');if(rf>=1)atFullFeed=true;g.push('G1 X'+(pt.px*dxmm).toFixed(3)+' Y'+(panelH-pt.py*dymm).toFixed(3)+' Z'+z.toFixed(4)+ff);}
+        var routeZ=approachZ;
+        for(kk=1;kk<route.length;kk++){var prevPt=route[kk-1],pt=route[kk],mx=(pt.px-prevPt.px)*dxmm,my=(pt.py-prevPt.py)*dymm;travelled+=Math.sqrt(mx*mx+my*my);var desired=Math.max(targ(pt.px,pt.py),level),rf=Math.min(1,travelled/rampLengthMm),rawZ=approachZ+(desired-approachZ)*rf;z=Math.max(rawZ,routeZ-passDepth);routeZ=z;var ff=kk===1?(' F'+rampFeed):(!atFullFeed&&rf>=1?(' F'+feed):'');if(rf>=1)atFullFeed=true;g.push('G1 X'+(pt.px*dxmm).toFixed(3)+' Y'+(panelH-pt.py*dymm).toFixed(3)+' Z'+z.toFixed(4)+ff);}
       }
       continue;
     }
@@ -3652,7 +3653,7 @@ async function cncApprovePlanAndGenerate(){
       if(metal&&stage==='profile'&&/RU2100/i.test(tool))cncAssertRu2100ProfileSafety(gc);
       if(metal){
         var maxFeed=stage==='rough'||stage==='profile'?Number(t.roughFeedMmMin):(stage==='detail'?Number(t.detailFeedMmMin):Number(t.finishFeedMmMin));
-        cncAuditMetalProgramV2(gc,{stage:stage,maxDepthMm:Number(CNC_PLAN.maxDepthMm),profileDepthMm:Number(CNC_PLAN.cutout.thicknessMm),maxFeedMmMin:maxFeed,stockX:stockX,stockY:stockY,maxCutSegmentMm:5});
+        try{cncAuditMetalProgramV2(gc,{stage:stage,maxDepthMm:Number(CNC_PLAN.maxDepthMm),profileDepthMm:Number(CNC_PLAN.cutout.thicknessMm),maxFeedMmMin:maxFeed,stockX:stockX,stockY:stockY,maxCutSegmentMm:5});}catch(auditError){throw Error(stage+' stage: '+String(auditError&&auditError.message||auditError));}
       }
       programs[stage]=gc;generatedStages.push(stage);
       if(st)st.textContent='Compressing '+stage+' stage without changing any coordinates…';
