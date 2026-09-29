@@ -2819,13 +2819,13 @@ if(action==="email_recipients"){
             const order=[]; for(const stage of ["rough","finish","detail","all","profile"]){ if(b.gcodeStages[stage]===undefined) continue; const text=String(b.gcodeStages[stage]||""); if(!text||text.length>800000) return res.status(text?413:400).json({error:"invalid "+stage+" stage G-code"}); order.push(stage); try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,text);}catch(e){return res.status(500).json({error:"db error"});} }
             if(!order.length) return res.status(400).json({error:"at least one G-code stage is required"});
             const active=order[0]; try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
-            job.hasGcode=true; job.gcodeStages=JSON.stringify(order); job.activeStage=active; job.gcodeName="auto-"+active+".nc"; job.planStatus="approved"; job.updatedAt=now;
+            job.hasGcode=true; job.gcodeStages=JSON.stringify(order); job.activeStage=active; job.gcodeName="auto-"+active+".nc"; job.planStatus="approved"; job.stageRequiresProbe=true; job.stageActivatedAt=now; job.resumeInvalidatedAt=now; job.updatedAt=now;
           }
           if(b.gcodeStagesGzip&&typeof b.gcodeStagesGzip==="object"){
             const order=[];for(const stage of ["rough","finish","detail","all","profile"]){if(b.gcodeStagesGzip[stage]===undefined)continue;const data=String(b.gcodeStagesGzip[stage]||"");if(!data||data.length>3800000||!/^[A-Za-z0-9+/=]+$/.test(data))return res.status(data?413:400).json({error:"invalid compressed "+stage+" stage G-code"});order.push(stage);try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,"@gzip:"+data);}catch(e){return res.status(500).json({error:"db error"});}}
             if(!order.length)return res.status(400).json({error:"at least one compressed G-code stage is required"});
             const active=order[0];try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
-            job.hasGcode=true;job.gcodeStages=JSON.stringify(order);job.activeStage=active;job.gcodeName="auto-"+active+".nc";job.planStatus="approved";job.gcodeEncoding="gzip-base64";job.updatedAt=now;
+            job.hasGcode=true;job.gcodeStages=JSON.stringify(order);job.activeStage=active;job.gcodeName="auto-"+active+".nc";job.planStatus="approved";job.gcodeEncoding="gzip-base64";job.stageRequiresProbe=true;job.stageActivatedAt=now;job.resumeInvalidatedAt=now;job.updatedAt=now;
           }
           if(b.activateStage!==undefined){
             const stage=String(b.activateStage||""); if(["rough","finish","detail","profile","all"].indexOf(stage)===-1) return res.status(400).json({error:"invalid machining stage"});
@@ -2880,6 +2880,7 @@ if(action==="email_recipients"){
               if(act==="resume_saved"){
                 if(b.confirm!==true) return res.status(400).json({error:"Explicit saved-carve resume confirmation is required",cnc:st});
                 if(!health.resume||String(health.resume.state)!=="interrupted") return res.status(409).json({error:"No interrupted carve checkpoint is available",cnc:st});
+                if(Date.parse(String(job.resumeInvalidatedAt||""))>=Date.parse(String(health.resume.updatedAt||""))) return res.status(409).json({error:"The interrupted checkpoint belongs to an older generated program. Start the newly generated stage from line 1 after a fresh tool touch-off; do not resume the old checkpoint.",cnc:st});
                 if(!health.connected||health.moving) return res.status(409).json({error:"Controller must be connected and stationary before saved-carve resume",cnc:st});
               }
               let prior=null; try{const raw=await redis.get("parkside:cnc:command"); prior=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null);}catch(e){}

@@ -75,7 +75,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /X\+ right/);
   assert.match(html, /Y\+ back/);
   assert.match(html, /recover_probe/);
-  assert.match(html, /budget:\(stage==='finish'\?700000:\(stage==='detail'\?180000:30000\)\)/);
+  assert.match(html, /budget:\(stage==='finish'\?700000:\(stage==='detail'\?180000:\(stage==='rough'&&metal\?700000:30000\)\)\)/);
   assert.match(html, /function cncPlanContinuousDepth/);
   assert.match(html, /RELIEF MODE:/);
   assert.match(html, /continuous piecewise-linear depth/);
@@ -85,19 +85,26 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /function cncOffsetProgram/);
   assert.match(html, /endX=f\.OX\+f\.W,endY=f\.OY\+f\.H/);
   assert.match(html, /TOOL COMPENSATION:/);
-  assert.match(html, /stockToLeaveMm:rough\?\.5:0/);
+  assert.match(html, /stockToLeaveMm:rough\?\(Number\(t\.roughStockToLeaveMm\)\|\|\.5\):0/);
   assert.match(html, /function cncFinishFidelity/);
   assert.match(html, /function cncAppendDetailContours/);
   assert.match(html, /Number\(p\.version\)!==5/);
   assert.match(html, /Prepare raised-metal copy/);
   assert.match(html, /C752 nickel silver/);
-  assert.match(html, /SpeTool W03010 · 1\/8″ single-flute O-flute upcut · 1\/8″ shank/);
+  assert.match(html, /Whiteside RU2100 · 1\/4″ solid-carbide upcut · 1\/4″ shank · 2 cutting edges/);
   assert.match(html, /Genmitsu MC40A · 3\.175mm 2-flute ball nose · dark case/);
   assert.match(html, /reliefMode:metal\?'raised-surface':'standard'/);
   assert.match(html, /RELIEF CONTRACT: raised artwork remains at stock Z0/);
-  assert.match(html, /ENTRY POLICY: vertical plunge inside below-surface relief only/);
+  assert.match(html, /ENTRY POLICY:/);
   assert.match(html, /TRAVEL POLICY: all XY rapids at safe Z; vertical retract before exit/);
   assert.match(html, /function cncAssertRaisedMetalSafety/);
+  assert.match(html, /function cncAssertRu2100RoughSafety/);
+  assert.match(html, /function cncAssertRu2100ProfileSafety/);
+  assert.match(html, /RU2100 CONSERVATIVE CONTRACT/);
+  assert.match(html, /roughPassDepthMm:\.025/);
+  assert.match(html, /roughStepoverMm:\.8/);
+  assert.match(html, /roughFeedMmMin:400/);
+  assert.match(html, /roughRampLengthMm:20/);
   assert.match(html, /function cncFitTwoBuckles/);
   assert.match(html, /Center first of two buckles on this stock/);
   assert.match(html, /reserved second buckle/);
@@ -142,7 +149,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Profile depth · automatic/);
   assert.match(html, /through-cut into sacrificial backing/);
   assert.match(html, /profileDepth=through&&locked/);
-  assert.match(html, /profilePassDepthMm=\.12/);
+  assert.match(html, /profilePassDepthMm=metal&&\/RU2100\/i\.test/);
   assert.doesNotMatch(html, /id="cncPlanMask"/);
   assert.doesNotMatch(html, /id="cncPlanCutThick"/);
   assert.match(html, /function cncPreviewStage/);
@@ -187,7 +194,7 @@ test("raised-metal safety gate rejects surface cutting and below-surface XY rapi
   const check = new Function(`${source}; return cncAssertRaisedMetalSafety;`)();
   const contract = [
     "; RELIEF CONTRACT: raised artwork remains at stock Z0",
-    "; ENTRY POLICY: vertical plunge inside below-surface relief only",
+    "; ENTRY POLICY: approved interior entry",
     "; TRAVEL POLICY: all XY rapids at safe Z; vertical retract before exit",
   ];
   assert.doesNotThrow(() => check([...contract, "G21", "G90", "G0 Z3.000", "G0 X1.000 Y1.000", "G1 Z-0.100 F40", "G1 X2.000 Y1.000 Z-0.100 F180", "G0 Z3.000", "G0 X0 Y0"].join("\n")));
@@ -195,19 +202,43 @@ test("raised-metal safety gate rejects surface cutting and below-surface XY rapi
   assert.throws(() => check([...contract, "G0 Z3.000", "G0 X1.000 Y1.000", "G1 Z-0.100 F40", "G0 X2.000 Y1.000"].join("\n")), /XY rapid below safe Z/);
 });
 
-test("sacrificial profile uses 0.120 mm passes, six tabs, and the exact approved depth", () => {
+test("RU2100 sacrificial profile uses 0.025 mm ramped passes, six tabs, and the exact approved depth", () => {
   const clampSource = extractNamedFunction(html, "cncClamp");
   const appendSource = extractNamedFunction(html, "cncAppendCutout");
+  const checkSource = extractNamedFunction(html, "cncAssertRu2100ProfileSafety");
   const append = new Function(`${clampSource};${appendSource}; return cncAppendCutout;`)();
+  const check = new Function(`${checkSource}; return cncAssertRu2100ProfileSafety;`)();
   const g = [];
-  append(g, 114, 88, { matThick: 4.014, cutout: "tabs", tabs: 6, tabHeight: 1.5, bitR: 1.5875, feed: 180, plunge: 40, safeZ: 3.2, passDepth: 0.12, points: [[2,2],[112,2],[112,86],[2,86],[2,2]], noOvercut: true });
-  const text = g.join("\n"), plunges = [...text.matchAll(/^G1 Z(-?[\d.]+)/gm)].map((m) => Number(m[1]));
+  append(g, 114, 88, { matThick: 4.014, cutout: "tabs", tabs: 6, tabHeight: 1.5, bitR: 3.175, feed: 400, plunge: 80, safeZ: 3.2, passDepth: 0.025, rampLengthMm: 20, points: [[2,2],[112,2],[112,86],[2,86],[2,2]], noOvercut: true });
+  const text = g.join("\n"), targets = [...text.matchAll(/^; PROFILE RAMP ENTRY previous Z-?[\d.]+ approach Z-?[\d.]+ target Z(-?[\d.]+)/gm)].map((m) => Number(m[1]));
   assert.match(text, /with 6 tabs 1\.5mm through 4\.014mm stock/);
-  assert.equal(plunges.length, Math.ceil(4.014 / 0.12));
-  assert.equal(Math.min(...plunges), -4.014);
-  for (let i = 1; i < plunges.length; i++) assert.ok(Math.abs(plunges[i] - plunges[i - 1]) <= 0.121);
+  assert.match(text, /PROFILE ENTRY POLICY: 20\.0 mm ramp/);
+  assert.equal(targets.length, Math.ceil(4.014 / 0.025));
+  assert.equal(Math.min(...targets), -4.014);
+  for (let i = 1; i < targets.length; i++) assert.ok(Math.abs(targets[i] - targets[i - 1]) <= 0.0251);
+  assert.doesNotThrow(() => check(text));
   assert.equal(g[0].startsWith("; --- Profile cut-out"), true);
   assert.equal(g.at(-1), "G0 Z3.20");
+});
+
+test("RU2100 rough safety gate requires the exact chip-load contract and cleared-Z ramps", () => {
+  const source = extractNamedFunction(html, "cncAssertRu2100RoughSafety");
+  const check = new Function(`${source}; return cncAssertRu2100RoughSafety;`)();
+  const good = [
+    "; 114.0x88.0 mm, depth 1 mm, 143x110 grid, ~0.80 mm stepover, stage rough, 34 rough passes @ 0.0250 mm",
+    "; ENTRY POLICY: RU2100 ramps 20.0 mm from previously cleared Z; no direct plunge to a new depth",
+    "; RU2100 CONSERVATIVE CONTRACT: 18000 RPM | 2 cutting edges | 400 mm/min | chip load 0.01111 mm/tooth",
+    "; RADIAL ENGAGEMENT: 0.800 mm actual / 6.350 mm = 12.6% | AXIAL STEP 0.0250 mm",
+    "; RAMP ENTRY previous Z-0.0250 approach Z0.0050 target Z-0.0500 over 20.000 mm",
+    "G1 Z0.0050 F80",
+    "G1 X20.000 Z-0.0500 F300",
+    "; RAMP ENTRY previous Z-0.0500 approach Z-0.0200 target Z-0.0750 over 20.000 mm",
+    "G1 Z-0.0200 F80",
+    "G1 X0.000 Z-0.0750 F300",
+  ].join("\n");
+  assert.doesNotThrow(() => check(good));
+  assert.throws(() => check(good.replace("0.0250 mm", "0.0800 mm")), /axial step/);
+  assert.throws(() => check(good.replace("; RAMP ENTRY previous Z-0.0500", "; DIRECT ENTRY previous Z-0.0500")), /not a cleared-Z ramp approach/);
 });
 
 test("Vercel queues commands for an authenticated outbound CNC agent", () => {
@@ -223,6 +254,9 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /parkside:cnc:plan:/);
   assert.match(api, /gcodeStages/);
   assert.match(api, /gcodeStagesGzip/);
+  assert.match(api, /job\.stageRequiresProbe=true;job\.stageActivatedAt=now;job\.resumeInvalidatedAt=now/);
+  assert.match(api, /interrupted checkpoint belongs to an older generated program/);
+  assert.match(html, /resumeInvalidatedAt>=resumeUpdatedAt/);
   assert.match(api, /\["rough","finish","detail","all","profile"\]/);
   assert.match(api, /@gzip:/);
   assert.match(api, /command\.gcodeGzip/);
