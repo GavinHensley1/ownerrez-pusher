@@ -339,6 +339,7 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(html, /Restore probes after X\/Y-only reset/);
   assert.match(html, /function cncRestoreProbeAfterXy/);
   assert.match(daemon, /probePreserved: setup\.probeLocked === true/);
+  assert.match(daemon, /new Set\(\["locked", "restored"\]\)\.has\(setup\.xyLockStatus\)/);
   assert.match(daemon, /\/probe\/restore-after-xy-zero/);
   assert.match(agent, /probeRecovery: health\?\.probeRecovery \|\| null/);
   assert.doesNotMatch(daemon, /Probe circuit is open|probeCircuitIsFresh|\/probe\/test/);

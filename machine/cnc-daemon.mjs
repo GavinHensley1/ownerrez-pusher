@@ -280,7 +280,8 @@ const xyRecoverySnapshot = () => {
 };
 const probeRecoverySnapshot = () => {
   const prior = readLatestCompletedStockProbe(EVENT_JOURNAL_PATH), ageMs = prior ? Date.now() - Date.parse(prior.at) : NaN;
-  return { available: !!prior && Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 4 * 60 * 60 * 1000 && setup.xyReady && setup.xyLockStatus === "locked" && !setup.probeLocked, sourceProbeAt: prior?.at || null, stockThicknessMm: prior?.stockThicknessMm ?? null, maxCutDepthMm: prior?.maxCutDepthMm ?? null };
+  const continuousXyLock = setup.xyReady && new Set(["locked", "restored"]).has(setup.xyLockStatus);
+  return { available: !!prior && Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 4 * 60 * 60 * 1000 && continuousXyLock && !setup.probeLocked, sourceProbeAt: prior?.at || null, stockThicknessMm: prior?.stockThicknessMm ?? null, maxCutDepthMm: prior?.maxCutDepthMm ?? null };
 };
 const health = () => {
   if (!controller.connected && !hazardousOperationActive()) void recoverIdleConnection();
@@ -335,7 +336,7 @@ const setXyZero = async (payload) => {
 const restoreProbeAfterXyOnlyReset = async (payload) => {
   if (payload.confirm !== true) throw new Error("Explicit X/Y-only probe restoration confirmation is required");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
-  if (!setup.xyReady || setup.xyLockStatus !== "locked") throw new Error("A continuous saved X/Y frame is required before restoring probes");
+  if (!setup.xyReady || !new Set(["locked", "restored"]).has(setup.xyLockStatus)) throw new Error("A continuous saved X/Y frame is required before restoring probes");
   if (setup.probeLocked) throw new Error("Probe calibration is already locked");
   const prior = readLatestCompletedStockProbe(EVENT_JOURNAL_PATH);
   if (!prior) throw new Error("No completed stock probe is available to restore");
