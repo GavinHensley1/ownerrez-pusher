@@ -229,19 +229,41 @@ test("RU2100 rough safety gate requires the exact chip-load contract and cleared
   const check = new Function(`${source}; return cncAssertRu2100RoughSafety;`)();
   const good = [
     "; 114.0x88.0 mm, depth 1 mm, 143x110 grid, ~0.80 mm stepover, stage rough, 34 rough passes @ 0.0250 mm",
-    "; ENTRY POLICY: RU2100 ramps 20.0 mm from previously cleared Z; no direct plunge to a new depth",
+    "; ENTRY POLICY: RU2100 moves XY first at existing safe Z, then ramps 20.0 mm from above stock; no vertical move at or below Z0",
     "; RU2100 CONSERVATIVE CONTRACT: 18000 RPM | 2 cutting edges | 400 mm/min | chip load 0.01111 mm/tooth",
     "; RADIAL ENGAGEMENT: 0.800 mm actual / 6.350 mm = 12.6% | AXIAL STEP 0.0250 mm",
-    "; RAMP ENTRY previous Z-0.0250 approach Z0.0050 target Z-0.0500 over 20.000 mm",
-    "G1 Z0.0050 F80",
-    "G1 X20.000 Z-0.0500 F300",
-    "; RAMP ENTRY previous Z-0.0500 approach Z-0.0200 target Z-0.0750 over 20.000 mm",
-    "G1 Z-0.0200 F80",
-    "G1 X0.000 Z-0.0750 F300",
+    "; START POLICY: current work Z must be at least 2.400 mm; first axis motion is XY and never Z down",
+    "G21",
+    "G90",
+    "G17",
+    "G4 P2",
+    "G0 X1.000 Y1.000",
+    "; RAMP ENTRY approach Z0.5000 target Z-0.0250 over 20.000 mm",
+    "G1 Z0.5000 F80",
+    "G1 X20.000 Z-0.0250 F300",
+    "G0 Z2.400",
+    "G0 X20.000 Y2.000",
+    "; RAMP ENTRY approach Z0.5000 target Z-0.0500 over 20.000 mm",
+    "G1 Z0.5000 F80",
+    "G1 X0.000 Z-0.0500 F300",
   ].join("\n");
   assert.doesNotThrow(() => check(good));
   assert.throws(() => check(good.replace("0.0250 mm", "0.0800 mm")), /axial step/);
-  assert.throws(() => check(good.replace("; RAMP ENTRY previous Z-0.0500", "; DIRECT ENTRY previous Z-0.0500")), /not a cleared-Z ramp approach/);
+  assert.throws(() => check(good.replace("G0 X1.000 Y1.000", "G0 Z2.400\nG0 X1.000 Y1.000")), /first axis motion must be XY/);
+  assert.throws(() => check(good.replace("G1 Z0.5000 F80", "G1 Z-0.0200 F80")), /vertical move reaches the metal surface/);
+  assert.throws(() => check(good.replace("over 20.000 mm", "over 6.378 mm")), /invalid ramp geometry/);
+  const omitted = good.split("\n").slice(0, 5).concat("; RU2100 ROUGH OMITTED: no continuous safe interior lane >= 20.000 mm").join("\n");
+  assert.deepEqual(check(omitted).omitted, true);
+});
+
+test("RU2100 fresh start requires a retracted work Z", () => {
+  const source = extractNamedFunction(html, "cncStartFrameCheck");
+  const check = new Function(`${source}; return cncStartFrameCheck;`)();
+  const health = {workspace:{calibrated:true,bounds:{X:{min:-200,max:200},Y:{min:-200,max:200},Z:{min:-100}}},setup:{zOriginMPos:-10},lastControllerStatus:{MPos:"0,0,-7.6"}};
+  assert.equal(check(health).ok, true);
+  health.lastControllerStatus.MPos="0,0,-7.7";
+  assert.equal(check(health).ok, false);
+  assert.match(check(health).reason, /at least 2\.400 mm/);
 });
 
 test("Vercel queues commands for an authenticated outbound CNC agent", () => {
