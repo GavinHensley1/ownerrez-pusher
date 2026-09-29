@@ -47,6 +47,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.doesNotMatch(html, /test_probe|NO-MOTION PROBE TEST|Test probe circuit/);
   assert.match(html, /probe_stock/);
   assert.match(html, /probe_tool/);
+  assert.match(html, /detail\?tools\.detailBit/);
   assert.match(html, /current\.activeStage!==previousStage/);
   assert.match(html, /first_retract/);
   assert.match(html, /lock_probe/);
@@ -172,6 +173,9 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.doesNotMatch(api, /Test the probe circuit with the plate touching the bit before probing the bed/);
   assert.match(api, /health\.xyRecovery/);
   assert.match(api, /This stage changed bits\. Use Changed bit/);
+  assert.match(api, /probeLockStatus==="locked_after_tool_touch"/);
+  assert.match(api, /probeLockedAt>completedAt&&probeLockedAt<=stageActivatedAt/);
+  assert.match(api, /stageActivatedAt-probeLockedAt\)<=30\*60\*1000/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
   assert.match(api, /const maxStep=axis==="Z"\?5:100/);
   assert.match(api, /Z jogs are limited to 5 mm per click/);

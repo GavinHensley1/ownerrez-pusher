@@ -2834,7 +2834,14 @@ if(action==="email_recipients"){
                 if(!setup.xyReady) return res.status(409).json({error:"Set X/Y zero before Start",cnc:st});
                 if(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady) return res.status(409).json({error:"Probe both the bed and stock before Start",cnc:st});
                 if(!setup.probeLocked) return res.status(409).json({error:"Lock the probe calibration before Start",cnc:st});
-                if(job.stageRequiresProbe&&String(setup.probeLockedAt||"")<=String(job.stageActivatedAt||"")) return res.status(409).json({error:"This machining stage uses a new operation/tool. Re-probe and lock Z after loading the stage before Start",cnc:st});
+                if(job.stageRequiresProbe){
+                  const probeLockedAt=Date.parse(String(setup.probeLockedAt||""));
+                  const stageActivatedAt=Date.parse(String(job.stageActivatedAt||""));
+                  const completedAt=Date.parse(String((health.resume&&health.resume.updatedAt)||""));
+                  const touchedAfterLoad=Number.isFinite(probeLockedAt)&&Number.isFinite(stageActivatedAt)&&probeLockedAt>stageActivatedAt;
+                  const touchedAfterCompletedStage=setup.probeLockStatus==="locked_after_tool_touch"&&Number.isFinite(probeLockedAt)&&Number.isFinite(completedAt)&&Number.isFinite(stageActivatedAt)&&probeLockedAt>completedAt&&probeLockedAt<=stageActivatedAt&&(stageActivatedAt-probeLockedAt)<=30*60*1000;
+                  if(!touchedAfterLoad&&!touchedAfterCompletedStage) return res.status(409).json({error:"This machining stage uses a new operation/tool. Re-probe and lock Z after loading the stage before Start",cnc:st});
+                }
                 if(!(Number(setup.maxCutDepthMm)>0)) return res.status(409).json({error:"Measured no-cut-through depth is unavailable",cnc:st});
                 const stockWidthMm=Number(st.config.machX), stockHeightMm=Number(st.config.machY), stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);
                 const designWidthMm=Number(job.sizeMM)||0, designHeightMm=Number(job.pieceH)||Math.round(designWidthMm*(Number(job.imgAR)||0.75));
