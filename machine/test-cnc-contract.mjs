@@ -134,7 +134,11 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Detected subject touches the image edge/);
   assert.match(html, /var startX=pts\[0\]\[0\], startY=pts\[0\]\[1\]/);
   assert.doesNotMatch(html, /'G0 X'\+x0\.toFixed\(3\)\+' Y'\+y0\.toFixed\(3\)/);
-  assert.match(html, /function rowRuns\(py,ltr,belowSurfaceOnly\)/);
+  assert.match(html, /function rowRuns\(py,ltr,belowSurfaceOnly,requireRoughClearance\)/);
+  assert.match(html, /function connectorSafe\(a,b,belowSurfaceOnly,requireRoughClearance\)/);
+  assert.match(html, /FINISH STOCK CONTRACT: cut only inside the RU2100-cleared envelope/);
+  assert.match(html, /DETAIL STOCK CONTRACT: contours must remain inside the RU2100-cleared and finished envelope/);
+  assert.match(html, /function cncAuditMetalProgramV2/);
   assert.match(html, /roughRuns=rowRuns/);
   assert.match(html, /finishRuns=rowRuns/);
   assert.match(html, /function cncAddDepthRegion/);
@@ -207,6 +211,28 @@ test("raised-metal safety gate rejects surface cutting and below-surface XY rapi
   assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.1000 over 20.000 mm", "G1 Z0.5000 F40", "G1 X21.000 Y1.000 Z-0.1000", "G1 X22.000 Y1.000 Z0.000"].join("\n")), /unguarded cutting move touches/);
   assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.0250 over 5.000 mm", "G1 Z0.5000 F80", "G1 X8.000 Z-0.0250"].join("\n")), /ramp at least 20 mm/);
   assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.1000 over 20.000 mm", "G1 Z0.5000 F40", "G1 X21.000 Y1.000 Z-0.1000", "G0 X2.000 Y1.000"].join("\n")), /XY rapid below safe Z/);
+});
+
+test("universal metal audit rejects unsafe modes, bounds, feeds, plunges, drops, depths, and missing retracts", () => {
+  const source = extractNamedFunction(html, "cncAuditMetalProgramV2");
+  const audit = new Function(`${source}; return cncAuditMetalProgramV2;`)();
+  const base = [
+    "; FINISH STOCK CONTRACT: cut only inside the RU2100-cleared envelope",
+    "G21", "G90", "G17", "G4 P2", "G0 X1.000 Y1.000", "G1 Z0.5000 F35",
+    "G1 X2.000 Y1.000 Z0.4000 F150", "G1 X3.000 Y1.000 Z0.3000",
+    "G1 X4.000 Y1.000 Z0.2000", "G1 X5.000 Y1.000 Z0.1000",
+    "G1 X6.000 Y1.000 Z-0.0001", "G1 X7.000 Y1.000 Z-0.1000",
+    "G0 Z3.200", "G0 X0 Y0",
+  ];
+  const opts = { stage: "finish", maxDepthMm: 0.8, maxFeedMmMin: 150, stockX: 100, stockY: 50, maxCutSegmentMm: 5 };
+  assert.doesNotThrow(() => audit(base.join("\n"), opts));
+  assert.throws(() => audit([...base.slice(0, 4), "M3 S9000", ...base.slice(4)].join("\n"), opts), /forbidden mode or spindle/);
+  assert.throws(() => audit(base.join("\n").replace("X7.000", "X101.000"), opts), /X leaves the stock envelope/);
+  assert.throws(() => audit(base.join("\n").replace("F150", "F151"), opts), /feed 151 exceeds 150/);
+  assert.throws(() => audit(base.join("\n").replace("G1 Z0.5000 F35", "G1 Z-0.0100 F35"), opts), /vertical plunge reaches metal/);
+  assert.throws(() => audit(base.join("\n").replace("Z-0.1000", "Z-0.3000"), opts), /Z descends 0.2999 mm/);
+  assert.throws(() => audit(base.join("\n").replace("Z-0.1000", "Z-0.9000"), opts), /Z descends|exceeds approved depth/);
+  assert.throws(() => audit(base.slice(0, -2).join("\n"), opts), /does not retract after its final cut/);
 });
 
 test("RU2100 sacrificial profile uses one continuous 0.025 mm-per-lap spiral, six tabs, and the exact approved depth", () => {
