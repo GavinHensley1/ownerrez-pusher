@@ -2320,7 +2320,7 @@ async function cncDownloadAllPanels(jobId){ var ctx=CNC_PANEL_CTX[jobId]; if(!ct
 function cncLoadMsg(){ return 'Design generated. Review the preview, then set X/Y zero and complete both probes.'; }
 function cncOffsetProgram(text,offsetX,offsetY){offsetX=Number(offsetX)||0;offsetY=Number(offsetY)||0;if(!offsetX&&!offsetY)return String(text||'');var lines=String(text||'').split(/\r?\n/),fmt=function(v){return Number(v).toFixed(3);};for(var i=0;i<lines.length;i++){if(/^\s*;/.test(lines[i]))continue;if(offsetX)lines[i]=lines[i].replace(/\bX(-?[\d.]+)/g,function(_,v){return 'X'+fmt(Number(v)+offsetX);});if(offsetY)lines[i]=lines[i].replace(/\bY(-?[\d.]+)/g,function(_,v){return 'Y'+fmt(Number(v)+offsetY);});}lines.splice(1,0,'; PROJECT OFFSET: X'+fmt(offsetX)+' Y'+fmt(offsetY)+' mm in the preserved stock coordinate frame');return lines.join('\n');}
 async function cncGenFromImage(job, srcDataURL, plan, stage, bit){
-  var mat=job.material||'C752 nickel silver', preset=CNC_MATS[mat]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||'');
+  var mat=job.material||'C752 nickel silver', preset=CNC_MATS[mat]||CNC_MATS['Other'], cons=!/Normal/.test(job.speed||''), metal=cncIsMetalJob(job)||(plan&&plan.reliefMode==='raised-surface');
   return new Promise(function(resolve){ var img=new Image();
     img.onload=function(){ var width=Number(plan&&plan.widthMm)||(Number(job.sizeMM)||100), ar=(img.height||1)/(img.width||1), height=Number(plan&&plan.heightMm)||(Number(job.pieceH)||width*ar), range=cncGlobalRange(img), useBit=bit||job.bit;
       var t=(plan&&plan.tools)||{}, rough=(stage==='rough'||stage==='profile'), finish=(stage==='finish'||stage==='all'),detail=stage==='detail';

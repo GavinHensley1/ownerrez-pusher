@@ -76,6 +76,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Y\+ back/);
   assert.match(html, /recover_probe/);
   assert.match(html, /budget:\(stage==='finish'\?700000:\(stage==='detail'\?180000:\(stage==='rough'&&metal\?700000:30000\)\)\)/);
+  assert.match(html, /async function cncGenFromImage[\s\S]*?metal=cncIsMetalJob\(job\)\|\|\(plan&&plan\.reliefMode==='raised-surface'\)/);
   assert.match(html, /function cncPlanContinuousDepth/);
   assert.match(html, /RELIEF MODE:/);
   assert.match(html, /continuous piecewise-linear depth/);
