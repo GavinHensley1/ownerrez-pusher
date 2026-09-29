@@ -2886,7 +2886,13 @@ if(action==="email_recipients"){
                 const maxStep=axis==="Z"?5:100;
                 if(!Number.isFinite(distance)||distance===0||Math.abs(distance)>maxStep) return res.status(400).json({error:axis==="Z"?"Z jogs are limited to 5 mm per click":"Jog step is outside the safe per-click limit",cnc:st});
                 if(!Number.isFinite(feed)||feed<20||feed>(axis==="Z"?150:400)) return res.status(400).json({error:"Jog feed is outside the safe range",cnc:st});
+                if(axis==="X"||axis==="Y"){
+                  const raw=String((health.lastControllerStatus||{}).MPos||""),parts=raw.split(",").map(Number),origin=setup.xyOriginMPos||{},currentMachine=axis==="X"?parts[0]:parts[1],originAxis=Number(origin[axis]),current=currentMachine-originAxis,stock=axis==="X"?Number(st.config.machX):Number(st.config.machY),min=-60,max=stock+20,target=current+distance,returningLow=current<min-.001&&distance>0&&target>current,returningHigh=current>max+.001&&distance<0&&target<current;
+                  if(![currentMachine,originAxis,current,stock].every(Number.isFinite)||!(stock>0)) return res.status(409).json({error:"Current position or entered stock size is unavailable",cnc:st});
+                  if((current<min-.001&&distance<=0)||(current>max+.001&&distance>=0)||(!returningLow&&!returningHigh&&(target<min-.001||target>max+.001))) return res.status(409).json({error:axis+" move would reach "+target.toFixed(3)+" mm; Project allows "+min.toFixed(3)+".."+max.toFixed(3)+" mm around this stock",cnc:st});
+                }
                 cmd.axis=axis; cmd.distanceMm=Number(distance.toFixed(3)); cmd.feedMmPerMin=Math.round(feed);
+                cmd.stockWidthMm=Number(st.config.machX); cmd.stockHeightMm=Number(st.config.machY);
               }
               try{await redis.set("parkside:cnc:command",JSON.stringify(cmd),{ex:600});}catch(e){return res.status(500).json({error:"Could not queue CNC command"});}
               job.agentState="queued"; job.agentMsg=act.replace(/_/g," ")+" sent to Mac bridge"; job.agentAt=now; job.agentCommandId=cmd.id; job.agentAction=act; job.agentQueuedAt=now;

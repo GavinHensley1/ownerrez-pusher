@@ -133,7 +133,7 @@ async function execute(command) {
         const segments = splitJogDistance(axis, command.distanceMm);
         for (let index = 0; index < segments.length; index += 1) {
           await report(command, "accepted", `Moving ${axis} segment ${index + 1} of ${segments.length}`);
-          result = await localRequest(path, { distanceMm: segments[index], feedMmPerMin: command.feedMmPerMin, manualPositioning: true });
+          result = await localRequest(path, { distanceMm: segments[index], feedMmPerMin: command.feedMmPerMin, manualPositioning: true, stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm });
         }
         result = { ...result, requestedDistanceMm: Number(command.distanceMm), completedSegments: segments.length };
       } else {

@@ -178,6 +178,8 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /stageActivatedAt-probeLockedAt\)<=30\*60\*1000/);
   assert.match(api, /Jog step is outside the safe per-click limit/);
   assert.match(api, /const maxStep=axis==="Z"\?5:100/);
+  assert.match(api, /Project allows .+ around this stock/);
+  assert.match(api, /cmd\.stockWidthMm=Number\(st\.config\.machX\)/);
   assert.match(api, /Z jogs are limited to 5 mm per click/);
   assert.match(api, /job\.agentCommandId=cmd\.id/);
   assert.match(api, /do not press again/);
@@ -198,6 +200,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /socketPath: SOCKET_PATH/);
   assert.match(agent, /manualPositioning: true/);
   assert.match(agent, /splitJogDistance/);
+  assert.match(agent, /stockWidthMm: command\.stockWidthMm/);
   assert.match(agent, /completedSegments/);
   assert.match(agent, /stockWidthMm/);
   assert.match(agent, /manualRouter: command\.manualRouter === true/);
@@ -230,6 +233,14 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
 test("local daemon separates manual probe staging from the carve envelope", () => {
   assert.match(daemon, /negativeWorkspaceMarginMm/);
   assert.match(daemon, /new Set\(\["X", "Y"\]\)\.has\(axis\) \? 60 : 0/);
+});
+
+test("Project disables and rejects jogs outside the stock-aware envelope", () => {
+  assert.match(html, /function cncJogFrameCheck/);
+  assert.match(html, /Move blocked before reaching the machine/);
+  assert.match(html, /data-axis="Y" data-dir="1"/);
+  assert.match(daemon, /assertWorkJogWithinStock/);
+  assert.match(daemon, /positioningBoundsFromStock/);
 });
 
 test("Project is completely independent of the external supervision camera", () => {

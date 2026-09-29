@@ -176,6 +176,14 @@ test("virtual workspace permits inside jog and rejects barrier crossing", async 
   await c.close(); await mock.close();
 });
 
+test("virtual workspace permits only return motion after an outside-position reading", () => {
+  const workspace = new VirtualWorkspace();
+  workspace.setBounds({ X: { min: -20, max: 20 }, Y: { min: -20, max: 20 }, Z: { min: -10, max: 10 } });
+  const outside = parseStatus("<Idle|MPos:0.000,25.000,0.000|FS:0,0>");
+  assert.equal(workspace.assertJog({ before: outside, axis: "Y", distanceMm: -5 }).returningToEnvelope, true);
+  assert.throws(() => workspace.assertJog({ before: outside, axis: "Y", distanceMm: 1 }), /barrier rejects/);
+});
+
 test("probe-staging margin extends only the negative X/Y boundary", () => {
   const workspace = new VirtualWorkspace();
   workspace.setBounds({ X: { min: -20, max: 20 }, Y: { min: -20, max: 20 }, Z: { min: -10, max: 10 } });

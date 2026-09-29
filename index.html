@@ -539,15 +539,15 @@
       <div style="font-weight:600;margin-bottom:7px">Position tool</div>
       <div class="muted" style="font-size:11.5px;margin-bottom:8px">Choose a distance up to 100 mm while watching the machine. Project divides large X/Y moves into guarded short segments. During setup, X−/Y− may enter a separate 60 mm probe-staging zone outside the stock zero so the bit can reach exposed spoilboard; the carve remains locked inside the stock. <strong>Z is limited to 5 mm per click</strong>. Z− cannot cross the measured safety floor. There is no upper Z ceiling: being higher than the stock is safe, and Start may descend from there to the program's safe-clearance height. X−/X+ move left/right, Y−/Y+ move front/back, and Z−/Z+ move down/up.</div>
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
-        <label class="muted" style="font-size:12px">Move distance<br><select id="cncJogStep" style="width:92px"><option value="0.1">0.1 mm</option><option value="0.25">0.25 mm</option><option value="0.5">0.5 mm</option><option value="1" selected>1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option><option value="25">25 mm</option><option value="50">50 mm</option><option value="100">100 mm</option></select></label>
+        <label class="muted" style="font-size:12px">Move distance<br><select id="cncJogStep" style="width:92px" onchange="cncRenderAgent(cncCurrentJob())"><option value="0.1">0.1 mm</option><option value="0.25">0.25 mm</option><option value="0.5">0.5 mm</option><option value="1" selected>1 mm</option><option value="5">5 mm</option><option value="10">10 mm</option><option value="25">25 mm</option><option value="50">50 mm</option><option value="100">100 mm</option></select></label>
         <div style="display:grid;grid-template-columns:repeat(3,minmax(52px,1fr));gap:6px;max-width:220px;width:100%">
-          <span></span><button class="cncJogBtn cncCommandBtn" onclick="cncJog('Y',1,this)">Y+<br><small>back</small></button><span></span>
-          <button class="cncJogBtn cncCommandBtn" onclick="cncJog('X',-1,this)">X−<br><small>left</small></button><span></span><button class="cncJogBtn cncCommandBtn" onclick="cncJog('X',1,this)">X+<br><small>right</small></button>
-          <span></span><button class="cncJogBtn cncCommandBtn" onclick="cncJog('Y',-1,this)">Y−<br><small>front</small></button><span></span>
+          <span></span><button class="cncJogBtn cncCommandBtn" data-axis="Y" data-dir="1" onclick="cncJog('Y',1,this)">Y+<br><small>back</small></button><span></span>
+          <button class="cncJogBtn cncCommandBtn" data-axis="X" data-dir="-1" onclick="cncJog('X',-1,this)">X−<br><small>left</small></button><span></span><button class="cncJogBtn cncCommandBtn" data-axis="X" data-dir="1" onclick="cncJog('X',1,this)">X+<br><small>right</small></button>
+          <span></span><button class="cncJogBtn cncCommandBtn" data-axis="Y" data-dir="-1" onclick="cncJog('Y',-1,this)">Y−<br><small>front</small></button><span></span>
         </div>
         <div style="display:grid;grid-template-columns:repeat(2,minmax(70px,1fr));gap:6px">
-          <button class="cncJogBtn cncCommandBtn" onclick="cncJog('Z',1,this)">Z+ up</button>
-          <button class="cncJogBtn cncCommandBtn" onclick="cncJog('Z',-1,this)">Z− down</button>
+          <button class="cncJogBtn cncCommandBtn" data-axis="Z" data-dir="1" onclick="cncJog('Z',1,this)">Z+ up</button>
+          <button class="cncJogBtn cncCommandBtn" data-axis="Z" data-dir="-1" onclick="cncJog('Z',-1,this)">Z− down</button>
         </div>
         <span id="cncJogStatus" class="muted" style="font-size:12px"></span>
       </div>
@@ -1858,6 +1858,13 @@ function cncStartFrameCheck(health){
   for(var i=0;i<3;i++){var axis=axes[i],b=bounds[axis],v=parts[i],min=Number(b&&b.min),max=Number(b&&b.max);if(!b||!isFinite(min)||(axis!=='Z'&&!isFinite(max)))return {ok:false,reason:axis+' calibrated boundary is unavailable.'};if(v<min-.001||(axis!=='Z'&&v>max+.001)){var delta=v<min?min-v:v-max;return {ok:false,axis:axis,delta:delta,reason:axis==='Z'?('Z is '+delta.toFixed(3)+' mm below the protected floor. Retract with Z+ before Start.'):('Current '+axis+' position '+v.toFixed(3)+' mm is outside the calibrated frame.')};}}
   return {ok:true,reason:'Current controller position is inside the calibrated frame.'};
 }
+function cncJogFrameCheck(health,axis,distance){
+  axis=String(axis||'').toUpperCase();distance=Number(distance);if(axis==='Z')return {ok:true,reason:'Z uses the protected probe floor.'};
+  var raw=String(((health||{}).lastControllerStatus||{}).MPos||''),parts=raw.split(',').map(Number),su=(health&&health.setup)||{},origin=su.xyOriginMPos||{},machine=axis==='X'?parts[0]:parts[1],zero=Number(origin[axis]),current=machine-zero,m=cncMach(),stock=axis==='X'?Number(m.X):Number(m.Y),min=-60,max=stock+20,target=current+distance,returningLow=current<min-.001&&distance>0&&target>current,returningHigh=current>max+.001&&distance<0&&target<current;
+  if(![machine,zero,current,stock,target].every(isFinite)||!(stock>0))return {ok:false,reason:'Current position or entered stock size is unavailable.'};
+  if((current<min-.001&&distance<=0)||(current>max+.001&&distance>=0)||(!returningLow&&!returningHigh&&(target<min-.001||target>max+.001)))return {ok:false,reason:axis+' target '+target.toFixed(3)+' mm is outside '+min.toFixed(3)+'..'+max.toFixed(3)+' mm. Move only toward the stock.'};
+  return {ok:true,current:current,target:target,min:min,max:max,returning:returningLow||returningHigh,reason:'Target '+target.toFixed(3)+' mm is inside the stock-aware positioning envelope.'};
+}
 function cncPresentationState(job,health,controller){
   var state=String(job&&job.agentState||''),jobAt=Date.parse(job&&job.agentAt||''),healthAt=Date.parse(CNC.agent&&CNC.agent.at||'');
   var recovered=state==='error'&&controller&&controller.idle&&!health.moving&&!health.incident&&Number.isFinite(jobAt)&&Number.isFinite(healthAt)&&healthAt-jobAt>=15000;
@@ -1877,7 +1884,7 @@ function cncRenderAgent(job){
   var resume=document.getElementById('cncResumeBtn'); if(resume){resume.disabled=state!=='paused'&&!(hasSavedResume&&controller.idle&&!h.moving);resume.textContent=hasSavedResume&&state!=='paused'?'Resume saved carve':'Resume';}
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!['queued','accepted','running','paused'].includes(state);
   var motionBlocked=baseBlocked||!controller.idle;
-  document.querySelectorAll('.cncJogBtn').forEach(function(btn){btn.disabled=motionBlocked;});
+  var jogStep=cncClamp((document.getElementById('cncJogStep')||{}).value||1,.1,100);document.querySelectorAll('.cncJogBtn').forEach(function(btn){var axis=String(btn.dataset.axis||''),dir=Number(btn.dataset.dir)||0,check=cncJogFrameCheck(h,axis,jogStep*dir);btn.disabled=motionBlocked||!check.ok;btn.title=check.reason||'';});
   var zero=document.getElementById('cncZeroBtn'); if(zero) zero.disabled=motionBlocked;
   var restoreXy=document.getElementById('cncRestoreXyBtn'),xyRecovery=h.xyRecovery||{};if(restoreXy){restoreXy.style.display=xyRecovery.available?'':'none';restoreXy.disabled=motionBlocked||!xyRecovery.available;restoreXy.textContent=xyRecovery.available?('Restore saved X/Y ('+Number((xyRecovery.savedWorkPosition||{}).X).toFixed(3)+', '+Number((xyRecovery.savedWorkPosition||{}).Y).toFixed(3)+')'):'Restore saved X/Y';}
   var bed=document.getElementById('cncProbeBedBtn'); if(bed){ bed.disabled=motionBlocked; bed.textContent=su.materialReady?'New board · Re-measure bed':'New board · 1. Probe bed'; }
@@ -2323,7 +2330,7 @@ async function cncJog(axis,dir,button){
   var job=cncCurrentJob(); if(!job){ alert('Pick a job first.'); return; }
   axis=String(axis||'').toUpperCase(); var step=cncClamp((document.getElementById('cncJogStep')||{}).value||1,.1,100);
   if(axis==='Z'&&step>5){ alert('Z is limited to 5 mm per click. Choose 1 mm or 5 mm, then verify the machine before moving again.'); return; }
-  var distance=step*(dir<0?-1:1), feed=axis==='Z'?100:300, st=document.getElementById('cncJogStatus'); if(st)st.textContent='One move requested: '+axis+(distance>0?'+':'−')+Math.abs(distance)+' mm.';
+  var distance=step*(dir<0?-1:1),check=cncJogFrameCheck((CNC.agent&&CNC.agent.health)||{},axis,distance);if(!check.ok){alert('Move blocked before reaching the machine: '+check.reason);return;}var feed=axis==='Z'?100:300, st=document.getElementById('cncJogStatus'); if(st)st.textContent='One move requested: '+axis+(distance>0?'+':'−')+Math.abs(distance)+' mm.';
   return cncQueueMachineAction('jog',{axis:axis,distanceMm:distance,feedMmPerMin:feed},button);
 }
 async function cncProbe(kind,button){ var t=20, label=kind==='bed'?'exposed bed':'top of the wood', su=((CNC.agent||{}).health||{}).setup||{}, replacing=kind==='bed'&&(!!su.probeLocked||!!su.materialReady), action=kind==='bed'?'probe_bed':kind==='tool'?'probe_tool':'probe_stock', explanation=kind==='tool'?'Project will preserve the saved material thickness and X/Y origin, then save the new bit\'s Z automatically.':'Project will search in short no-alarm segments and return to the starting height if it does not find the plate.'; var warning=replacing?'\n\nThis starts a new material measurement and replaces the saved bed/stock profile. X/Y remains unchanged.':''; if(!confirm((kind==='tool'?'Touch off the changed bit on the ':'Probe the ')+label+' with the fixed '+t.toFixed(1)+' mm Genmitsu puck?\nPlace the puck flat on the surface, attach the clip, and keep hands clear.\n\n'+explanation+warning))return; await cncSaveProbeThickness(); return cncMachineAction(action,{confirmReprobe:replacing},button); }

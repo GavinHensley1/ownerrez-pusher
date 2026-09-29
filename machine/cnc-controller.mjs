@@ -911,12 +911,15 @@ export class VirtualWorkspace {
     const margin = Number(negativeMarginMm);
     if (!Number.isFinite(margin) || margin < 0 || margin > 60 || (margin > 0 && !new Set(["X", "Y"]).has(axis))) throw new Error("Invalid probe-staging margin");
     const allowedMin = min - margin;
+    const belowMinimum = current < allowedMin - 0.001, aboveMaximum = axis !== "Z" && Number.isFinite(max) && current > max + 0.001;
+    const returningFromLow = belowMinimum && Number(distanceMm) > 0 && target > current;
+    const returningFromHigh = aboveMaximum && Number(distanceMm) < 0 && target < current;
     const aboveFiniteMaximum = axis !== "Z" && Number.isFinite(max) && target > max + 0.001;
-    if (target < allowedMin - 0.001 || aboveFiniteMaximum) {
+    if ((!returningFromLow && !returningFromHigh && (target < allowedMin - 0.001 || aboveFiniteMaximum)) || (belowMinimum && Number(distanceMm) <= 0) || (aboveMaximum && Number(distanceMm) >= 0)) {
       const allowed = axis === "Z" ? `${allowedMin.toFixed(3)} or higher` : `${allowedMin.toFixed(3)}..${max.toFixed(3)}`;
       throw new Error(`Virtual ${axis} barrier rejects target ${target.toFixed(3)}; allowed ${allowed}`);
     }
-    return { axis, current, target, min: allowedMin, max, probeStagingMarginMm: margin };
+    return { axis, current, target, min: allowedMin, max, probeStagingMarginMm: margin, returningToEnvelope: returningFromLow || returningFromHigh };
   }
 
   snapshot() { return { calibrated: Boolean(this.bounds), createdAt: this.createdAt, bounds: this.bounds }; }

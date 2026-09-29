@@ -12,6 +12,7 @@ import { buildBufferedStopResume, buildCheckpointReplayResume, buildResumeProgra
 import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
 import { completeStockProbe, completeToolTouch } from "./cnc-setup-flow.mjs";
 import { appendCncEvent } from "./cnc-event-journal.mjs";
+import { assertWorkJogWithinStock, positioningBoundsFromStock } from "./cnc-positioning-envelope.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
@@ -123,7 +124,9 @@ const clearSetup = () => Object.assign(setup, { xyReady: false, xyLockStatus: "u
 const clearProbeSetup = (status = "unlocked_reprobe_required") => Object.assign(setup, { bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: status, probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
 const rebuildWorkspaceFromSetup = () => {
   if (!setup.xyReady || !setup.probeReady || !Number.isFinite(setup.xyOriginMPos?.X) || !Number.isFinite(setup.xyOriginMPos?.Y) || !Number.isFinite(setup.zOriginMPos) || !Number.isFinite(setup.maxCutDepthMm)) { workspace.clear(); return null; }
-  return workspace.setBounds({ X: { min: setup.xyOriginMPos.X, max: setup.xyOriginMPos.X + 360 }, Y: { min: setup.xyOriginMPos.Y, max: setup.xyOriginMPos.Y + 360 }, Z: { min: setup.zOriginMPos - setup.maxCutDepthMm, max: null } });
+  let saved; try { saved = readProgram(PROGRAM_STATE_PATH); } catch {}
+  const stock = positioningBoundsFromStock(setup.xyOriginMPos, saved?.context || {});
+  return workspace.setBounds({ ...stock, Z: { min: setup.zOriginMPos - setup.maxCutDepthMm, max: null } });
 };
 const persistLockedXy = (status) => {
   if (!setup.xyReady) return null;
@@ -289,6 +292,10 @@ const jog = async (axis, payload) => {
     const distance = Number(payload.distanceMm);
     if (axis === "Z" && (!Number.isFinite(distance) || Math.abs(distance) > 5)) throw new Error("Z jogs are limited to 5 mm per Project command");
     if (axis === "Z" && setup.probeLocked) assertLockedProbeZJog(setup, await assertIdle(), distance);
+    if (new Set(["X", "Y"]).has(axis)) {
+      const before = await assertIdle(), workPosition = workPositionForStatus(before);
+      assertWorkJogWithinStock({ workPosition, axis, distanceMm: distance, stockWidthMm: payload.stockWidthMm, stockHeightMm: payload.stockHeightMm });
+    }
     const manualPositioning = Boolean(payload.manualPositioning);
     const calibration = manualPositioning && !workspace.snapshot().calibrated;
     const safeRetract = manualPositioning && axis === "Z" && distance > 0;
