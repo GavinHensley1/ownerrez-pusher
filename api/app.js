@@ -2710,14 +2710,14 @@ if(action==="email_recipients"){
             pieceW:String(source.pieceW||source.sizeMM||""), pieceH:String(source.pieceH||""), imgAR:String(source.imgAR||""),
             reliefDepth:"", flattenBg:"false", invertDepth:String(source.invertDepth||"false"),
             cutout:"silhouette", tabs:"6", tabHeight:"1.5",
-            bit:"Genmitsu MC40A · 3.175mm 2-flute flat nose · silver case",
+            bit:"SpeTool W03010 · 1/8″ single-flute O-flute upcut · 1/8″ shank",
             planStatus:"draft", depthApprovalStatus:"probe-required", at:now, updatedAt:now
           };
           try{if(redis)await redis.set("parkside:cnc:img:"+preparedJobId,artwork);}catch(e){return res.status(500).json({error:"db error"});}
           st.jobs.push(rec);if(st.jobs.length>200)st.jobs=st.jobs.slice(-200);
         } else if(b.updateJob&&typeof b.updateJob==="object"){
           const u=b.updateJob; const id=String(u.id||"");
-          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","metalMode","depthApprovalStatus","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","originOffsetXMm","originOffsetYMm","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); if(u.invalidatePlan===true){x.planStatus="draft";x.hasGcode=false;delete x.planHash;delete x.gcodeStages;delete x.activeStage;} x.updatedAt=now; } return x; });
+          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","metalMode","depthApprovalStatus","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","originOffsetXMm","originOffsetYMm","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight","xyOriginXMPos","xyOriginYMPos","xyLockedAt","stockThicknessMm","maxCutDepthMm","probeLockedAt"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); if(u.invalidatePlan===true){x.planStatus="draft";x.hasGcode=false;delete x.planHash;delete x.gcodeStages;delete x.activeStage;} x.updatedAt=now; } return x; });
           if(u.invalidatePlan===true) try{if(redis){await redis.del("parkside:cnc:plan:"+id);await redis.del("parkside:cnc:gc:"+id);for(const stage of ["rough","finish","detail","profile","all"])await redis.del("parkside:cnc:gc:"+id+":"+stage);}}catch(e){}
         } else if(b.delJob){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
@@ -2842,7 +2842,7 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","probe_bed","probe_stock","probe_tool","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["jog","probe_bed","probe_stock","probe_tool","restore_probe","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
               if(!st.agent||(["recover_controller","recover_rear_y_limit"].indexOf(act)===-1&&!health.connected)) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
@@ -2851,6 +2851,8 @@ if(action==="email_recipients"){
               if(act==="probe_tool"&&!setup.materialReady&&!setup.stockThicknessMm) return res.status(409).json({error:"Complete one bed + stock setup before touching off a changed bit",cnc:st});
               if(act==="probe_stock"&&setup.probeLocked) return res.status(409).json({error:"Probe calibration is locked; re-probe the bed first to replace it",cnc:st});
               if(act==="probe_bed"&&setup.probeLocked&&b.confirmReprobe!==true) return res.status(400).json({error:"Explicit confirmation is required to replace the locked Z calibration",cnc:st});
+              if(act==="restore_probe"&&(setup.probeLocked||!setup.xyReady)) return res.status(409).json({error:"Saved probes can be restored only after an X/Y-only reset with a continuous X/Y lock",cnc:st});
+              if(act==="restore_probe"&&b.confirm!==true) return res.status(400).json({error:"Explicit X/Y-only probe restoration confirmation is required",cnc:st});
               if(act==="lock_probe"&&(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady)) return res.status(409).json({error:"Probe both the bed and stock before locking calibration",cnc:st});
               if(act==="zero_z"&&(!setup.probeLocked||!setup.stockProbeReady)) return res.status(409).json({error:"Lock a measured stock calibration before setting physical stock Z zero",cnc:st});
               if(act==="zero_z"&&b.confirm!==true) return res.status(400).json({error:"Explicit stock Z-zero confirmation is required",cnc:st});
@@ -2902,6 +2904,7 @@ if(action==="email_recipients"){
                 if(String(status.state||"").split(":")[0]!=="Alarm"||!pins.includes("Y")||/[XZP]/.test(pins)) return res.status(409).json({error:"Rear-Y recovery requires an Alarm with only the Y limit input active",cnc:st});
                 cmd.confirm=b.confirm===true;
               }
+              if(act==="restore_probe")cmd.confirm=b.confirm===true;
               if(act==="resume_saved"){cmd.confirm=b.confirm===true;cmd.allowReposition=true;}
               if(act==="restore_xy"){
                 if(!health.xyRecovery||health.xyRecovery.available!==true) return res.status(409).json({error:"Exact saved X/Y recovery is not available in the current controller state",cnc:st});

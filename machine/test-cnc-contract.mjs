@@ -131,7 +131,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /function cncAddDepthRegion/);
   assert.match(html, /function cncApprovePlanAndGenerate/);
   assert.match(html, /function cncSavePlanDraft/);
-  assert.match(html, /Draft saved\. No G-code was created and no machine command was sent\./);
+  assert.match(html, /Draft saved with this project’s X\/Y and probe snapshot\. No G-code was created and no machine command was sent\./);
   assert.match(html, /job\.planStatus!=='approved'/);
   assert.match(html, /Cyan · surface \/ highest/);
   assert.match(html, /Gold · shallow detail/);
@@ -214,6 +214,8 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /Explicit confirmation is required to replace the locked Z calibration/);
   assert.match(api, /cmd\.confirmReprobe=b\.confirmReprobe===true/);
   assert.match(api, /cmd\.confirmNewProject=true/);
+  assert.match(api, /restore_probe/);
+  assert.match(api, /Explicit X\/Y-only probe restoration confirmation is required/);
   assert.doesNotMatch(api, /Test the probe circuit with the plate touching the bit before probing the bed/);
   assert.match(api, /health\.xyRecovery/);
   assert.match(api, /This stage changed bits\. Use Changed bit/);
@@ -266,6 +268,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /restore_xy: "\/zero\/xy\/restore-after-power-cycle"/);
   assert.match(agent, /confirmReprobe: command\.confirmReprobe === true/);
   assert.match(agent, /confirmNewProject: command\.confirmNewProject === true/);
+  assert.match(agent, /restore_probe: "\/probe\/restore-after-xy-zero"/);
   assert.match(agent, /CNC_AGENT_PROBE_TIMEOUT_MS \|\| 180_000/);
   assert.match(agent, /"\/probe\/bed", "\/probe\/stock", "\/probe\/tool", "\/probe\/recover"/);
   assert.ok(agent.includes('const isHealth = path === "/health"'));
@@ -333,6 +336,11 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /restoreOrRebaseLockedXy\(result\.after, workOffset\)/);
   assert.match(daemon, /auto_restored_after_power_cycle/);
   assert.match(daemon, /Explicit new-project X\/Y reset confirmation is required/);
+  assert.match(html, /Restore probes after X\/Y-only reset/);
+  assert.match(html, /function cncRestoreProbeAfterXy/);
+  assert.match(daemon, /probePreserved: setup\.probeLocked === true/);
+  assert.match(daemon, /\/probe\/restore-after-xy-zero/);
+  assert.match(agent, /probeRecovery: health\?\.probeRecovery \|\| null/);
   assert.doesNotMatch(daemon, /Probe circuit is open|probeCircuitIsFresh|\/probe\/test/);
   assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*removeMaterialProfile\(MATERIAL_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);/);
   assert.match(daemon, /restoreLockedProbe\(result\.after, workOffset\)/);

@@ -11,7 +11,7 @@ import { readProgram, saveProgram } from "./cnc-program-state.mjs";
 import { buildBufferedStopResume, buildCheckpointReplayResume, buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
 import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
 import { completeStockProbe, completeToolTouch } from "./cnc-setup-flow.mjs";
-import { appendCncEvent } from "./cnc-event-journal.mjs";
+import { appendCncEvent, readLatestCompletedStockProbe } from "./cnc-event-journal.mjs";
 import { assertWorkJogWithinStock, positioningBoundsFromStock } from "./cnc-positioning-envelope.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
@@ -125,6 +125,7 @@ const clearProbeSetup = (status = "unlocked_reprobe_required") => Object.assign(
 const rebuildWorkspaceFromSetup = () => {
   if (!setup.xyReady || !setup.probeReady || !Number.isFinite(setup.xyOriginMPos?.X) || !Number.isFinite(setup.xyOriginMPos?.Y) || !Number.isFinite(setup.zOriginMPos) || !Number.isFinite(setup.maxCutDepthMm)) { workspace.clear(); return null; }
   let saved; try { saved = readProgram(PROGRAM_STATE_PATH); } catch {}
+  if (!(Number(saved?.context?.stockWidthMm) > 0 && Number(saved?.context?.stockHeightMm) > 0)) { workspace.clear(); return null; }
   const stock = positioningBoundsFromStock(setup.xyOriginMPos, saved?.context || {});
   return workspace.setBounds({ ...stock, Z: { min: setup.zOriginMPos - setup.maxCutDepthMm, max: null } });
 };
@@ -277,9 +278,13 @@ const xyRecoverySnapshot = () => {
     return { available: true, savedWorkPosition: plan.savedWorkPosition, rebasedOriginMPos: plan.rebasedOriginMPos, lockedAt: plan.lock.lockedAt };
   } catch (error) { return { available: false, reason: error?.message || "X/Y recovery unavailable" }; }
 };
+const probeRecoverySnapshot = () => {
+  const prior = readLatestCompletedStockProbe(EVENT_JOURNAL_PATH), ageMs = prior ? Date.now() - Date.parse(prior.at) : NaN;
+  return { available: !!prior && Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 4 * 60 * 60 * 1000 && setup.xyReady && setup.xyLockStatus === "locked" && !setup.probeLocked, sourceProbeAt: prior?.at || null, stockThicknessMm: prior?.stockThicknessMm ?? null, maxCutDepthMm: prior?.maxCutDepthMm ?? null };
+};
 const health = () => {
   if (!controller.connected && !hazardousOperationActive()) void recoverIdleConnection();
-  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise), moving, incident, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, xyRecovery: controller.connected ? xyRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
+  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise), moving, incident, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, xyRecovery: controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
 };
 const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (new Set(["Door:0", "Hold:0"]).has(status.state)) throw new Error(`Controller positioning is paused in ${status.state}. The external router may be removed; use Enable positioning first.`); if (status.state !== "Idle") throw new Error(`Controller must report Idle before positioning, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`); return status; };
@@ -319,15 +324,47 @@ const setXyZero = async (payload) => {
   if (payload.confirmNewProject !== true) throw new Error("Explicit new-project X/Y reset confirmation is required");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   await motionGuard(); const before = await assertIdle(); await controller.setWorkOffset({ x: 0, y: 0 });
-  removeProbeLock(PROBE_STATE_PATH);
-  removeMaterialProfile(MATERIAL_STATE_PATH);
-  clearProbeSetup("new_project_reprobe_required");
-  Object.assign(setup, { materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null });
   setup.xyOriginMPos = coordinates(before); setup.xyReady = true; setup.updatedAt = new Date().toISOString();
   setup.xyLockStatus = "locked";
   persistLockedXy(before);
+  if (setup.probeLocked) persistLockedProbe(before);
   rebuildWorkspaceFromSetup();
-  return { setup: { ...setup }, status: before };
+  recordEvent("origin.xy_zeroed", { probePreserved: setup.probeLocked === true, status: before.raw });
+  return { setup: { ...setup }, status: before, probePreserved: setup.probeLocked === true };
+};
+const restoreProbeAfterXyOnlyReset = async (payload) => {
+  if (payload.confirm !== true) throw new Error("Explicit X/Y-only probe restoration confirmation is required");
+  if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
+  if (!setup.xyReady || setup.xyLockStatus !== "locked") throw new Error("A continuous saved X/Y frame is required before restoring probes");
+  if (setup.probeLocked) throw new Error("Probe calibration is already locked");
+  const prior = readLatestCompletedStockProbe(EVENT_JOURNAL_PATH);
+  if (!prior) throw new Error("No completed stock probe is available to restore");
+  const ageMs = Date.now() - Date.parse(prior.at);
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > 4 * 60 * 60 * 1000) throw new Error("The saved stock probe is too old to restore safely");
+  await motionGuard();
+  const status = await assertIdle(), workOffset = parseWorkOffset(await controller.query("$#")), stockSurfaceMPos = Number(workOffset.Z);
+  if (!Number.isFinite(stockSurfaceMPos)) throw new Error("Current controller Z origin is unavailable");
+  lastWorkOffset = workOffset;
+  Object.assign(setup, {
+    bedProbeReady: true, stockProbeReady: true, probeReady: true, probeLocked: true,
+    probeLockStatus: "restored_after_xy_only_reset", probeLockedAt: new Date().toISOString(),
+    probeThickness: PROBE_PUCK_THICKNESS_MM,
+    bedSurfaceMPos: stockSurfaceMPos - prior.stockThicknessMm,
+    stockSurfaceMPos,
+    stockThicknessMm: prior.stockThicknessMm,
+    safetyFloorMm: prior.safetyFloorMm,
+    maxCutDepthMm: prior.maxCutDepthMm,
+    zOriginMPos: stockSurfaceMPos,
+    materialReady: true,
+    savedStockThicknessMm: prior.stockThicknessMm,
+    savedSafetyFloorMm: prior.safetyFloorMm,
+    updatedAt: new Date().toISOString(),
+  });
+  persistMaterialProfile();
+  persistLockedProbe(status);
+  rebuildWorkspaceFromSetup();
+  recordEvent("probe.restored_after_xy_only_reset", { sourceProbeAt: prior.at, stockThicknessMm: prior.stockThicknessMm, maxCutDepthMm: prior.maxCutDepthMm });
+  return { ok: true, setup: { ...setup }, status, sourceProbeAt: prior.at };
 };
 const restoreXyAfterPowerCycle = async (payload) => {
   if (payload.confirmGantryUnmoved !== true) throw new Error("Confirm the gantry was not moved while controller power was off");
@@ -436,7 +473,7 @@ const probeSurface = async (kind, payload) => {
     rebuildWorkspaceFromSetup();
     persistLockedXy(result.after);
     captureInterruptedPosition(result.after, `probe_${kind}`, { moved: true });
-    recordEvent("probe.completed", { kind, searchedMm: result.searchedMm, stockThicknessMm: setup.stockThicknessMm, maxCutDepthMm: setup.maxCutDepthMm, lockStatus: setup.probeLockStatus });
+    recordEvent("probe.completed", { kind, searchedMm: result.searchedMm, probeThickness: setup.probeThickness, bedSurfaceMPos: setup.bedSurfaceMPos, stockSurfaceMPos: setup.stockSurfaceMPos, stockThicknessMm: setup.stockThicknessMm, safetyFloorMm: setup.safetyFloorMm, maxCutDepthMm: setup.maxCutDepthMm, zOriginMPos: setup.zOriginMPos, lockStatus: setup.probeLockStatus });
     return { ...result, setup: { ...setup } };
   } catch (error) { incident = error?.message || "PROBE_FAILED"; setup.probePhase = error?.code === "PROBE_SEARCH_EXHAUSTED" ? "returned_no_contact" : "error"; setup.updatedAt = new Date().toISOString(); recordEvent("probe.failed", { kind, code: error?.code, message: incident, travelledMm: setup.probeTravelledMm, limitMm: setup.probeSearchLimitMm }); throw error; } finally { moving = false; }
 };
@@ -575,6 +612,7 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && req.url === "/workspace/set") { removeXyLock(XY_STATE_PATH); setup.xyReady = false; setup.xyLockStatus = "unlocked"; setup.xyLockedAt = null; setup.xyOriginMPos = null; setup.updatedAt = new Date().toISOString(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
     if (req.method === "POST" && req.url === "/zero/xy") return json(res, 200, await setXyZero(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/zero/xy/restore-after-power-cycle") return json(res, 200, await restoreXyAfterPowerCycle(await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/probe/restore-after-xy-zero") return json(res, 200, await restoreProbeAfterXyOnlyReset(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/zero/z") return json(res, 200, await setStockZZero(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));

@@ -90,6 +90,12 @@ test("daemon completes new-board setup, changed-bit touch-off, and no-contact re
   const measuredThickness = stock.value.setup.stockThicknessMm;
   assert(measuredThickness > 0);
 
+  const zero = await unixRequest(socketPath, "/zero/xy", { confirmNewProject: true });
+  assert.equal(zero.status, 200, `${stderr}\n${JSON.stringify(zero.value)}`);
+  assert.equal(zero.value.probePreserved, true);
+  assert.equal(zero.value.setup.probeLocked, true);
+  assert.equal(zero.value.setup.stockThicknessMm, measuredThickness);
+
   grbl.setProbe({ startZ: 15, targetZ: -6 });
   const tool = await unixRequest(socketPath, "/probe/tool", { thicknessMm: 12.1, maxSearchMm: 73 });
   assert.equal(tool.status, 200, stderr);
