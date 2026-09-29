@@ -241,6 +241,7 @@ test("RU2100 rough safety gate requires the exact chip-load contract and cleared
     "; RU2100 CONSERVATIVE CONTRACT: 18000 RPM | 2 cutting edges | 400 mm/min | chip load 0.01111 mm/tooth",
     "; RADIAL ENGAGEMENT: 0.800 mm actual / 6.350 mm = 12.6% | AXIAL STEP 0.0250 mm",
     "; START POLICY: current work Z must be at least 2.400 mm; first axis motion is XY and never Z down",
+    "; ENTRY LENGTH POLICY: require a tool-clear interior lane at least 8.0 mm long; shuttle only inside that lane until 20.0 mm of gradual XY ramp is complete",
     "G21",
     "G90",
     "G17",
@@ -260,7 +261,7 @@ test("RU2100 rough safety gate requires the exact chip-load contract and cleared
   assert.throws(() => check(good.replace("G0 X1.000 Y1.000", "G0 Z2.400\nG0 X1.000 Y1.000")), /first axis motion must be XY/);
   assert.throws(() => check(good.replace("G1 Z0.5000 F80", "G1 Z-0.0200 F80")), /vertical move reaches the metal surface/);
   assert.throws(() => check(good.replace("over 20.000 mm", "over 6.378 mm")), /invalid ramp geometry/);
-  const omitted = good.split("\n").slice(0, 5).concat("; RU2100 ROUGH OMITTED: no continuous safe interior path >= 20.000 mm").join("\n");
+  const omitted = good.split("\n").slice(0, 6).concat("; RU2100 ROUGH OMITTED: no tool-clear interior lane >= 8.000 mm").join("\n");
   assert.deepEqual(check(omitted).omitted, true);
 });
 
