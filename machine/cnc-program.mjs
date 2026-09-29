@@ -116,7 +116,7 @@ export function validateProgramStockEnvelope(analysis, { widthMm, heightMm, rese
 export function approvedProgramDepth(setup = {}, context = {}) {
   const protectedDepth = Number(setup.maxCutDepthMm);
   if (!(protectedDepth > 0)) throw new Error("Measured stock depth is unavailable");
-  if (context.operation !== "profile" || context.allowSacrificialCutThrough !== true) return protectedDepth;
+  if (!["profile", "release"].includes(context.operation) || context.allowSacrificialCutThrough !== true) return protectedDepth;
   if (context.sacrificialBackingConfirmed !== true) throw new Error("Sacrificial backing confirmation is required for profile cut-through");
   const stockThickness = Number(setup.stockThicknessMm), targetDepth = Number(context.profileDepthMm);
   if (!(stockThickness > 0) || !(targetDepth > 0)) throw new Error("Measured stock thickness and profile depth are required");

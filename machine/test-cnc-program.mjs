@@ -67,10 +67,11 @@ test("derives a protected no-cut-through depth from two measured surfaces", () =
   assert.throws(() => measuredStockProtection(10, 10.5), /outside the safe/);
 });
 
-test("permits a bounded sacrificial through-cut only for the profile operation", () => {
+test("permits a bounded sacrificial through-cut only for profile and final release", () => {
   const setup = { stockThicknessMm: 3.914, maxCutDepthMm: 3.114 };
   assert.equal(approvedProgramDepth(setup, { operation: "rough", allowSacrificialCutThrough: true, sacrificialBackingConfirmed: true, profileDepthMm: 4.014 }), 3.114);
   assert.equal(approvedProgramDepth(setup, { operation: "profile", allowSacrificialCutThrough: true, sacrificialBackingConfirmed: true, profileDepthMm: 4.014 }), 4.014);
+  assert.equal(approvedProgramDepth(setup, { operation: "release", allowSacrificialCutThrough: true, sacrificialBackingConfirmed: true, profileDepthMm: 4.014 }), 4.014);
   assert.throws(() => approvedProgramDepth(setup, { operation: "profile", allowSacrificialCutThrough: true, profileDepthMm: 4.014 }), /Sacrificial backing confirmation/);
   assert.throws(() => approvedProgramDepth(setup, { operation: "profile", allowSacrificialCutThrough: true, sacrificialBackingConfirmed: true, profileDepthMm: 4.2 }), /outside the approved/);
 });

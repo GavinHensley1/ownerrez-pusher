@@ -102,6 +102,8 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /function cncAssertRaisedMetalSafety/);
   assert.match(html, /function cncAssertRu2100RoughSafety/);
   assert.match(html, /function cncAssertRu2100ProfileSafety/);
+  assert.match(html, /function cncAssertRu2100ReleaseSafety/);
+  assert.match(html, /FINAL RELEASE/);
   assert.match(html, /RU2100 CONSERVATIVE CONTRACT/);
   assert.match(html, /roughPassDepthMm:\.025/);
   assert.match(html, /roughStepoverMm:\.8/);
@@ -276,6 +278,31 @@ test("RU2100 sacrificial profile uses one continuous 0.025 mm-per-lap spiral, si
   assert.equal((text.match(/^G0 Z/mg) || []).length, 1);
 });
 
+test("RU2100 Release removes all six tabs and makes the final bridge the final cutting move", () => {
+  const clampSource = extractNamedFunction(html, "cncClamp");
+  const appendSource = extractNamedFunction(html, "cncAppendRelease");
+  const checkSource = extractNamedFunction(html, "cncAssertRu2100ReleaseSafety");
+  const auditSource = extractNamedFunction(html, "cncAuditMetalProgramV2");
+  const append = new Function(`${clampSource};${appendSource}; return cncAppendRelease;`)();
+  const check = new Function(`${checkSource}; return cncAssertRu2100ReleaseSafety;`)();
+  const audit = new Function(`${auditSource}; return cncAuditMetalProgramV2;`)();
+  const g = ["G21", "G90", "G17", "G4 P2"];
+  append(g, 114, 88, { matThick: 4.014, tabs: 6, tabHeight: 1.5, feed: 400, plunge: 80, safeZ: 3.2, passDepth: 0.025, points: [[2,2],[112,2],[112,86],[2,86],[2,2]] });
+  const text = g.join("\n");
+  assert.equal((text.match(/^; RELEASE TAB \d+ OF 6/gm) || []).length, 6);
+  assert.match(text, /RELEASE TAB 6 OF 6 \(FINAL HOLDING TAB\)/);
+  assert.match(text, /RELEASE WORKHOLDING: buckle must be independently secured/);
+  assert.doesNotMatch(text, /^G1 Z-/m);
+  const proof = check(text, 6);
+  assert.equal(proof.tabs, 6);
+  assert.equal(proof.minZ, -4.014);
+  assert.equal(proof.retractLine, proof.finalCutLine + 1);
+  assert.doesNotThrow(() => audit(text, { stage: "release", profileDepthMm: 4.014, maxFeedMmMin: 400, stockX: 130, stockY: 100, maxCutSegmentMm: 5 }));
+  const lines = text.split(/\r?\n/), finalCut = proof.finalCutLine - 1;
+  lines[finalCut] = lines[finalCut].replace(/Z-?[\d.]+/, "Z-4.2000");
+  assert.throws(() => check(lines.join("\n"), 6), /descends more than 0\.025 mm/);
+});
+
 test("RU2100 rough safety gate requires the exact chip-load contract and cleared-Z ramps", () => {
   const source = extractNamedFunction(html, "cncAssertRu2100RoughSafety");
   const check = new Function(`${source}; return cncAssertRu2100RoughSafety;`)();
@@ -335,7 +362,9 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /job\.stageRequiresProbe=true;job\.stageActivatedAt=now;job\.resumeInvalidatedAt=now/);
   assert.match(api, /interrupted checkpoint belongs to an older generated program/);
   assert.match(html, /resumeInvalidatedAt>=resumeUpdatedAt/);
-  assert.match(api, /\["rough","finish","detail","all","profile"\]/);
+  assert.match(api, /\["rough","finish","detail","all","profile","release"\]/);
+  assert.match(api, /Complete the Profile stage before loading Final Release/);
+  assert.match(api, /target\.activeStage==="profile"\)target\.profileCompletedAt=now/);
   assert.match(api, /@gzip:/);
   assert.match(api, /command\.gcodeGzip/);
   assert.match(api, /cmd\.manualRouter=job\.planStatus==="approved"/);
