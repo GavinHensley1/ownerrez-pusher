@@ -221,10 +221,24 @@ test("RU2100 sacrificial profile uses one continuous 0.025 mm-per-lap spiral, si
   assert.match(text, /with 6 tabs 1\.5mm through 4\.014mm stock/);
   assert.match(text, /PROFILE ENTRY POLICY: one continuous contour spiral/);
   assert.match(text, /PROFILE SPIRAL POLICY: descend no more than 0\.0250 mm per complete contour lap/);
+  assert.match(text, /PROFILE TAB EXIT POLICY: descend from each holding tab over 20\.0 mm; no commanded Z decrease exceeds 0\.0250 mm per cutting move/);
   assert.equal(targets.length, Math.ceil(4.014 / 0.025));
   assert.equal(Math.min(...targets), -4.014);
   for (let i = 1; i < targets.length; i++) assert.ok(Math.abs(targets[i] - targets[i - 1]) <= 0.0251);
+  let previousZ = null;
+  for (const line of text.split(/\r?\n/)) {
+    const z = line.match(/\bZ(-?[\d.]+)/i);
+    if (/^G1\b/i.test(line) && /[XY]-?[\d.]+/i.test(line) && z && previousZ != null && previousZ <= 0) {
+      assert.ok(previousZ - Number(z[1]) <= 0.0251, `unsafe profile descent: ${line}`);
+    }
+    if (z) previousZ = Number(z[1]);
+  }
   assert.doesNotThrow(() => check(text));
+  const unsafe = text.split(/\r?\n/);
+  const tabExit = unsafe.findIndex((line, i) => /Z-2\.5140\b/.test(line) && unsafe[i + 1] && !/Z-2\.5140\b/.test(unsafe[i + 1]));
+  assert.ok(tabExit >= 0, "expected a holding-tab exit in generated profile");
+  unsafe[tabExit + 1] = unsafe[tabExit + 1].replace(/Z-?[\d.]+/, "Z-4.0140");
+  assert.throws(() => check(unsafe.join("\n")), /cutting move descends more than 0\.025 mm/);
   assert.equal(g[0].startsWith("; --- Profile cut-out"), true);
   assert.equal(g.at(-1), "G0 Z3.20");
   assert.match(text, /G0 X2\.000 Y2\.000\nG1 Z0\.5000 F80/);
