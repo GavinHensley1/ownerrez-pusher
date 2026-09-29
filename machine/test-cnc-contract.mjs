@@ -91,7 +91,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Number\(p\.version\)!==4/);
   assert.match(html, /Prepare raised-metal copy/);
   assert.match(html, /C752 nickel silver/);
-  assert.match(html, /Genmitsu MC40A · 3\.175mm 2-flute flat nose · silver case/);
+  assert.match(html, /SpeTool W03010 · 1\/8″ single-flute O-flute upcut · 1\/8″ shank/);
   assert.match(html, /Genmitsu MC40A · 3\.175mm 2-flute ball nose · dark case/);
   assert.match(html, /reliefMode:metal\?'raised-surface':'standard'/);
   assert.match(html, /RELIEF CONTRACT: raised artwork remains at stock Z0/);
@@ -114,6 +114,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /cncGenReliefRegion\(img/);
   assert.match(html, /id="cncPlanModal"/);
   assert.match(html, /Approve plan &amp; generate G-code/);
+  assert.match(html, /Save draft plan/);
   assert.match(html, /function cncPlanBuildMask/);
   assert.match(html, /smooth neutral-gray/);
   assert.match(html, /p\.chroma<=4&&p\.lum>=135&&local<=8/);
@@ -129,6 +130,8 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /finishRuns=rowRuns/);
   assert.match(html, /function cncAddDepthRegion/);
   assert.match(html, /function cncApprovePlanAndGenerate/);
+  assert.match(html, /function cncSavePlanDraft/);
+  assert.match(html, /Draft saved\. No G-code was created and no machine command was sent\./);
   assert.match(html, /job\.planStatus!=='approved'/);
   assert.match(html, /Cyan · surface \/ highest/);
   assert.match(html, /Gold · shallow detail/);
