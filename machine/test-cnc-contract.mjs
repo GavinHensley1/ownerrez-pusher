@@ -252,7 +252,7 @@ test("RU2100 rough safety gate requires the exact chip-load contract and cleared
   assert.throws(() => check(good.replace("G0 X1.000 Y1.000", "G0 Z2.400\nG0 X1.000 Y1.000")), /first axis motion must be XY/);
   assert.throws(() => check(good.replace("G1 Z0.5000 F80", "G1 Z-0.0200 F80")), /vertical move reaches the metal surface/);
   assert.throws(() => check(good.replace("over 20.000 mm", "over 6.378 mm")), /invalid ramp geometry/);
-  const omitted = good.split("\n").slice(0, 5).concat("; RU2100 ROUGH OMITTED: no continuous safe interior lane >= 20.000 mm").join("\n");
+  const omitted = good.split("\n").slice(0, 5).concat("; RU2100 ROUGH OMITTED: no continuous safe interior path >= 20.000 mm").join("\n");
   assert.deepEqual(check(omitted).omitted, true);
 });
 
