@@ -116,6 +116,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(api, /Artwork only; probe, origin, depth, G-code, and checkpoints were intentionally not copied/);
   assert.match(html, /function cncDetailFidelity/);
   assert.match(html, /function cncAssertDetailFidelity/);
+  assert.match(html, /omitted\.push\('Detail \('\+String\(detailError/);
   assert.match(html, /Three-bit relief \+ detail/);
   assert.match(html, /30° V-bit 0\.1mm/);
   assert.match(html, /DETAIL SAFETY: recessed grooves only/);

@@ -3648,7 +3648,10 @@ async function cncApprovePlanAndGenerate(){
       var negativeCut=/^G1\b(?=.*[XY]-?[\d.]+)(?=.*\bZ-[\d.]+)/im.test(gc);
       if(metal&&(stage==='finish'||stage==='detail')&&!negativeCut){omitted.push(stage[0].toUpperCase()+stage.slice(1)+' (no RU2100-cleared envelope for this tool)');continue;}
       if(stage==='finish'||stage==='all')cncAssertFinishFidelity(gc);
-      if(stage==='detail')cncAssertDetailFidelity(gc);
+      if(stage==='detail'){
+        try{cncAssertDetailFidelity(gc);}
+        catch(detailError){omitted.push('Detail ('+String(detailError&&detailError.message||detailError).replace(/^Detail fidelity gate:\s*/,'')+')');continue;}
+      }
       if(metal&&stage!=='profile')cncAssertRaisedMetalSafety(gc);
       if(metal&&stage==='profile'&&/RU2100/i.test(tool))cncAssertRu2100ProfileSafety(gc);
       if(metal){
