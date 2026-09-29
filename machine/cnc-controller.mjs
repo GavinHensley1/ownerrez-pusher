@@ -336,6 +336,66 @@ export class GrblTcpController extends EventEmitter {
     });
   }
 
+  recoverRearYLimit({ retractMm = 5, feed = 100 } = {}) {
+    return this.#enqueue(async () => {
+      if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for rear-limit recovery");
+      if (this.programRunning) throw new Error("Cannot recover a rear limit while a program is active");
+      const retract = Math.abs(Number(retractMm)), speed = Number(feed);
+      if (!Number.isFinite(retract) || retract < 1 || retract > 10) throw new Error("Rear-limit recovery must be 1-10 mm");
+      if (!Number.isFinite(speed) || speed < 20 || speed > 150) throw new Error("Rear-limit recovery feed must be 20-150 mm/min");
+      await this.motionGuard();
+      const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      if (before.state.split(":")[0] !== "Alarm") throw new Error(`Rear-limit recovery requires Alarm, got ${before.state}`);
+      const [beforeFeed, beforeSpindle] = feedAndSpindle(before);
+      if (beforeFeed !== 0 || beforeSpindle !== 0) throw new Error(`Non-zero feed/spindle before rear-limit recovery: ${before.FS}`);
+      const pins = String(before.Pn || "");
+      if (!pins.includes("Y") || /[XZP]/.test(pins)) throw new Error(`Rear-limit recovery requires only the Y limit input, got ${pins || "none"}`);
+      const beforeY = coordinateAxis(before, "Y");
+      let hardLimitsWereEnabled;
+      let hardLimitsSuppressed = false;
+      try {
+        await this.#lineCommandUnlocked("M5", true).catch(() => []);
+        await this.#lineCommandUnlocked("$X", false);
+        const unlocked = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+        if (unlocked.state !== "Idle") throw new Error(`Controller did not unlock for rear-limit recovery: ${unlocked.raw}`);
+        if (!String(unlocked.Pn || "").includes("Y")) throw new Error("Rear Y input cleared before the guarded inward move; inspect the switch before retrying");
+        hardLimitsWereEnabled = await this.#booleanSettingUnlocked(21);
+        if (hardLimitsWereEnabled) {
+          await this.#lineCommandUnlocked("$21=0", false);
+          hardLimitsSuppressed = true;
+        }
+        const reply = await this.#guardedMotionLine(`$J=G91 G21 Y-${retract.toFixed(3)} F${Math.round(speed)}`, 20_000);
+        const deadline = now() + Math.max(10_000, (retract / speed) * 180_000 + 5_000), samples = [];
+        let cleared;
+        while (now() < deadline) {
+          await this.motionGuard();
+          const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
+          samples.push(status.raw);
+          if (status.state === "Idle") { cleared = status; break; }
+          if (!(status.state === "Jog" || status.state === "Run")) throw new Error(`Unexpected rear-limit recovery state: ${status.raw}`);
+          await sleep(200);
+        }
+        if (!cleared) throw new Error("Rear-limit recovery completion timeout");
+        const delta = coordinateAxis(cleared, "Y") - beforeY;
+        if (delta >= -0.25 || Math.abs(Math.abs(delta) - retract) > 0.75) throw new Error(`Rear-limit recovery delta mismatch: expected -${retract}, got ${delta}`);
+        if (String(cleared.Pn || "").includes("Y")) throw new Error("Rear Y limit input did not clear after the inward move");
+        if (hardLimitsWereEnabled) {
+          await this.#lineCommandUnlocked("$21=1", false);
+          hardLimitsSuppressed = false;
+        }
+        const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+        const [afterFeed, afterSpindle] = feedAndSpindle(after);
+        if (after.state !== "Idle" || afterFeed !== 0 || afterSpindle !== 0 || String(after.Pn || "").includes("Y")) throw new Error(`Unsafe controller state after rear-limit recovery: ${after.raw}`);
+        await this.motionGuard();
+        return { before, unlocked, reply, after, deltaMm: delta, samples, hardLimitsRestored: hardLimitsWereEnabled };
+      } catch (error) {
+        if (hardLimitsWereEnabled === true && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
+        if (!this.fault) await this.#emergencyStop(`REAR_Y_LIMIT_RECOVERY_FAILED:${error.message}`);
+        throw this.fault || error;
+      }
+    });
+  }
+
   async #booleanSettingUnlocked(setting) {
     const lines = await this.#lineCommandUnlocked("$$", false);
     const match = lines.map((line) => line.match(new RegExp(`^\\$${Number(setting)}=(0|1)(?:\\s|$)`))).find(Boolean);

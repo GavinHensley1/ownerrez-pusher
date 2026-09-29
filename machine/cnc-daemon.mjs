@@ -536,6 +536,27 @@ const recoverStoppedController = async (payload) => {
   captureInterruptedPosition(lastControllerStatus, "stopped_controller_recovery");
   return { ok: true, ...recovered, setup: { ...setup }, workspace: workspace.snapshot() };
 };
+const recoverRearYLimit = async (payload) => {
+  if (payload.confirm !== true) throw new Error("Explicit rear-Y limit recovery confirmation is required");
+  if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
+  moving = true; incident = undefined;
+  try {
+    const result = await controller.recoverRearYLimit({ retractMm: 5, feed: 100 });
+    lastControllerStatus = result.after;
+    const workOffset = parseWorkOffset(await controller.query("$#"));
+    lastWorkOffset = workOffset;
+    await restoreOrRebaseLockedXy(result.after, workOffset);
+    restoreLockedProbe(result.after, workOffset);
+    rebuildWorkspaceFromSetup();
+    persistLockedXy(result.after);
+    captureInterruptedPosition(result.after, "rear_y_limit_recovery", { moved: true });
+    recordEvent("controller.rear_y_limit_recovered", { deltaMm: result.deltaMm, status: result.after.raw });
+    return { ok: true, result, setup: { ...setup }, workspace: workspace.snapshot() };
+  } catch (error) {
+    incident = error?.message || "REAR_Y_LIMIT_RECOVERY_FAILED";
+    throw error;
+  } finally { moving = false; }
+};
 const bodyJson = async (req, maxBytes = MAX_BODY_BYTES) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > maxBytes) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
 
 const localUi = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Project CNC · Local</title><style>body{font:16px system-ui;background:#111827;color:#eef2ff;max-width:820px;margin:30px auto;padding:16px}button{font:inherit;padding:12px 16px;margin:5px;border-radius:8px;border:1px solid #64748b;background:#1e293b;color:white}button.danger{background:#991b1b}pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:8px}</style><h1>Project CNC · Local recovery</h1><p>This console uses Project's local daemon and safety guards without the cloud queue.</p><div><button onclick="recover()">Enable positioning</button><button onclick="start()">Start saved carve</button><button onclick="cmd('/job/pause')">Pause</button><button onclick="cmd('/job/resume')">Resume</button><button class="danger" onclick="cmd('/job/stop')">Stop</button><button onclick="refresh()">Refresh</button></div><pre id="s">Loading…</pre><script>async function req(path,body){let r=await fetch(path,{method:body?'POST':'GET',headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined}),j=await r.json();if(!r.ok)throw Error(j.error||r.status);return j}async function refresh(){try{let h=await req('/health'),p=await req('/job/last');s.textContent=JSON.stringify({controller:h.lastControllerStatus,connected:h.connected,moving:h.moving,incident:h.incident,workspace:h.workspace,setup:h.setup,job:h.job,savedProgram:p.program},null,2)}catch(e){s.textContent='ERROR: '+e.message}}async function cmd(p,b={}){try{await req(p,b);await refresh()}catch(e){alert(e.message);await refresh()}}async function recover(){if(confirm('Enable positioning from a safe Hold:0/Door:0 state? The external router need not be installed and no axis moves during this step.'))await cmd('/controller/recover-stopped',{confirm:true})}async function start(){if(confirm('Start the locally saved carve from line 1 through Project guards?'))await cmd('/job/start-saved',{})}refresh();setInterval(refresh,2000)</script>`;
@@ -578,6 +599,7 @@ const requestHandler = async (req, res) => {
       return json(res, 200, result);
     }
     if (req.method === "POST" && req.url === "/controller/recover-stopped") return json(res,200,await recoverStoppedController(await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/controller/recover-rear-y-limit") return json(res,200,await recoverRearYLimit(await bodyJson(req)));
     return json(res, 404, { ok: false, error: "Not found" });
   } catch (error) { return json(res, 500, { ok: false, error: error?.message || "Error" }); }
 };

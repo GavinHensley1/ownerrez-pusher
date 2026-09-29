@@ -3,8 +3,8 @@ import net from "node:net";
 import test from "node:test";
 import { GrblTcpController, parseProbeResult, parseStatus, parseWorkOffset, probeRetractTimeoutMs, VirtualWorkspace } from "./cnc-controller.mjs";
 
-const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, probeContactAtMm = 1, failSlowProbe = false, startProbeAlarm = false, startAlarm = false, startDoor = false, startHold = false } = {}) => {
-  let connections = 0, statusQueries = 0, probeCommands = 0, x = 0, y = 0, z = startProbeAlarm ? -74 : 0, incremental = false, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm || startAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, hardLimits = true, probeSucceeded = false, probeZ = z;
+const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, probeContactAtMm = 1, failSlowProbe = false, startProbeAlarm = false, startLimitY = false, startAlarm = false, startDoor = false, startHold = false } = {}) => {
+  let connections = 0, statusQueries = 0, probeCommands = 0, x = 0, y = startLimitY ? 151.55 : 0, z = startProbeAlarm ? -74 : 0, incremental = false, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm || startLimitY || startAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, yLimitActive = startLimitY, hardLimits = true, probeSucceeded = false, probeZ = z;
   const probeSurfaceZ = -Math.abs(Number(probeContactAtMm));
   const writes = [];
   const server = net.createServer((socket) => {
@@ -29,7 +29,7 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
               else { state = "Idle"; socket.write(`ok${delimiter}`); }
             }
           }
-          const pins = `${probeActive ? "P" : ""}${zLimitActive ? "Z" : ""}`;
+          const pins = `${probeActive ? "P" : ""}${yLimitActive ? "Y" : ""}${zLimitActive ? "Z" : ""}`;
           socket.write(`<${state}|MPos:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}|FS:${state === "Idle" || state === "Alarm" || state.startsWith("Door") || state.startsWith("Hold") ? `0,${spindle}` : "100,0"}${pins ? `|Pn:${pins}` : ""}>${delimiter}`);
         } else {
           buffer += char;
@@ -47,6 +47,7 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
               y += Number(command.match(/Y(-?\d+(?:\.\d+)?)/)?.[1] || 0);
               z += Number(command.match(/Z(-?\d+(?:\.\d+)?)/)?.[1] || 0);
               if ((command.match(/Z(-?\d+(?:\.\d+)?)/)?.[1] || 0) > 0) { probeActive = false; zLimitActive = false; }
+              if ((command.match(/Y(-?\d+(?:\.\d+)?)/)?.[1] || 0) < 0) yLimitActive = false;
               jogging = true; jogPolls = 0; socket.write(`ok${delimiter}`);
             }
             else if (/^M3 S\d+$/.test(command)) { spindle = Number(command.slice(command.indexOf("S") + 1)); socket.write(`ok${delimiter}`); }
@@ -375,6 +376,17 @@ test("clears a probe-miss alarm without axis or spindle motion", async () => {
   const result = await c.recoverStoppedController();
   assert.equal(result.before.state, "Alarm"); assert.equal(result.after.state, "Idle"); assert(guards >= 1);
   assert(mock.bytes.includes(Buffer.from("$X\r"))); assert(!mock.bytes.includes(Buffer.from("$J="))); assert(!mock.bytes.includes(Buffer.from("M3")));
+  await c.close(); await mock.close();
+});
+
+test("recovers only a rear Y limit with one guarded inward move and restores hard limits", async () => {
+  const mock = await makeMock({ startLimitY: true }); let guards = 0;
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
+  const result = await c.recoverRearYLimit();
+  assert.equal(result.before.state, "Alarm"); assert.equal(result.before.Pn, "Y");
+  assert.equal(result.after.state, "Idle"); assert.equal(result.after.Pn, undefined); assert.equal(result.deltaMm, -5); assert(guards >= 2);
+  assert(mock.bytes.includes(Buffer.from("$21=0\r"))); assert(mock.bytes.includes(Buffer.from("$J=G91 G21 Y-5.000 F100\r"))); assert(mock.bytes.includes(Buffer.from("$21=1\r")));
+  assert(!mock.bytes.includes(Buffer.from("$J=G91 G21 X"))); assert(!mock.bytes.includes(Buffer.from("$J=G91 G21 Z")));
   await c.close(); await mock.close();
 });
 

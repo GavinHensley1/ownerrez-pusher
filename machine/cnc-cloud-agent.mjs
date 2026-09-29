@@ -105,7 +105,7 @@ async function report(command, state, message, extra = {}) {
 }
 
 async function execute(command) {
-  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", probe_tool: "/probe/tool", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", resume_saved: "/job/resume-saved", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
+  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", probe_tool: "/probe/tool", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", recover_rear_y_limit: "/controller/recover-rear-y-limit", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", resume_saved: "/job/resume-saved", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
   const axis = String(command.axis || "").toUpperCase();
   const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);
@@ -140,7 +140,7 @@ async function execute(command) {
         const payload = new Set(["probe_bed", "probe_stock", "probe_tool"]).has(command.action) ? { thicknessMm: command.probeThickness, maxSearchMm: command.maxSearchMm, confirmReprobe: command.confirmReprobe === true }
           : command.action === "restore_xy" ? { confirmGantryUnmoved: command.confirmGantryUnmoved === true }
           : command.action === "zero_xy" ? { confirmNewProject: command.confirmNewProject === true }
-          : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller") ? { confirm: command.confirm === true }
+          : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller" || command.action === "recover_rear_y_limit") ? { confirm: command.confirm === true }
           : command.action === "resume_saved" ? { confirm: command.confirm === true, allowReposition: command.allowReposition === true }
           : command.action === "start" ? { jobId: command.jobId, gcode: decodeProgram(command), stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm, stockReserveMm: command.stockReserveMm, manualRouter: command.manualRouter === true } : {};
         result = await localRequest(path, payload);

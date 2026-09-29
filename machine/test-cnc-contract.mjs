@@ -11,6 +11,18 @@ const daemon = readFileSync(new URL("machine/cnc-daemon.mjs", root), "utf8");
 const controller = readFileSync(new URL("machine/cnc-controller.mjs", root), "utf8");
 const program = readFileSync(new URL("machine/cnc-program.mjs", root), "utf8");
 
+function extractNamedFunction(source, name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} must exist`);
+  const open = source.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) return source.slice(start, i + 1);
+  }
+  throw new Error(`unterminated ${name}`);
+}
+
 test("CNC page script parses and exposes guarded positioning, automatic material save, and tool touch-off", () => {
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
@@ -74,7 +86,21 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /stockToLeaveMm:rough\?\.5:0/);
   assert.match(html, /function cncFinishFidelity/);
   assert.match(html, /function cncAppendDetailContours/);
-  assert.match(html, /Number\(p\.version\)!==3/);
+  assert.match(html, /Number\(p\.version\)!==4/);
+  assert.match(html, /Prepare raised-metal copy/);
+  assert.match(html, /C752 nickel silver/);
+  assert.match(html, /Genmitsu MC40A · 3\.175mm 2-flute flat nose · silver case/);
+  assert.match(html, /Genmitsu MC40A · 3\.175mm 2-flute ball nose · dark case/);
+  assert.match(html, /reliefMode:metal\?'raised-surface':'standard'/);
+  assert.match(html, /RELIEF CONTRACT: raised artwork remains at stock Z0/);
+  assert.match(html, /ENTRY POLICY: vertical plunge inside below-surface relief only/);
+  assert.match(html, /TRAVEL POLICY: all XY rapids at safe Z; vertical retract before exit/);
+  assert.match(html, /function cncAssertRaisedMetalSafety/);
+  assert.match(html, /function cncFitTwoBuckles/);
+  assert.match(html, /Center first of two buckles on this stock/);
+  assert.match(html, /reserved second buckle/);
+  assert.match(api, /prepareMetalJob/);
+  assert.match(api, /Artwork only; probe, origin, depth, G-code, and checkpoints were intentionally not copied/);
   assert.match(html, /function cncDetailFidelity/);
   assert.match(html, /function cncAssertDetailFidelity/);
   assert.match(html, /Three-bit relief \+ detail/);
@@ -96,7 +122,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Detected subject touches the image edge/);
   assert.match(html, /var startX=pts\[0\]\[0\], startY=pts\[0\]\[1\]/);
   assert.doesNotMatch(html, /'G0 X'\+x0\.toFixed\(3\)\+' Y'\+y0\.toFixed\(3\)/);
-  assert.match(html, /function rowRuns\(py,ltr\)/);
+  assert.match(html, /function rowRuns\(py,ltr,belowSurfaceOnly\)/);
   assert.match(html, /roughRuns=rowRuns/);
   assert.match(html, /finishRuns=rowRuns/);
   assert.match(html, /function cncAddDepthRegion/);
@@ -147,6 +173,19 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.doesNotMatch(html, /artwork source/);
   assert.doesNotMatch(html, /G38\.2/);
   assert.doesNotMatch(html, /rpm:\s*(?:10000|12000|24000)/);
+});
+
+test("raised-metal safety gate rejects surface cutting and below-surface XY rapids", () => {
+  const source = extractNamedFunction(html, "cncAssertRaisedMetalSafety");
+  const check = new Function(`${source}; return cncAssertRaisedMetalSafety;`)();
+  const contract = [
+    "; RELIEF CONTRACT: raised artwork remains at stock Z0",
+    "; ENTRY POLICY: vertical plunge inside below-surface relief only",
+    "; TRAVEL POLICY: all XY rapids at safe Z; vertical retract before exit",
+  ];
+  assert.doesNotThrow(() => check([...contract, "G21", "G90", "G0 Z3.000", "G0 X1.000 Y1.000", "G1 Z-0.100 F40", "G1 X2.000 Y1.000 Z-0.100 F180", "G0 Z3.000", "G0 X0 Y0"].join("\n")));
+  assert.throws(() => check([...contract, "G0 Z3.000", "G0 X1.000 Y1.000", "G1 Z0.000 F40", "G1 X2.000 Y1.000 Z0.000 F180"].join("\n")), /protected Z0 artwork surface/);
+  assert.throws(() => check([...contract, "G0 Z3.000", "G0 X1.000 Y1.000", "G1 Z-0.100 F40", "G0 X2.000 Y1.000"].join("\n")), /XY rapid below safe Z/);
 });
 
 test("Vercel queues commands for an authenticated outbound CNC agent", () => {
@@ -299,6 +338,16 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /planXyPowerCycleRecovery/);
   assert.match(daemon, /reconnecting: Boolean\(reconnectPromise\)/);
   assert.doesNotMatch(daemon, /controller\.connected \? await xyRecoverySnapshot/);
+});
+
+test("Project exposes a visible guarded rear-Y limit recovery", () => {
+  assert.match(html, /Release rear Y limit/);
+  assert.match(html, /cncRecoverRearYLimit/);
+  assert.match(html, /move only Y inward by exactly 5 mm/);
+  assert.match(api, /recover_rear_y_limit/);
+  assert.match(agent, /recover_rear_y_limit: "\/controller\/recover-rear-y-limit"/);
+  assert.match(daemon, /\/controller\/recover-rear-y-limit/);
+  assert.match(daemon, /controller\.recoverRearYLimit/);
 });
 
 test("daemon persists per-line recovery checkpoints and validates position before resume", () => {

@@ -2681,6 +2681,7 @@ if(action==="email_recipients"){
       const now=new Date().toISOString();
       if(req.method==="POST"){
         let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
+        let preparedJobId="";
         if(b.addJob&&typeof b.addJob==="object"){
           const a=b.addJob;
           const rec={ id:"cnc_"+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36),
@@ -2688,9 +2689,35 @@ if(action==="email_recipients"){
             design:String(a.design||"").slice(0,200), status:"Design", note:String(a.note||"").slice(0,500),
             hasCreative:false, hasGcode:false, gcodeName:"", at:now, updatedAt:now };
           st.jobs.push(rec); if(st.jobs.length>200) st.jobs=st.jobs.slice(-200);
+        } else if(b.prepareMetalJob&&typeof b.prepareMetalJob==="object"){
+          const sourceId=String(b.prepareMetalJob.sourceJobId||"");
+          const source=st.jobs.find(function(x){return x&&x.id===sourceId;});
+          if(!source) return res.status(404).json({error:"source job not found"});
+          if(!source.hasCreative) return res.status(409).json({error:"source artwork is unavailable"});
+          let artwork="";
+          try{if(redis){const v=await redis.get("parkside:cnc:img:"+sourceId);artwork=(v==null)?"":String(v);}}catch(e){return res.status(500).json({error:"db error"});}
+          if(!artwork) return res.status(409).json({error:"source artwork is unavailable"});
+          preparedJobId="cnc_"+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36);
+          const rec={
+            id:preparedJobId,
+            project:String((source.project||"Buckle")+" · raised metal").slice(0,80),
+            material:"C752 nickel silver", metalMode:"raised-surface",
+            design:String(source.design||source.project||"Raised-relief buckle").slice(0,200),
+            status:"Design", note:"Raised-relief metal copy. Artwork only; probe, origin, depth, G-code, and checkpoints were intentionally not copied.",
+            hasCreative:true, hasGcode:false, hasDepth:false, gcodeName:"",
+            carveType:"3D relief", reliefSource:String(source.reliefSource||"image").slice(0,40),
+            sizeMM:String(source.sizeMM||source.sizeVal||""), sizeVal:String(source.sizeVal||source.sizeMM||""), sizeUnit:String(source.sizeUnit||"mm"),
+            pieceW:String(source.pieceW||source.sizeMM||""), pieceH:String(source.pieceH||""), imgAR:String(source.imgAR||""),
+            reliefDepth:"", flattenBg:"false", invertDepth:String(source.invertDepth||"false"),
+            cutout:"silhouette", tabs:"6", tabHeight:"1.5",
+            bit:"Genmitsu MC40A · 3.175mm 2-flute flat nose · silver case",
+            planStatus:"draft", depthApprovalStatus:"probe-required", at:now, updatedAt:now
+          };
+          try{if(redis)await redis.set("parkside:cnc:img:"+preparedJobId,artwork);}catch(e){return res.status(500).json({error:"db error"});}
+          st.jobs.push(rec);if(st.jobs.length>200)st.jobs=st.jobs.slice(-200);
         } else if(b.updateJob&&typeof b.updateJob==="object"){
           const u=b.updateJob; const id=String(u.id||"");
-          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","originOffsetXMm","originOffsetYMm","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); if(u.invalidatePlan===true){x.planStatus="draft";x.hasGcode=false;delete x.planHash;delete x.gcodeStages;delete x.activeStage;} x.updatedAt=now; } return x; });
+          st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","metalMode","depthApprovalStatus","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","originOffsetXMm","originOffsetYMm","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); if(u.invalidatePlan===true){x.planStatus="draft";x.hasGcode=false;delete x.planHash;delete x.gcodeStages;delete x.activeStage;} x.updatedAt=now; } return x; });
           if(u.invalidatePlan===true) try{if(redis){await redis.del("parkside:cnc:plan:"+id);await redis.del("parkside:cnc:gc:"+id);for(const stage of ["rough","finish","detail","profile","all"])await redis.del("parkside:cnc:gc:"+id+":"+stage);}}catch(e){}
         } else if(b.delJob){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
@@ -2815,9 +2842,9 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","probe_bed","probe_stock","probe_tool","lock_probe","unlock_probe","recover_probe","recover_controller","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["jog","probe_bed","probe_stock","probe_tool","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
-              if(!st.agent||(act!=="recover_controller"&&!health.connected)) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
+              if(!st.agent||(["recover_controller","recover_rear_y_limit"].indexOf(act)===-1&&!health.connected)) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
               if(act==="probe_bed"&&job.stageRequiresProbe&&setup.materialReady) return res.status(409).json({error:"This stage changed bits. Use Changed bit · Touch off on stock; do not re-probe the bed or reset X/Y.",cnc:st});
               if(act==="probe_stock"&&!setup.bedProbeReady) return res.status(409).json({error:"Probe the exposed bed before probing the stock",cnc:st});
@@ -2870,6 +2897,11 @@ if(action==="email_recipients"){
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="zero_z")cmd.confirm=b.confirm===true;
               if(act==="recover_controller")cmd.confirm=b.confirm===true;
+              if(act==="recover_rear_y_limit"){
+                const status=health.lastControllerStatus||{}, pins=String(status.Pn||((String(status.raw||"").match(/Pn:([^|>]+)/)||[])[1])||"");
+                if(String(status.state||"").split(":")[0]!=="Alarm"||!pins.includes("Y")||/[XZP]/.test(pins)) return res.status(409).json({error:"Rear-Y recovery requires an Alarm with only the Y limit input active",cnc:st});
+                cmd.confirm=b.confirm===true;
+              }
               if(act==="resume_saved"){cmd.confirm=b.confirm===true;cmd.allowReposition=true;}
               if(act==="restore_xy"){
                 if(!health.xyRecovery||health.xyRecovery.available!==true) return res.status(409).json({error:"Exact saved X/Y recovery is not available in the current controller state",cnc:st});
@@ -2910,7 +2942,7 @@ if(action==="email_recipients"){
           }
         }
         try{ if(redis) await redis.set("parkside:cnc", JSON.stringify(st)); }catch(e){ return res.status(500).json({error:"db error"}); }
-        return res.status(200).json({ok:true, cnc:st});
+        return res.status(200).json({ok:true, cnc:st, jobId:preparedJobId||undefined});
       }
       return res.status(200).json({cnc:st});
     }
