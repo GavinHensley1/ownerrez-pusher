@@ -39,7 +39,9 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Positioning paused/);
   assert.match(html, /Enable positioning/);
   assert.match(html, /Restore saved X\/Y/);
-  assert.match(html, /Reset X\/Y for new project/);
+  assert.match(html, /Set current point as X0\/Y0/);
+  assert.match(html, /setupActions=\['jog','probe_bed','probe_stock','probe_tool'/);
+  assert.match(html, /cncCurrentJob\(\)\|\|await cncEnsureJob\(\)/);
   assert.match(html, /confirmNewProject:true/);
   assert.match(html, /confirmGantryUnmoved/);
   assert.match(html, /external router does not need to be installed/i);
