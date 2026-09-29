@@ -183,7 +183,7 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /do not press again/);
   assert.match(api, /const runControls=\["pause","resume","stop"\]/);
   assert.match(api, /Explicit saved-carve resume confirmation is required/);
-  assert.match(api, /cmd\.allowReposition=b\.allowReposition===true/);
+  assert.match(api, /cmd\.allowReposition=true/);
   assert.match(api, /st\.config\.probeThickness=20/);
   assert.match(api, /cmd\.probeThickness=20/);
   assert.match(api, /Pause requires a running carve/);
