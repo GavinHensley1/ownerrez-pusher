@@ -1165,7 +1165,7 @@ let PW="", STATE=null, RATES=null, OCC=null, view={unit:"486910", y:0, m:0}; let
 const api=a=>'/api/app?action='+a;
 
 function unlock(){
-  const v=document.getElementById('pw').value.trim();
+  const v=document.getElementById('pw').value;
   fetch(api('state')).then(r=>r.json()).then(s=>{ PW=v; STATE=s;
     return fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:'{}'});
   }).then(r=>{

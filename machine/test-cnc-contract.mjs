@@ -113,6 +113,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /CompressionStream\('gzip'\)/);
   assert.match(html, /cncGenReliefRegion\(img/);
   assert.match(html, /id="cncPlanModal"/);
+  assert.match(html, /const v=document\.getElementById\('pw'\)\.value;/);
   assert.match(html, /Approve plan &amp; generate G-code/);
   assert.match(html, /Save draft plan/);
   assert.match(html, /function cncPlanBuildMask/);
