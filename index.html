@@ -1842,7 +1842,7 @@ function cncSetupHint(){
   var p=CNC_MATS[mat]||CNC_MATS['Other']; var cons=!/Normal/.test(spd);
   var feed=Math.round(p.feed*(cons?0.6:1)), step=+(p.step*(cons?0.7:1)).toFixed(3), depth=(CNC.config&&CNC.config.reliefDepth)||p.depth;
   var szv=(document.getElementById('cncSizeVal')||{}).value||'100', szu=(document.getElementById('cncSizeUnit')||{}).value||'mm';
-  if(/C752 nickel silver/i.test(mat))h.innerHTML='<b>C752 nickel silver · raised relief</b> &middot; first tool: SpeTool W03010 1/8″ single-flute O-flute. Depth is unavailable until the actual blank is probed; high artwork stays at stock Z0.';
+  if(/C752 nickel silver/i.test(mat))h.innerHTML='<b>C752 nickel silver · raised relief</b> &middot; first tool: Whiteside RU2100 1/4″ two-flute upcut. Depth is unavailable until the actual blank is probed; high artwork stays at stock Z0.';
   else h.innerHTML='<b>'+cncEsc(mat)+'</b> &middot; '+(cons?'conservative':'normal')+' feeds: ~'+feed+' mm/min, '+step+' mm per Z pass. X/Y zero and Z probing are separate guarded buttons below.';
 }
 async function cncSaveSetup(){
