@@ -2870,7 +2870,7 @@ if(action==="email_recipients"){
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="zero_z")cmd.confirm=b.confirm===true;
               if(act==="recover_controller")cmd.confirm=b.confirm===true;
-              if(act==="resume_saved")cmd.confirm=b.confirm===true;
+              if(act==="resume_saved"){cmd.confirm=b.confirm===true;cmd.allowReposition=b.allowReposition===true;}
               if(act==="restore_xy"){
                 if(!health.xyRecovery||health.xyRecovery.available!==true) return res.status(409).json({error:"Exact saved X/Y recovery is not available in the current controller state",cnc:st});
                 if(b.confirmGantryUnmoved!==true) return res.status(400).json({error:"Confirm the gantry was not moved while controller power was off",cnc:st});

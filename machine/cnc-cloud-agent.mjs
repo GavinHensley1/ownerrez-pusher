@@ -140,7 +140,8 @@ async function execute(command) {
         const payload = new Set(["probe_bed", "probe_stock", "probe_tool"]).has(command.action) ? { thicknessMm: command.probeThickness, maxSearchMm: command.maxSearchMm, confirmReprobe: command.confirmReprobe === true }
           : command.action === "restore_xy" ? { confirmGantryUnmoved: command.confirmGantryUnmoved === true }
           : command.action === "zero_xy" ? { confirmNewProject: command.confirmNewProject === true }
-          : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller" || command.action === "resume_saved") ? { confirm: command.confirm === true }
+          : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller") ? { confirm: command.confirm === true }
+          : command.action === "resume_saved" ? { confirm: command.confirm === true, allowReposition: command.allowReposition === true }
           : command.action === "start" ? { jobId: command.jobId, gcode: decodeProgram(command), stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm, stockReserveMm: command.stockReserveMm, manualRouter: command.manualRouter === true } : {};
         result = await localRequest(path, payload);
       }

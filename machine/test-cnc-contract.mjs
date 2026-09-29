@@ -183,6 +183,7 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /do not press again/);
   assert.match(api, /const runControls=\["pause","resume","stop"\]/);
   assert.match(api, /Explicit saved-carve resume confirmation is required/);
+  assert.match(api, /cmd\.allowReposition=b\.allowReposition===true/);
   assert.match(api, /st\.config\.probeThickness=20/);
   assert.match(api, /cmd\.probeThickness=20/);
   assert.match(api, /Pause requires a running carve/);
@@ -213,6 +214,7 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /zero_z: "\/zero\/z"/);
   assert.match(agent, /recover_controller: "\/controller\/recover-stopped"/);
   assert.match(agent, /resume_saved: "\/job\/resume-saved"/);
+  assert.match(agent, /allowReposition: command\.allowReposition === true/);
   assert.match(agent, /resume: health\?\.resume \|\| null/);
   assert.match(agent, /restore_xy: "\/zero\/xy\/restore-after-power-cycle"/);
   assert.match(agent, /confirmReprobe: command\.confirmReprobe === true/);
@@ -293,6 +295,10 @@ test("daemon persists per-line recovery checkpoints and validates position befor
   assert.match(daemon, /\/job\/resume-saved/);
   assert.match(daemon, /Resume position mismatch on/);
   assert.match(daemon, /buildResumeProgram/);
+  assert.match(daemon, /buildCheckpointReplayResume/);
+  assert.match(daemon, /payload\.allowReposition === true/);
+  assert.match(daemon, /captureInterruptedPosition/);
+  assert.match(html, /allowReposition:true/);
   assert.match(daemon, /payload\.dryRun === true/);
   assert.match(controller, /if \(this\.abortRequested\) throw new Error\("PROGRAM_ABORTED"\);\s*if \(guardError\)/);
   assert.match(controller, /this\.pauseRequested = false;\s*await this\.#emergencyStop\(reason\)/);

@@ -8,7 +8,7 @@ import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeL
 import { applyMaterialProfile, materialProfileFromSetup, readMaterialProfile, removeMaterialProfile, writeMaterialProfile } from "./cnc-material-state.mjs";
 import { applyXyLock, planXyPowerCycleRecovery, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 import { readProgram, saveProgram } from "./cnc-program-state.mjs";
-import { buildBufferedStopResume, buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
+import { buildBufferedStopResume, buildCheckpointReplayResume, buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
 import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
 import { completeStockProbe, completeToolTouch } from "./cnc-setup-flow.mjs";
 import { appendCncEvent } from "./cnc-event-journal.mjs";
@@ -80,6 +80,24 @@ const persistRunProgress = (patch) => {
   if (!activeRunCheckpoint) return null;
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { ...activeRunCheckpoint, ...patch, updatedAt: new Date().toISOString() });
   return activeRunCheckpoint;
+};
+const workPositionForStatus = (status) => {
+  const machine = coordinates(status);
+  const origin = { X: Number(setup.xyOriginMPos?.X), Y: Number(setup.xyOriginMPos?.Y), Z: Number(setup.zOriginMPos) };
+  if (![machine.X, machine.Y, machine.Z, origin.X, origin.Y, origin.Z].every(Number.isFinite)) return null;
+  return { X: machine.X - origin.X, Y: machine.Y - origin.Y, Z: machine.Z - origin.Z };
+};
+const captureInterruptedPosition = (status, reason, { initial = false, moved = false } = {}) => {
+  if (activeRunCheckpoint?.state !== "interrupted") return null;
+  const position = workPositionForStatus(status);
+  if (!position) return null;
+  return persistRunProgress({
+    stopWorkPosition: initial ? position : activeRunCheckpoint.stopWorkPosition,
+    postStopPosition: position,
+    postStopMoveCount: Number(activeRunCheckpoint.postStopMoveCount || 0) + (moved ? 1 : 0),
+    positionReason: reason,
+    positionUpdatedAt: new Date().toISOString(),
+  });
 };
 controller.on("programProgress", (value) => {
   Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() });
@@ -241,6 +259,7 @@ const recoverIdleConnection = async () => {
     await restoreOrRebaseLockedXy(startupStatus, workOffset);
     restoreLockedProbe(startupStatus, workOffset);
     rebuildWorkspaceFromSetup();
+    captureInterruptedPosition(startupStatus, "startup_recovery");
     incident = undefined;
   })().catch((error) => {
     incident = `CONNECT_FAILED:${error?.message || "unknown"}`;
@@ -278,6 +297,7 @@ const jog = async (axis, payload) => {
     lastControllerStatus = result.after;
     persistLockedXy(result.after);
     persistLockedProbe(result.after);
+    captureInterruptedPosition(result.after, `jog_${axis.toLowerCase()}`, { moved: true });
     return result;
   }
   catch (error) { incident = error?.message || "JOG_FAILED"; throw error; } finally { moving = false; }
@@ -326,6 +346,7 @@ const restoreXyAfterPowerCycle = async (payload) => {
   const lock = persistLockedXy(before);
   rebuildWorkspaceFromSetup();
   lastControllerStatus = await readStatus();
+  captureInterruptedPosition(lastControllerStatus, "xy_power_cycle_restore");
   return { ok: true, status: lastControllerStatus, setup: { ...setup }, restoredWorkPosition: plan.savedWorkPosition, lock: { lockedAt: lock.lockedAt, lastKnownMPos: lock.lastKnownMPos } };
 };
 const setStockZZero = async (payload) => {
@@ -348,6 +369,7 @@ const setStockZZero = async (payload) => {
   persistLockedXy(before);
   rebuildWorkspaceFromSetup();
   lastControllerStatus = await readStatus();
+  captureInterruptedPosition(lastControllerStatus, "stock_z_zero", { moved: true });
   return { ok: true, setup: { ...setup }, status: lastControllerStatus, workOffset };
 };
 const probeSurface = async (kind, payload) => {
@@ -406,6 +428,7 @@ const probeSurface = async (kind, payload) => {
     if (kind !== "bed") persistLockedProbe(result.after);
     rebuildWorkspaceFromSetup();
     persistLockedXy(result.after);
+    captureInterruptedPosition(result.after, `probe_${kind}`, { moved: true });
     recordEvent("probe.completed", { kind, searchedMm: result.searchedMm, stockThicknessMm: setup.stockThicknessMm, maxCutDepthMm: setup.maxCutDepthMm, lockStatus: setup.probeLockStatus });
     return { ...result, setup: { ...setup } };
   } catch (error) { incident = error?.message || "PROBE_FAILED"; setup.probePhase = error?.code === "PROBE_SEARCH_EXHAUSTED" ? "returned_no_contact" : "error"; setup.updatedAt = new Date().toISOString(); recordEvent("probe.failed", { kind, code: error?.code, message: incident, travelledMm: setup.probeTravelledMm, limitMm: setup.probeSearchLimitMm }); throw error; } finally { moving = false; }
@@ -456,9 +479,10 @@ const resumeSavedProgram = async (payload) => {
     const axis = ["X", "Y", "Z"].find((name) => !Number.isFinite(work[name]) || Math.abs(work[name] - traced.position[name]) > 0.05);
     throw new Error(`Resume position mismatch on ${axis}: controller ${work[axis]?.toFixed?.(3)}, program ${traced.position[axis].toFixed(3)}`);
   }
-  const resumed = exactPosition
-    ? buildResumeProgram(saved.gcode, completedLine, { spindleMode: "manual" })
-    : buildBufferedStopResume(saved.gcode, completedLine, work, { spindleMode: "manual" });
+  let resumed;
+  if (exactPosition) resumed = buildResumeProgram(saved.gcode, completedLine, { spindleMode: "manual" });
+  else if (activeRunCheckpoint?.state === "interrupted" && payload.allowReposition === true) resumed = buildCheckpointReplayResume(saved.gcode, completedLine, { spindleMode: "manual" });
+  else resumed = buildBufferedStopResume(saved.gcode, completedLine, work, { spindleMode: "manual" });
   if (payload.dryRun === true) return { ok: true, dryRun: true, controller: status, workPosition: work, expectedPosition: traced.position, resume: { ...resumed, gcode: undefined } };
   const result = await startProgram({ jobId: `${saved.jobId}-resume-${completedLine}`, gcode: resumed.gcode, ...saved.context });
   return { ...result, resume: resumed };
@@ -494,6 +518,7 @@ const stopProgram = async () => {
   persistRunProgress({ state: "interrupted", message: "Stopped by Project" });
   const recovery = await restoreStoppedControllerState({ discardBufferedProgram: true });
   Object.assign(job, { state: "stopped", message: "Stopped", updatedAt: new Date().toISOString() });
+  captureInterruptedPosition(lastControllerStatus, "project_stop", { initial: true });
   recordEvent("program.stopped", { jobId: job.jobId, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine });
   return { ok: true, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null, recovery };
 };
@@ -501,6 +526,7 @@ const recoverStoppedController = async (payload) => {
   if (payload.confirm !== true) throw new Error("Explicit stopped-controller recovery confirmation is required");
   if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
   const recovered = await restoreStoppedControllerState({ discardBufferedProgram: activeRunCheckpoint?.state === "interrupted" });
+  captureInterruptedPosition(lastControllerStatus, "stopped_controller_recovery");
   return { ok: true, ...recovered, setup: { ...setup }, workspace: workspace.snapshot() };
 };
 const bodyJson = async (req, maxBytes = MAX_BODY_BYTES) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > maxBytes) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };

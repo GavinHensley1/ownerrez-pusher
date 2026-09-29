@@ -3,7 +3,7 @@ import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { buildBufferedStopResume, buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
+import { buildBufferedStopResume, buildCheckpointReplayResume, buildResumeProgram, programPositionAtLine } from "./cnc-resume.mjs";
 import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
 
 const PROGRAM = [
@@ -61,9 +61,25 @@ test("buffered stop recovers the interrupted row after Z was safely retracted", 
   assert.match(resumed.gcode, /G21\nG90\nG17\nG0 Z3\.6\nG0 X10 Y10/);
 });
 
+test("checkpoint replay safely repositions after post-stop jogs without restarting line 1", () => {
+  const resumed = buildCheckpointReplayResume(PROGRAM, 8, { spindleMode: "manual" });
+  assert.equal(resumed.positionMatchMode, "checkpoint-reposition");
+  assert.equal(resumed.resumeAtLine, 4);
+  assert.equal(resumed.replayedLines, 5);
+  assert.match(resumed.gcode, /G21\nG90\nG17\nG0 Z3\.6\nG0 X10 Y10/);
+});
+
 test("run checkpoints persist the last acknowledged line atomically", () => {
   const dir = mkdtempSync(join(tmpdir(), "cnc-run-")), path = join(dir, "run.json");
   const saved = writeRunCheckpoint(path, { version: 1, jobId: "rough", programCapturedAt: "now", state: "interrupted", lastCompletedLine: 152, totalLines: 3971, message: "read ETIMEDOUT", updatedAt: "later" });
   assert.deepEqual(readRunCheckpoint(path), saved);
   assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+test("run checkpoints persist post-stop positioning evidence", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cnc-run-position-")), path = join(dir, "run.json");
+  const saved = writeRunCheckpoint(path, { version: 1, jobId: "detail", programCapturedAt: "now", state: "interrupted", lastCompletedLine: 8, totalLines: 14, message: "Stopped", updatedAt: "later", stopWorkPosition: { X: 7.5, Y: 10, Z: 3.6 }, postStopPosition: { X: 0, Y: -5, Z: 20 }, postStopMoveCount: 4, positionReason: "probe_tool", positionUpdatedAt: "after" });
+  assert.deepEqual(saved.postStopPosition, { X: 0, Y: -5, Z: 20 });
+  assert.equal(saved.postStopMoveCount, 4);
+  assert.deepEqual(readRunCheckpoint(path), saved);
 });

@@ -5,6 +5,11 @@ export function validateRunCheckpoint(raw) {
   if (!raw || typeof raw !== "object" || raw.version !== 1) throw new Error("CNC run checkpoint is unsupported");
   const completed = Number(raw.lastCompletedLine), total = Number(raw.totalLines);
   if (!Number.isInteger(completed) || !Number.isInteger(total) || completed < 0 || total < 1 || completed > total) throw new Error("CNC run checkpoint line counts are invalid");
+  const position = (value) => {
+    if (!value || typeof value !== "object") return null;
+    const parsed = { X: Number(value.X), Y: Number(value.Y), Z: Number(value.Z) };
+    return Object.values(parsed).every(Number.isFinite) ? parsed : null;
+  };
   return {
     version: 1,
     jobId: String(raw.jobId || ""),
@@ -14,6 +19,11 @@ export function validateRunCheckpoint(raw) {
     totalLines: total,
     message: String(raw.message || "").slice(0, 240),
     updatedAt: String(raw.updatedAt || new Date().toISOString()),
+    stopWorkPosition: position(raw.stopWorkPosition),
+    postStopPosition: position(raw.postStopPosition),
+    postStopMoveCount: Math.max(0, Math.min(10_000, Number(raw.postStopMoveCount) || 0)),
+    positionReason: String(raw.positionReason || "").slice(0, 80),
+    positionUpdatedAt: String(raw.positionUpdatedAt || ""),
   };
 }
 

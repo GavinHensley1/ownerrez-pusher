@@ -49,6 +49,41 @@ export function buildResumeProgram(source, completedLine, { spindleMode = "contr
   };
 }
 
+export function buildCheckpointReplayResume(source, completedLine, { spindleMode = "controller", maxReplayLines = 5_000 } = {}) {
+  if (spindleMode !== "manual") throw new Error("Automatic resume is currently limited to manual-router stages");
+  const { analysis } = programPositionAtLine(source, completedLine, { spindleMode });
+  const completed = Number(completedLine);
+  let rewindIndex = -1;
+  for (let index = Math.min(completed - 1, analysis.lines.length - 1); index >= 0; index -= 1) {
+    const command = analysis.lines[index];
+    if (!/^G0*0\b/.test(command)) continue;
+    const z = command.match(new RegExp(`\\bZ(${NUMBER})\\b`));
+    if (z && Number(z[1]) >= 0) { rewindIndex = index; break; }
+  }
+  if (rewindIndex < 0) throw new Error("No safe retract boundary exists before the saved checkpoint");
+  const replayedLines = completed - rewindIndex;
+  if (replayedLines > maxReplayLines) throw new Error(`Saved checkpoint requires replaying ${replayedLines} lines; guarded limit is ${maxReplayLines}`);
+  const remaining = analysis.lines.slice(rewindIndex);
+  const gcode = [
+    "; Project guarded checkpoint replay after post-stop positioning",
+    `; Original executable lines completed: ${completed} of ${analysis.lines.length}`,
+    `; Safe replay begins at original executable line ${rewindIndex + 1}`,
+    "G21",
+    "G90",
+    "G17",
+    ...remaining,
+  ].join("\n");
+  return {
+    gcode,
+    completedLine: completed,
+    resumeAtLine: rewindIndex + 1,
+    replayedLines,
+    positionMatchMode: "checkpoint-reposition",
+    originalExecutableLines: analysis.lines.length,
+    remainingExecutableLines: analyzeProgram(gcode, { spindleMode }).executableLines,
+  };
+}
+
 const positionAfter = (position, command) => {
   const next = { ...position };
   for (const axis of ["X", "Y", "Z"]) {
