@@ -2187,11 +2187,11 @@ function cncAppendCutout(g, W, H, o){
   var startX=pts[0][0], startY=pts[0][1];
   var passes=Math.max(1,Math.ceil((thick+(o.noOvercut?0:0.6))/passDepth)), tabTopZ=-(thick-tabH);
   if(rampLength)g.push('G0 X'+startX.toFixed(3)+' Y'+startY.toFixed(3),'G1 Z0.5000 F'+plunge);
-  for(var p2=1;p2<=passes;p2++){ var z=Math.max(full,-passDepth*p2),tabWas=false,tabExitTravel=tabExitRampMm,lastPX=startX,lastPY=startY;
+  for(var p2=1;p2<=passes;p2++){ var z=Math.max(full,-passDepth*p2),tabWas=false,tabExitTravel=tabExitRampMm,lastPX=startX,lastPY=startY,lastZZ=p2===1?.5:Math.max(full,-passDepth*(p2-1));
     var previousZ=p2===1?.5:Math.max(full,-passDepth*(p2-1)),approachZ=rampLength?previousZ:z;
     if(!rampLength)g.push('G0 Z'+safeZ.toFixed(2),'G0 X'+startX.toFixed(3)+' Y'+startY.toFixed(3),'G1 Z'+z.toFixed(4)+' F'+plunge);
     if(rampLength)g.push('; PROFILE SPIRAL LOOP start Z'+previousZ.toFixed(4)+' target Z'+z.toFixed(4)+' over '+total.toFixed(3)+' mm');
-    for(var si=0;si<segs.length;si++){ var sg=segs[si], n=Math.max(1,Math.ceil(sg.len/((rampLength&&withTabs)?.25:2)));
+    for(var si=0;si<segs.length;si++){ var sg=segs[si], n=Math.max(1,Math.round(sg.len/2));
       for(var q=1;q<=n;q++){ var f=q/n, px=sg.ax+(sg.bx-sg.ax)*f, py=sg.ay+(sg.by-sg.ay)*f, dist=sg.start+sg.len*f, zz=z;
         if(rampLength)zz=Math.max(zz,previousZ+(z-previousZ)*(dist/total));
         var tabHere=withTabs&&z<tabTopZ&&inTab(dist);
@@ -2200,7 +2200,9 @@ function cncAppendCutout(g, W, H, o){
           tabWas=false;tabExitTravel=Math.min(tabExitRampMm,tabExitTravel+Math.sqrt((px-lastPX)*(px-lastPX)+(py-lastPY)*(py-lastPY)));
           zz=Math.max(zz,tabTopZ+(zz-tabTopZ)*(tabExitTravel/tabExitRampMm));
         }
-        g.push('G1 X'+px.toFixed(3)+' Y'+py.toFixed(3)+' Z'+zz.toFixed(4)+' F'+feed);lastPX=px;lastPY=py; } } }
+        var maxDown=Math.max(.001,passDepth-.0002),split=(rampLength&&lastZZ!=null&&zz<0&&lastZZ-zz>maxDown)?Math.ceil((lastZZ-zz)/maxDown):1;
+        for(var ss=1;ss<=split;ss++){var sf=ss/split,sx=lastPX+(px-lastPX)*sf,sy=lastPY+(py-lastPY)*sf,sz=lastZZ+(zz-lastZZ)*sf;g.push('G1 X'+sx.toFixed(3)+' Y'+sy.toFixed(3)+' Z'+sz.toFixed(4)+' F'+feed);}
+        lastPX=px;lastPY=py;lastZZ=zz; } } }
   g.push('G0 Z'+safeZ.toFixed(2));
 }
 function cncAppendDetailContours(g,hm,mask,cols,rows,panelW,panelH,o){
