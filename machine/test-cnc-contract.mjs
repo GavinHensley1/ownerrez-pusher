@@ -198,11 +198,12 @@ test("raised-metal safety gate rejects surface cutting and below-surface XY rapi
     "; ENTRY POLICY: approved interior entry",
     "; TRAVEL POLICY: all XY rapids at safe Z; vertical retract before exit",
   ];
-  assert.doesNotThrow(() => check([...contract, "G21", "G90", "G0 Z3.000", "G0 X1.000 Y1.000", "G1 Z-0.100 F40", "G1 X2.000 Y1.000 Z-0.100 F180", "G0 Z3.000", "G0 X0 Y0"].join("\n")));
-  assert.doesNotThrow(() => check([...contract, "G0 Z3.000", "G0 X1.000 Y1.000", "; RAMP ENTRY previous Z0.0000 approach Z0.0300 target Z-0.0250 over 20.000 mm", "G1 Z0.0300 F80", "G1 X5.000 Z0.0163 F300", "G1 X10.000 Z0.0025", "G1 X15.000 Z-0.0113", "G1 X21.000 Z-0.0250 F400", "G0 Z3.000"].join("\n")));
-  assert.throws(() => check([...contract, "G0 Z3.000", "G0 X1.000 Y1.000", "G1 Z0.000 F40", "G1 X2.000 Y1.000 Z0.000 F180"].join("\n")), /protected Z0 artwork surface/);
-  assert.throws(() => check([...contract, "G0 Z3.000", "G0 X1.000 Y1.000", "; RAMP ENTRY previous Z0.0000 approach Z0.0300 target Z-0.0250 over 5.000 mm", "G1 Z0.0300 F80", "G1 X2.000 Z0.0100 F300", "G1 X8.000 Z-0.0250"].join("\n")), /full-diameter ramp/);
-  assert.throws(() => check([...contract, "G0 Z3.000", "G0 X1.000 Y1.000", "G1 Z-0.100 F40", "G0 X2.000 Y1.000"].join("\n")), /XY rapid below safe Z/);
+  assert.doesNotThrow(() => check([...contract, "G21", "G90", "G4 P2", "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.1000 over 20.000 mm", "G1 Z0.5000 F40", "G1 X6.000 Y1.000 Z0.3500 F180", "G1 X11.000 Y1.000 Z0.2000", "G1 X16.000 Y1.000 Z0.0500", "G1 X21.000 Y1.000 Z-0.1000", "G0 Z3.000", "G0 X0 Y0"].join("\n")));
+  assert.throws(() => check([...contract, "G0 Z3.000", "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.0250 over 20.000 mm", "G1 Z0.5000 F80", "G1 X21.000 Z-0.0250 F300"].join("\n")), /first axis motion must be XY/);
+  assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.0250 over 20.000 mm", "G1 Z-0.0100 F80", "G1 X21.000 Z-0.0250 F300"].join("\n")), /vertical entry reaches the metal surface/);
+  assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.0250 over 20.000 mm", "G1 Z0.5000 F40", "G1 X2.000 Y1.000 Z0.000 F180"].join("\n")), /protected Z0 artwork surface/);
+  assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.0250 over 5.000 mm", "G1 Z0.5000 F80", "G1 X8.000 Z-0.0250"].join("\n")), /ramp at least 20 mm/);
+  assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.1000 over 20.000 mm", "G1 Z0.5000 F40", "G1 X21.000 Y1.000 Z-0.1000", "G0 X2.000 Y1.000"].join("\n")), /XY rapid below safe Z/);
 });
 
 test("RU2100 sacrificial profile uses 0.025 mm ramped passes, six tabs, and the exact approved depth", () => {
