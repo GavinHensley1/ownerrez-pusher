@@ -191,6 +191,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
 });
 
 test("raised-metal safety gate rejects surface cutting and below-surface XY rapids", () => {
+  assert.match(html, /targ\(px,py\)<-\.005&&safelyInside\(px,py\)/);
   const source = extractNamedFunction(html, "cncAssertRaisedMetalSafety");
   const check = new Function(`${source}; return cncAssertRaisedMetalSafety;`)();
   const contract = [
