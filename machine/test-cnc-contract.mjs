@@ -95,6 +95,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /C752 nickel silver/);
   assert.match(html, /Whiteside RU2100 · 1\/4″ solid-carbide upcut · 1\/4″ shank · 2 cutting edges/);
   assert.match(html, /Genmitsu MC40A · 3\.175mm 2-flute ball nose · dark case/);
+  assert.match(html, /SpeTool W01015-SPE-X · TAC-coated 1\/32″ radius tapered ball nose · 1\/4″ shank · 2 flute/);
   assert.match(html, /reliefMode:metal\?'raised-surface':'standard'/);
   assert.match(html, /RELIEF CONTRACT: raised artwork remains at stock Z0/);
   assert.match(html, /ENTRY POLICY:/);
@@ -152,6 +153,12 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /BALL-NOSE LAYER CONTRACT:/);
   assert.match(html, /ARTWORK COVERAGE:/);
   assert.match(html, /if\(finishPathCount\)g\.push\('G0 Z'\+safeZ\.toFixed\(2\)\);g\.push\('G0 X'/);
+  assert.match(html, /finishStepoverMm=\.16/);
+  assert.match(html, /finishPassDepthMm=\.1/);
+  assert.match(html, /finishLayerStep=Math\.min\(\.1,/);
+  assert.match(html, /stage==='finish'\?\.1001:\.0251/);
+  assert.match(html, /split=wanted<currentZ-finishLayerStep\?Math\.ceil\(\(currentZ-wanted\)\/finishLayerStep\):1/);
+  assert.match(html, /PROTECTED-SURFACE CONNECTOR: positive-Z feed moves may cross the detected buckle mask without touching stock/);
   assert.match(html, /DETAIL STOCK CONTRACT: contours must remain inside the RU2100-cleared and finished envelope/);
   assert.match(html, /function cncAuditMetalProgramV2/);
   assert.match(html, /roughRuns=rowRuns/);
@@ -239,6 +246,9 @@ test("raised-metal safety gate rejects surface cutting and below-surface XY rapi
   assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.1000 over 20.000 mm", "G1 Z0.5000 F40", "G1 X21.000 Y1.000 Z-0.1000", "G1 X22.000 Y1.000 Z0.000"].join("\n")), /unguarded cutting move touches/);
   assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.0250 over 5.000 mm", "G1 Z0.5000 F80", "G1 X8.000 Z-0.0250"].join("\n")), /ramp at least 20 mm/);
   assert.throws(() => check([...contract, "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.1000 over 20.000 mm", "G1 Z0.5000 F40", "G1 X21.000 Y1.000 Z-0.1000", "G0 X2.000 Y1.000"].join("\n")), /XY rapid below safe Z/);
+  const protectedConnector = [...contract, "; PROTECTED-SURFACE CONNECTOR: positive-Z feed moves may cross the detected buckle mask without touching stock", "G0 X1.000 Y1.000", "; RAMP ENTRY approach Z0.5000 target Z-0.0250 over 20.000 mm", "G1 Z0.5000 F35", "G1 X21.000 Y1.000 Z-0.0250 F150", "G1 X22.000 Y1.000 Z0.010", "G1 X23.000 Y1.000 Z-0.0250", "G0 Z3.200"].join("\n");
+  assert.doesNotThrow(() => check(protectedConnector));
+  assert.throws(() => check(protectedConnector.replace(/^; PROTECTED-SURFACE CONNECTOR:.*\n/m, "")), /lacks the protected connector contract/);
 });
 
 test("universal metal audit rejects unsafe modes, bounds, feeds, plunges, drops, depths, and missing retracts", () => {
