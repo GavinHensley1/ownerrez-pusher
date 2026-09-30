@@ -118,8 +118,13 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(api, /Artwork only; probe, origin, depth, G-code, and checkpoints were intentionally not copied/);
   assert.match(html, /function cncDetailFidelity/);
   assert.match(html, /function cncAssertDetailFidelity/);
-  assert.match(html, /omitted\.push\('Finish \('\+String\(finishError/);
-  assert.match(html, /omitted\.push\('Detail \('\+String\(detailError/);
+  const activeApproval = html.slice(html.lastIndexOf("async function cncApprovePlanAndGenerate"));
+  assert.doesNotMatch(activeApproval, /omitted\.push\('Finish \('\+String\(finishError/);
+  assert.doesNotMatch(activeApproval, /omitted\.push\('Detail \('\+String\(detailError/);
+  assert.match(html, /function cncAssertMetalArtworkCompleteness/);
+  assert.match(html, /Metal artwork completeness gate: required/);
+  assert.match(html, /strategy:'staged',woodSpecies:'C752 nickel silver/);
+  assert.match(html, /30° V-bit 0\.1mm · not certified for C752/);
   assert.match(html, /Three-bit relief \+ detail/);
   assert.match(html, /30° V-bit 0\.1mm/);
   assert.match(html, /DETAIL SAFETY: recessed grooves only/);
@@ -143,7 +148,9 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.doesNotMatch(html, /'G0 X'\+x0\.toFixed\(3\)\+' Y'\+y0\.toFixed\(3\)/);
   assert.match(html, /function rowRuns\(py,ltr,belowSurfaceOnly,requireRoughClearance\)/);
   assert.match(html, /function connectorSafe\(a,b,belowSurfaceOnly,requireRoughClearance\)/);
-  assert.match(html, /FINISH STOCK CONTRACT: cut only inside the RU2100-cleared envelope/);
+  assert.match(html, /FINISH STOCK CONTRACT: full-artwork progressive ball-nose relief/);
+  assert.match(html, /BALL-NOSE LAYER CONTRACT:/);
+  assert.match(html, /ARTWORK COVERAGE:/);
   assert.match(html, /DETAIL STOCK CONTRACT: contours must remain inside the RU2100-cleared and finished envelope/);
   assert.match(html, /function cncAuditMetalProgramV2/);
   assert.match(html, /roughRuns=rowRuns/);
@@ -201,6 +208,19 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.doesNotMatch(html, /rpm:\s*(?:10000|12000|24000)/);
 });
 
+test("metal artwork completeness fails closed when the relief stage is missing or sparse", () => {
+  const source = extractNamedFunction(html, "cncAssertMetalArtworkCompleteness");
+  const check = new Function(`${source}; return cncAssertMetalArtworkCompleteness;`)();
+  const plan = { maxDepthMm: 0.8, cutout: { mode: "silhouette-through", tabs: 6 } };
+  const finish = "; ARTWORK COVERAGE: 32 progressive layers | 80 guarded paths | 250000 XY+Z moves | complete source relief required";
+  assert.doesNotThrow(() => check({ finish, profile: "ok", release: "ok" }, plan));
+  assert.throws(() => check({ profile: "ok", release: "ok" }, plan), /required finish stage is missing/);
+  assert.throws(() => check({ finish, release: "ok" }, plan), /required profile stage is missing/);
+  assert.throws(() => check({ finish, profile: "ok" }, plan), /required release stage is missing/);
+  assert.throws(() => check({ finish: "; ARTWORK COVERAGE: 2 progressive layers | 2 guarded paths | 20 XY+Z moves | complete source relief required", profile: "ok", release: "ok" }, plan), /Finish covers only/);
+  assert.throws(() => check({ finish, profile: "ok", release: "ok", detail: "unsafe" }, plan), /V-bit is not certified for C752/);
+});
+
 test("raised-metal safety gate rejects surface cutting and below-surface XY rapids", () => {
   assert.match(html, /targ\(px,py\)<-\.005&&safelyInside\(px,py\)/);
   const source = extractNamedFunction(html, "cncAssertRaisedMetalSafety");
@@ -228,16 +248,18 @@ test("universal metal audit rejects unsafe modes, bounds, feeds, plunges, drops,
     "G21", "G90", "G17", "G4 P2", "G0 X1.000 Y1.000", "G1 Z0.5000 F35",
     "G1 X2.000 Y1.000 Z0.4000 F150", "G1 X3.000 Y1.000 Z0.3000",
     "G1 X4.000 Y1.000 Z0.2000", "G1 X5.000 Y1.000 Z0.1000",
-    "G1 X6.000 Y1.000 Z-0.0001", "G1 X7.000 Y1.000 Z-0.1000",
+    "G1 X6.000 Y1.000 Z0.0250", "G1 X7.000 Y1.000 Z0.0000",
+    "G1 X8.000 Y1.000 Z-0.0250", "G1 X9.000 Y1.000 Z-0.0500",
+    "G1 X10.000 Y1.000 Z-0.0750", "G1 X11.000 Y1.000 Z-0.1000",
     "G0 Z3.200", "G0 X0 Y0",
   ];
   const opts = { stage: "finish", maxDepthMm: 0.8, maxFeedMmMin: 150, stockX: 100, stockY: 50, maxCutSegmentMm: 5 };
   assert.doesNotThrow(() => audit(base.join("\n"), opts));
   assert.throws(() => audit([...base.slice(0, 4), "M3 S9000", ...base.slice(4)].join("\n"), opts), /forbidden mode or spindle/);
-  assert.throws(() => audit(base.join("\n").replace("X7.000", "X101.000"), opts), /X leaves the stock envelope/);
+  assert.throws(() => audit(base.join("\n").replace("X11.000", "X101.000"), opts), /X leaves the stock envelope/);
   assert.throws(() => audit(base.join("\n").replace("F150", "F151"), opts), /feed 151 exceeds 150/);
   assert.throws(() => audit(base.join("\n").replace("G1 Z0.5000 F35", "G1 Z-0.0100 F35"), opts), /vertical plunge reaches metal/);
-  assert.throws(() => audit(base.join("\n").replace("Z-0.1000", "Z-0.3000"), opts), /Z descends 0.2999 mm/);
+  assert.throws(() => audit(base.join("\n").replace("Z-0.1000", "Z-0.3000"), opts), /Z descends 0.2250 mm/);
   assert.throws(() => audit(base.join("\n").replace("Z-0.1000", "Z-0.9000"), opts), /Z descends|exceeds approved depth/);
   assert.throws(() => audit(base.slice(0, -2).join("\n"), opts), /does not retract after its final cut/);
 });
