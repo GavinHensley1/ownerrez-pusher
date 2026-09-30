@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { claimCommand, completeCommand } from "./cnc-command-ledger.mjs";
 import { commandRejectionReason } from "./cnc-command-policy.mjs";
-import { splitJogDistance } from "./cnc-jog.mjs";
+import { runJogSegments } from "./cnc-jog.mjs";
 import { decodeProgram } from "./cnc-program-codec.mjs";
 
 const PROJECT_URL = String(process.env.PROJECT_URL || "https://project-jvyw3.vercel.app").replace(/\/$/, "");
@@ -21,6 +21,7 @@ if (!token) throw new Error("CNC agent token is unavailable");
 
 let stopped = false;
 let activeStart;
+let activeJog;
 const agentStartedAtMs = Date.now();
 const handled = new Set();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -125,6 +126,8 @@ async function execute(command) {
     const setupRecovery = health.frameRecovery?.active === true && new Set(["jog", "probe_bed", "probe_stock", "probe_tool", "lock_probe", "unlock_probe", "recover_probe", "recover_controller", "recover_rear_y_limit", "restore_xy", "zero_xy", "zero_z"]).has(command.action);
     if (health.frameValid === false && command.action !== "reconnect_verify" && !setupRecovery) return report(command, "error", "Cutting is blocked until saved coordinates are verified. Use Reconnect · verify saved coordinates in Project; this does not resume a cut.", { terminal: true });
   }
+  if (command.action === "stop" && activeJog) activeJog.cancelled = true;
+  if (activeJog && command.action !== "stop") return report(command, "error", "A manual move is active. Stop it before another operation.", { terminal: true });
   const programAction = new Set(["start", "resume_saved"]).has(command.action);
   const claim = claimCommand(COMMAND_LEDGER_PATH, command);
   if (!claim.claimed) {
@@ -141,17 +144,21 @@ async function execute(command) {
     const rejected = completeCommand(COMMAND_LEDGER_PATH, command.id, "error", rejection);
     return report(command, rejected.status, rejected.message, { terminal: true });
   }
-  await report(command, programAction ? "running" : "accepted", `${command.action} accepted`);
+  const jogRun = command.action === "jog" ? { cancelled: false } : null;
+  if (jogRun) activeJog = jogRun;
   const task = (async () => {
     try {
+      await report(command, programAction ? "running" : "accepted", `${command.action} accepted`);
       let result;
       if (command.action === "jog") {
-        const segments = splitJogDistance(axis, command.distanceMm);
-        for (let index = 0; index < segments.length; index += 1) {
-          await report(command, "accepted", `Moving ${axis} segment ${index + 1} of ${segments.length}`);
-          result = await localRequest(path, { distanceMm: segments[index], feedMmPerMin: command.feedMmPerMin, manualPositioning: true, stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm });
-        }
-        result = { ...result, requestedDistanceMm: Number(command.distanceMm), completedSegments: segments.length };
+        result = await runJogSegments(axis, command.distanceMm, {
+          cancelled: () => jogRun.cancelled || stopped,
+          move: async (distanceMm, index, total) => {
+            await report(command, "accepted", `Moving ${axis} segment ${index + 1} of ${total}`);
+            if (jogRun.cancelled || stopped) throw new Error("Manual move cancelled; remaining distance discarded");
+            return localRequest(path, { distanceMm, feedMmPerMin: command.feedMmPerMin, manualPositioning: true, stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm });
+          },
+        });
       } else {
         const payload = new Set(["probe_bed", "probe_stock", "probe_tool"]).has(command.action) ? { thicknessMm: command.probeThickness, maxSearchMm: command.maxSearchMm, confirmReprobe: command.confirmReprobe === true }
           : command.action === "restore_xy" ? { confirmGantryUnmoved: command.confirmGantryUnmoved === true }
@@ -172,7 +179,7 @@ async function execute(command) {
       process.stderr.write(`command ${command.action} ${command.axis || ""} ${command.distanceMm ?? ""}: ${error.message}\n`);
       completeCommand(COMMAND_LEDGER_PATH, command.id, "error", error.message);
       await report(command, "error", error.message, { terminal: true });
-    }
+    } finally { if (jogRun && activeJog === jogRun) activeJog = undefined; }
   })();
   if (programAction) { activeStart = task; task.finally(() => { activeStart = undefined; }); }
   else await task;

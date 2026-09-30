@@ -158,7 +158,7 @@ test("visible disconnected-state recovery button dispatches read-only reconnect,
   assert.match(nodes.cncPositioningTitle.textContent, /Setup controls available/);
 });
 
-test("recovery jog selector makes a stale large step usable without issuing motion or changing calibration", () => {
+test("recovery jog selector preserves operator-selected travel without issuing motion or changing calibration", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const start = html.indexOf("function cncSyncJogStep("), end = html.indexOf("\nfunction ", start + 1);
   const select = { value: "50", options: [.1,.25,.5,1,5,10,25,50,100].map(value => ({value:String(value),disabled:false})) };
@@ -167,11 +167,11 @@ test("recovery jog selector makes a stale large step usable without issuing moti
   vm.runInContext(html.slice(start,end),context);
   const health = {frameRecovery:{active:true},frameValid:false,setup:{bedProbeReady:true,bedSurfaceMPos:-40.174,xyReady:false}};
   const original = JSON.stringify(health);
-  assert.equal(context.cncSyncJogStep(health),5);
-  assert.equal(select.value,"5");
-  assert(select.options.filter(o=>Number(o.value)>5).every(o=>o.disabled));
+  assert.equal(context.cncSyncJogStep(health),50);
+  assert.equal(select.value,"50");
+  assert(select.options.filter(o=>Number(o.value)>5).every(o=>!o.disabled));
   assert(select.options.filter(o=>Number(o.value)<=5).every(o=>!o.disabled));
-  assert.match(note.textContent,/5 mm per click at 100 mm\/min/);
+  assert.match(note.textContent,/full distance/);
   assert.equal(JSON.stringify(health),original);
   select.value="1";assert.equal(context.cncSyncJogStep(health),1);
   context.cncSyncJogStep({frameRecovery:{active:false}});

@@ -2938,7 +2938,7 @@ if(action==="email_recipients"){
               const liveRunState=String((health.job||{}).state||job.agentState||"");
               if(act==="pause"&&liveRunState!=="running") return res.status(409).json({error:"Pause requires a running carve",cnc:st});
               if(act==="resume"&&liveRunState!=="paused") return res.status(409).json({error:"Resume requires a paused carve",cnc:st});
-              if(act==="stop"&&["running","paused","queued","accepted"].indexOf(liveRunState)===-1) return res.status(409).json({error:"Stop requires an active carve",cnc:st});
+              if(act==="stop"&&!health.moving&&["running","paused","queued","accepted"].indexOf(liveRunState)===-1&&!(job.agentAction==="jog"&&["queued","accepted"].includes(job.agentState))) return res.status(409).json({error:"Stop requires an active carve or manual move",cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
               if(act==="probe_bed"||act==="probe_stock"||act==="probe_tool"){
                 cmd.probeThickness=20;
@@ -2972,10 +2972,10 @@ if(action==="email_recipients"){
               if(act==="jog"){
                 const axis=String(b.axis||"").toUpperCase(), distance=Number(b.distanceMm), feed=Number(b.feedMmPerMin);
                 if(["X","Y","Z"].indexOf(axis)===-1) return res.status(400).json({error:"Jog axis must be X, Y, or Z",cnc:st});
-                const maxStep=axis==="Z"?5:100;
-                if(!Number.isFinite(distance)||distance===0||Math.abs(distance)>maxStep) return res.status(400).json({error:axis==="Z"?"Z jogs are limited to 5 mm per click":"Jog step is outside the safe per-click limit",cnc:st});
+                const maxStep=100;
+                if(!Number.isFinite(distance)||distance===0||Math.abs(distance)>maxStep) return res.status(400).json({error:"Choose a jog distance up to 100 mm per click",cnc:st});
                 if(!Number.isFinite(feed)||feed<20||feed>(axis==="Z"?150:400)) return res.status(400).json({error:"Jog feed is outside the safe range",cnc:st});
-                if(setupRecovery&&(Math.abs(distance)>5||feed>100)) return res.status(400).json({error:"Recovery positioning is limited to 5 mm at 100 mm/min per click",cnc:st});
+                if(setupRecovery&&feed>100) return res.status(400).json({error:"Recovery positioning feed is limited to 100 mm/min; distance is segmented by the bridge",cnc:st});
                 if((axis==="X"||axis==="Y")&&!(setupRecovery&&!setup.xyReady)){
                   const raw=String((health.lastControllerStatus||{}).MPos||""),parts=raw.split(",").map(Number),origin=setup.xyOriginMPos||{},currentMachine=axis==="X"?parts[0]:parts[1],originAxis=Number(origin[axis]),current=currentMachine-originAxis,stock=axis==="X"?Number(st.config.machX):Number(st.config.machY),min=-60,max=stock+20,target=current+distance,returningLow=current<min-.001&&distance>0&&target>current,returningHigh=current>max+.001&&distance<0&&target<current;
                   if(![currentMachine,originAxis,current,stock].every(Number.isFinite)||!(stock>0)) return res.status(409).json({error:"Current position or entered stock size is unavailable",cnc:st});

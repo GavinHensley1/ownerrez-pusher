@@ -56,7 +56,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /var motionBlocked=baseBlocked\|\|!controller\.idle/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
   assert.match(html, /<option value="0\.1">0\.1 mm<\/option>/);
-  assert.match(html, /Z is limited to 5 mm per click/);
+  assert.match(html, /Large Z moves are also segmented internally/);
   assert.match(html, /probe_bed/);
   assert.doesNotMatch(html, /test_probe|NO-MOTION PROBE TEST|Test probe circuit/);
   assert.match(html, /probe_stock/);
@@ -210,7 +210,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /\.cnc-preview-grid\{grid-template-columns:1fr!important\}/);
   assert.match(html, /\.cnc-stage\{flex-wrap:wrap;min-width:0\}/);
   assert.match(html, /Start position/);
-  assert.match(html, /There is no upper Z ceiling/);
+  assert.match(html, /Watch clearance to the physical travel limits/);
   assert.match(html, /axis!==['"]Z['"]/);
   assert.match(daemon, /axis !== "Z" && Number\.isFinite\(allowed\.max\)/);
   assert.match(html, /Whiteside RU2100/);
@@ -457,11 +457,11 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /probeLockStatus==="locked_after_tool_touch"/);
   assert.match(api, /probeLockedAt>completedAt&&probeLockedAt<=stageActivatedAt/);
   assert.match(api, /stageActivatedAt-probeLockedAt\)<=30\*60\*1000/);
-  assert.match(api, /Jog step is outside the safe per-click limit/);
-  assert.match(api, /const maxStep=axis==="Z"\?5:100/);
+  assert.match(api, /Choose a jog distance up to 100 mm per click/);
+  assert.match(api, /const maxStep=100/);
   assert.match(api, /Project allows .+ around this stock/);
   assert.match(api, /cmd\.stockWidthMm=Number\(st\.config\.machX\)/);
-  assert.match(api, /Z jogs are limited to 5 mm per click/);
+  assert.match(api, /distance is segmented by the bridge/);
   assert.match(api, /job\.agentCommandId=cmd\.id/);
   assert.match(api, /do not press again/);
   assert.match(api, /const runControls=\["pause","resume","stop"\]/);
@@ -480,9 +480,9 @@ test("local bridge retrieves its token from Keychain and uses the Unix socket", 
   assert.match(agent, /openclaw-cnc-agent/);
   assert.match(agent, /socketPath: SOCKET_PATH/);
   assert.match(agent, /manualPositioning: true/);
-  assert.match(agent, /splitJogDistance/);
+  assert.match(agent, /runJogSegments/);
   assert.match(agent, /stockWidthMm: command\.stockWidthMm/);
-  assert.match(agent, /completedSegments/);
+  assert.match(readFileSync(new URL("machine/cnc-jog.mjs", root), "utf8"), /completedSegments/);
   assert.match(agent, /stockWidthMm/);
   assert.match(agent, /manualRouter: command\.manualRouter === true/);
   assert.match(agent, /profileDepthMm: command\.profileDepthMm/);
