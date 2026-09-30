@@ -2801,6 +2801,7 @@ if(action==="email_recipients"){
         } else if(b.jobId){
           const jid=String(b.jobId); let job=null; for(let i=0;i<st.jobs.length;i++){ if(st.jobs[i]&&st.jobs[i].id===jid){ job=st.jobs[i]; break; } }
           if(!job) return res.status(404).json({error:"job not found"});
+          const metalJob=/C752 nickel silver/i.test(String(job.material||""))||String(job.metalMode||"")==="raised-surface";
           if(b.creativeImage!==undefined){
             const d=String(b.creativeImage||""); if(d.length>800000) return res.status(413).json({error:"image too large"});
             try{ if(redis){ if(d) await redis.set("parkside:cnc:img:"+jid, d); else await redis.del("parkside:cnc:img:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
@@ -2816,12 +2817,14 @@ if(action==="email_recipients"){
             try{ if(redis){ await redis.del("parkside:cnc:gc:"+jid); for(const stage of ["rough","finish","detail","profile","release"]) await redis.del("parkside:cnc:gc:"+jid+":"+stage); } }catch(e){}
           }
           if(b.gcodeStages&&typeof b.gcodeStages==="object"){
+            if(metalJob) return res.status(409).json({error:"Project metal G-code generation is retired. Build and animate the operation in Kiri:Moto, then import the certified .nc file."});
             const order=[]; for(const stage of ["rough","finish","detail","all","profile","release"]){ if(b.gcodeStages[stage]===undefined) continue; const text=String(b.gcodeStages[stage]||""); if(!text||text.length>800000) return res.status(text?413:400).json({error:"invalid "+stage+" stage G-code"}); order.push(stage); try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,text);}catch(e){return res.status(500).json({error:"db error"});} }
             if(!order.length) return res.status(400).json({error:"at least one G-code stage is required"});
             const active=order[0]; try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
             job.hasGcode=true; job.gcodeStages=JSON.stringify(order); job.activeStage=active; job.gcodeName="auto-"+active+".nc"; job.planStatus="approved"; job.stageRequiresProbe=true; job.stageActivatedAt=now; job.resumeInvalidatedAt=now; delete job.profileCompletedAt; job.updatedAt=now;
           }
           if(b.gcodeStagesGzip&&typeof b.gcodeStagesGzip==="object"){
+            if(metalJob) return res.status(409).json({error:"Project metal G-code generation is retired. Build and animate the operation in Kiri:Moto, then import the certified .nc file."});
             const order=[];for(const stage of ["rough","finish","detail","all","profile","release"]){if(b.gcodeStagesGzip[stage]===undefined)continue;const data=String(b.gcodeStagesGzip[stage]||"");if(!data||data.length>3800000||!/^[A-Za-z0-9+/=]+$/.test(data))return res.status(data?413:400).json({error:"invalid compressed "+stage+" stage G-code"});order.push(stage);try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,"@gzip:"+data);}catch(e){return res.status(500).json({error:"db error"});}}
             if(!order.length)return res.status(400).json({error:"at least one compressed G-code stage is required"});
             const active=order[0];try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
@@ -2835,10 +2838,19 @@ if(action==="email_recipients"){
             try{if(redis)await redis.set("parkside:cnc:gc:"+jid,code);}catch(e){return res.status(500).json({error:"db error"});}
             let stageOrder=[];try{stageOrder=JSON.parse(job.gcodeStages||"[]");}catch(e){} job.activeStage=stage; job.gcodeName="auto-"+stage+".nc"; job.hasGcode=true; job.status="Relief"; job.stageRequiresProbe=stageOrder.indexOf(stage)>0; job.stageActivatedAt=now; job.updatedAt=now;
           }
-          if(b.gcode!==undefined){
-            const t=String(b.gcode||""); if(t.length>800000) return res.status(413).json({error:"gcode too large"});
-            try{ if(redis){ if(t) await redis.set("parkside:cnc:gc:"+jid, t); else await redis.del("parkside:cnc:gc:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
-            job.hasGcode=!!t; job.gcodeName=String(b.gcodeName||job.gcodeName||"job.nc").slice(0,120); job.updatedAt=now;
+          if(b.gcode!==undefined||b.gcodeGzip!==undefined){
+            let t=String(b.gcode||""),stored=t;
+            if(b.gcodeGzip!==undefined){const data=String(b.gcodeGzip||"");if(!data||data.length>3800000||!/^[A-Za-z0-9+/=]+$/.test(data))return res.status(data?413:400).json({error:"invalid compressed G-code"});try{t=require("zlib").gunzipSync(Buffer.from(data,"base64")).toString("utf8");}catch(e){return res.status(400).json({error:"compressed G-code could not be decoded"});}if(t.length>10000000)return res.status(413).json({error:"decoded G-code too large"});stored="@gzip:"+data;}else if(t.length>800000)return res.status(413).json({error:"gcode too large"});
+            if(metalJob&&t){
+              const provider=String(b.camProvider||""),certification=String(b.camCertification||""),stage=String(b.camStage||""),tool=String(b.camTool||"").trim(),sourceHash=String(b.camSourceHash||""),auditHash=String(b.camAuditHash||""),audit=String(b.camAudit||"");
+              if(provider!=="kiri-moto"||certification!=="verified"||!["rough","finish","profile","release"].includes(stage)||!tool||![b.camAnimated,b.camOriginVerified,b.camToolDepthVerified,b.camRetractsVerified].every(v=>v===true)) return res.status(409).json({error:"Metal import requires a fully certified Kiri:Moto operation."});
+              if(!/^[a-f0-9]{64}$/.test(sourceHash)||!/^[a-f0-9]{64}$/.test(auditHash)||!audit||audit.length>2000) return res.status(409).json({error:"Metal CAM certificate hashes or audit are invalid."});
+              const crypto=require("crypto"),actualSourceHash=crypto.createHash("sha256").update(t).digest("hex"),actualAuditHash=crypto.createHash("sha256").update(sourceHash+"\n"+audit+"\n"+provider+"\n"+stage+"\n"+tool).digest("hex");
+              if(actualSourceHash!==sourceHash||actualAuditHash!==auditHash) return res.status(409).json({error:"The imported metal G-code does not match its CAM certificate."});
+              job.camProvider=provider;job.camCertification=certification;job.camCertifiedAt=String(b.camCertifiedAt||now).slice(0,40);job.camSourceHash=sourceHash;job.camAuditHash=auditHash;job.camStage=stage;job.camTool=tool.slice(0,240);job.camAudit=audit;job.planStatus="approved";job.gcodeStages=JSON.stringify([stage]);job.activeStage=stage;job.stageRequiresProbe=true;job.stageActivatedAt=now;job.resumeInvalidatedAt=now;delete job.profileCompletedAt;
+            }
+            try{ if(redis){ if(t) await redis.set("parkside:cnc:gc:"+jid, stored); else await redis.del("parkside:cnc:gc:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
+            job.hasGcode=!!t; job.gcodeEncoding=b.gcodeGzip!==undefined?"gzip-base64":"plain";job.gcodeName=String(b.gcodeName||job.gcodeName||"job.nc").slice(0,120); if(!t){delete job.camCertification;delete job.camSourceHash;delete job.camAuditHash;delete job.camStage;delete job.camTool;delete job.camAudit;} job.updatedAt=now;
           }
           if(b.machineAction){
             const act=String(b.machineAction);
@@ -2860,6 +2872,7 @@ if(action==="email_recipients"){
               if(act==="zero_z"&&b.confirm!==true) return res.status(400).json({error:"Explicit stock Z-zero confirmation is required",cnc:st});
               if(act==="start"){
                 if(!job.hasGcode) return res.status(409).json({error:"Generate the design before Start",cnc:st});
+                if(metalJob&&(job.camProvider!=="kiri-moto"||job.camCertification!=="verified"||!/^[a-f0-9]{64}$/.test(String(job.camSourceHash||""))||!/^[a-f0-9]{64}$/.test(String(job.camAuditHash||"")))) return res.status(409).json({error:"Metal Start is blocked. Import an animated and certified Kiri:Moto operation first.",cnc:st});
                 if(job.hasCreative&&job.planStatus!=="approved") return res.status(409).json({error:"Approve the machining plan before Start",cnc:st});
                 if(!ws.calibrated) return res.status(409).json({error:"Virtual machine boundaries are not ready",cnc:st});
                 if(!setup.xyReady) return res.status(409).json({error:"Set X/Y zero before Start",cnc:st});
@@ -2880,6 +2893,7 @@ if(action==="email_recipients"){
                 if(designWidthMm>stockWidthMm-stockReserveMm+0.001||designHeightMm>stockHeightMm-stockReserveMm+0.001) return res.status(409).json({error:"The complete toolpath does not fit inside the entered stock dimensions",cnc:st});
               }
               if(act==="resume_saved"){
+                if(metalJob) return res.status(409).json({error:"Saved-program resume is disabled for metal. Re-establish X/Y and Z, then restart the certified Kiri:Moto operation from line 1.",cnc:st});
                 if(b.confirm!==true) return res.status(400).json({error:"Explicit saved-carve resume confirmation is required",cnc:st});
                 if(!health.resume||String(health.resume.state)!=="interrupted") return res.status(409).json({error:"No interrupted carve checkpoint is available",cnc:st});
                 if(Date.parse(String(job.resumeInvalidatedAt||""))>=Date.parse(String(health.resume.updatedAt||""))) return res.status(409).json({error:"The interrupted checkpoint belongs to an older generated program. Start the newly generated stage from line 1 after a fresh tool touch-off; do not resume the old checkpoint.",cnc:st});
@@ -2899,7 +2913,7 @@ if(action==="email_recipients"){
               }
               if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
               if(act==="start"){
-                cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;cmd.operation=String(job.activeStage||"");
+                cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;cmd.operation=String(job.activeStage||job.camStage||"");cmd.material=String(job.material||"");cmd.camProvider=String(job.camProvider||"");cmd.camCertification=String(job.camCertification||"");cmd.camSourceHash=String(job.camSourceHash||"");cmd.camAuditHash=String(job.camAuditHash||"");cmd.camStage=String(job.camStage||"");cmd.camTool=String(job.camTool||"");
                 const throughProfile=["profile","release"].includes(cmd.operation)&&job.profileMode==="sacrificial-through"&&job.sacrificialBackingConfirmed==="true";
                 if(throughProfile){const stock=Number(setup.stockThicknessMm),target=Number(job.profileDepthMm),allowance=target-stock;if(!(stock>0&&target>=stock&&allowance>=0&&allowance<=.2001))return res.status(409).json({error:"Approved sacrificial profile depth no longer matches the measured stock",cnc:st});cmd.allowSacrificialCutThrough=true;cmd.sacrificialBackingConfirmed=true;cmd.profileDepthMm=target;}
               }

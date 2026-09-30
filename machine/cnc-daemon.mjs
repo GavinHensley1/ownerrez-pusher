@@ -1,4 +1,5 @@
 import http from "node:http";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -61,6 +62,12 @@ const latchFrameIncident = (reason, duringMotion = hazardousOperationActive?.() 
 
 const programGuard = async ({ before, analysis, programContext }) => {
   assertFrameValid(frameIncident);
+  if (/C752 nickel silver/i.test(String(programContext?.material || ""))) {
+    if (programContext?.camProvider !== "kiri-moto" || programContext?.camCertification !== "verified") throw new Error("Metal program is not a certified Kiri:Moto export");
+    for (const field of ["camSourceHash", "camAuditHash"]) if (!/^[a-f0-9]{64}$/.test(String(programContext?.[field] || ""))) throw new Error(`Metal CAM ${field} is invalid`);
+    if (!["rough", "finish", "profile", "release"].includes(String(programContext?.camStage || ""))) throw new Error("Metal CAM operation is invalid");
+    if (!String(programContext?.camTool || "").trim()) throw new Error("Metal CAM tool contract is missing");
+  }
   const snap = workspace.snapshot();
   if (!snap.calibrated) throw new Error("Virtual boundaries are not calibrated");
   if (!setup.xyReady) throw new Error("Set X/Y zero before starting");
@@ -526,10 +533,11 @@ const unlockProbeCalibration = async (payload) => {
   workspace.clear();
   return { ok: true, setup: { ...setup } };
 };
-const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
+const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", material = "", camProvider = "", camCertification = "", camSourceHash = "", camAuditHash = "", camStage = "", camTool = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
   assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
-  const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true, operation: String(operation || ""), allowSacrificialCutThrough: allowSacrificialCutThrough === true, sacrificialBackingConfirmed: sacrificialBackingConfirmed === true, profileDepthMm: Number.isFinite(Number(profileDepthMm)) ? Number(profileDepthMm) : null } });
+  if (/C752 nickel silver/i.test(String(material || "")) && createHash("sha256").update(String(gcode || "")).digest("hex") !== String(camSourceHash || "")) throw new Error("Metal G-code no longer matches its certified Kiri:Moto source hash");
+  const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true, operation: String(operation || ""), material: String(material || ""), camProvider: String(camProvider || ""), camCertification: String(camCertification || ""), camSourceHash: String(camSourceHash || ""), camAuditHash: String(camAuditHash || ""), camStage: String(camStage || ""), camTool: String(camTool || ""), allowSacrificialCutThrough: allowSacrificialCutThrough === true, sacrificialBackingConfirmed: sacrificialBackingConfirmed === true, profileDepthMm: profileDepthMm !== null && profileDepthMm !== undefined && Number.isFinite(Number(profileDepthMm)) ? Number(profileDepthMm) : null } });
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { version: 1, jobId: savedProgram.jobId, programCapturedAt: savedProgram.capturedAt, state: "running", lastCompletedLine: 0, totalLines: savedProgram.analysis.executableLines, message: "Preflight checks", updatedAt: new Date().toISOString() });
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
   recordEvent("program.started", { jobId, executableLines: savedProgram.analysis.executableLines, manualRouter: manualRouter === true });
@@ -542,6 +550,7 @@ const resumeSavedProgram = async (payload) => {
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   const saved = readProgram(PROGRAM_STATE_PATH);
   if (!saved) throw new Error("No locally saved carve is available");
+  if (/C752 nickel silver/i.test(String(saved.context.material || ""))) throw new Error("Saved-program resume is disabled for metal; restart the certified Kiri:Moto operation from line 1 after deliberate X/Y and Z recovery");
   if (!saved.context.manualRouter) throw new Error("Automatic resume is currently limited to manual-router stages");
   const completedLine = Number(payload.completedLine ?? (activeRunCheckpoint?.programCapturedAt === saved.capturedAt ? activeRunCheckpoint.lastCompletedLine : NaN));
   const traced = programPositionAtLine(saved.gcode, completedLine, { spindleMode: "manual" });
