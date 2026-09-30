@@ -151,6 +151,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /FINISH STOCK CONTRACT: full-artwork progressive ball-nose relief/);
   assert.match(html, /BALL-NOSE LAYER CONTRACT:/);
   assert.match(html, /ARTWORK COVERAGE:/);
+  assert.match(html, /if\(finishPathCount\)g\.push\('G0 Z'\+safeZ\.toFixed\(2\)\);g\.push\('G0 X'/);
   assert.match(html, /DETAIL STOCK CONTRACT: contours must remain inside the RU2100-cleared and finished envelope/);
   assert.match(html, /function cncAuditMetalProgramV2/);
   assert.match(html, /roughRuns=rowRuns/);
