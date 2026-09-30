@@ -449,7 +449,7 @@
   <div class="card">
     <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px">
       <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#93a2b8">CNC Studio</div>
-      <div style="font-size:11.5px;color:#64758d">upload &rarr; generate &rarr; zero/probe &rarr; start</div>
+      <div style="font-size:11.5px;color:#64758d">upload &rarr; review / certified CAM &rarr; zero/probe &rarr; start</div>
     </div>
     <h2 style="margin:.2em 0">&#128503; Carving Control</h2>
     <div class="legend">Genmitsu 4040-PRO. Upload the design, generate and review the carve, set the front-left X/Y zero, probe Z, then Start. The Mac bridge and software boundaries run automatically; the operator watches the machine and keeps the e-stop reachable.</div>
@@ -504,8 +504,8 @@
       <div class="muted" style="font-size:12px">For a new board, probe the exposed backing and then the stock once. Project saves the material thickness automatically. Relief stages stay above the protected floor. A through-cut is permitted only for the final external Profile stage after the visible sacrificial-backing option is selected.</div>
       <div class="muted" id="cncSetupHint" style="font-size:11px;margin-top:8px"></div>
       <div id="cncMetalContract" class="cnc-plan-ok" style="display:none;margin-top:10px;text-align:left">
-        <b>Raised-metal buckle mode</b><br>
-        Highest artwork stays at the original stock surface (Z0). Project cuts only downward around the raised artwork. Relief depth stays locked until this metal blank is measured with the bed + stock probes. Only the final external Profile stage may enter confirmed sacrificial backing; every other stage is rejected if it exceeds the protected relief depth. All XY entry/exit travel stays at safe Z, with vertical plunges inside the relief area.
+        <b>Raised-metal buckle mode · external CAM required</b><br>
+        Project's custom metal generator is retired. Build and animate each operation in Kiri:Moto, then import its certified .nc file. Project independently audits the exact file, protects the probed depth and stock envelope, hashes the certificate, and blocks Start if the Kiri:Moto contract is missing or changed.
       </div>
     </div>
 
@@ -515,8 +515,8 @@
         <input type="file" id="cncCreative" accept="image/*" onchange="cncUploadCreative(event)">
       </div>
       <div style="background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:14px;text-align:center">
-        <div style="font-weight:600;margin-bottom:8px">2 &middot; Review machining plan <span class="muted" style="font-weight:400">&mdash; approve dimensions, depth, cutout, and tools before G-code</span></div>
-        <button onclick="cncLoad()" style="font-size:15px;padding:12px 22px">Review plan &amp; generate</button>
+        <div style="font-weight:600;margin-bottom:8px">2 &middot; Review machining geometry <span class="muted" style="font-weight:400">&mdash; wood may generate here; metal continues through certified Kiri:Moto CAM</span></div>
+        <button onclick="cncLoad()" style="font-size:15px;padding:12px 22px">Review geometry / CAM setup</button>
       </div>
     </div>
 
@@ -606,7 +606,7 @@
 
   <div class="card">
     <h2 style="margin:.1em 0">Design tools</h2>
-    <div class="legend">Optional &mdash; if you don't have artwork yet, generate an image here, then upload it above. Everything from there (depth, relief, G-code, panels) happens in this app.</div>
+    <div class="legend">Optional &mdash; if you don't have artwork yet, generate an image here, then upload it above. Project can generate wood paths; metal toolpaths must be created and animated in Kiri:Moto, then certified and imported.</div>
     <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
       <button onclick="window.open('https://chat.openai.com','_blank')">Open ChatGPT &#8599;</button>
     </div>
