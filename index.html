@@ -1769,8 +1769,9 @@ function cncControllerState(health){
 function cncRenderPositioning(health,baseBlocked){
   var info=cncControllerState(health),box=document.getElementById('cncPositioningState'),title=document.getElementById('cncPositioningTitle'),detail=document.getElementById('cncPositioningDetail'),button=document.getElementById('cncControllerRecoverBtn');
   if(!box||!title||!detail||!button)return info;
+  if(health&&health.frameValid===false&&(health.frameRecovery||{}).active&&info.idle){box.dataset.state='ready';title.textContent='Manual positioning ready';detail.textContent='You can move the tool and set zero. Saved records are retained; only starting or resuming G-code requires a verified cutting setup.';button.textContent='Manual controls available';button.disabled=true;button.onclick=null;return info;}
   if(health&&health.frameValid===false&&(health.frameRecovery||{}).active&&info.state==='Alarm'){box.dataset.state='paused';title.textContent=info.rearYLimit?'Rear Y limit reached · cut stopped':'Controller alarm · cut stopped';detail.textContent='Saved coordinates are retained. Clear the physical obstruction before recovery. This will not resume a cut.';button.textContent=info.rearYLimit?'Release rear Y limit':'Unlock stopped alarm';button.disabled=!!baseBlocked||(!info.rearYLimit&&!!info.pins);button.onclick=function(){if(info.rearYLimit)cncRecoverRearYLimit(button);else cncRecoverController(button);};return info;}
-  if(health&&(health.frameValid===false||!health.connected)){var recovery=health.frameRecovery||{};box.dataset.state=recovery.active?'paused':'blocked';title.textContent=recovery.active?'Setup controls available · cutting remains blocked':'Cut stopped · verify saved coordinates';detail.textContent=recovery.message||'Saved zeros and probes are retained. Reconnect checks the controller without resetting coordinates, moving an axis, or resuming a cut. Recalibrate only axes that cannot be verified.';button.textContent='Reconnect · verify saved coordinates';button.disabled=CNC_COMMAND_IN_FLIGHT||!CNC.agent||!!health.moving;button.onclick=function(){cncMachineAction('reconnect_verify',{},button);};}
+  if(health&&(health.frameValid===false||!health.connected)){var recovery=health.frameRecovery||{};box.dataset.state=recovery.active?'paused':'blocked';title.textContent=recovery.active?'Setup controls available · cutting remains blocked':'Cut stopped · checking controller connection';detail.textContent=recovery.message||'Saved zeros and probes are retained. Reconnect checks the controller without resetting coordinates, moving an axis, or resuming a cut. Recalibrate only axes that cannot be verified.';button.textContent='Retry connection';button.disabled=CNC_COMMAND_IN_FLIGHT||!CNC.agent||!!health.moving;button.onclick=function(){cncMachineAction('reconnect_verify',{},button);};}
   else if(info.idle){box.dataset.state='ready';title.textContent='Positioning enabled ✓';detail.textContent='GRBL is Idle with commanded feed and spindle at zero. The external router does not need to be installed.';button.textContent='Enabled';button.disabled=true;}
   else if(info.rearYLimit){box.dataset.state='paused';title.textContent='Rear Y limit reached';detail.textContent='Project can move only Y inward by 5 mm, verify the rear switch clears, preserve the saved X/Y zero, and restore hard-limit protection.';button.textContent='Release rear Y limit';button.disabled=!!baseBlocked;button.onclick=function(){cncRecoverRearYLimit(button);};}
   else if(info.recoverable){box.dataset.state='paused';title.textContent='Positioning paused · '+info.state;detail.textContent='The removed router is not the issue. Enable positioning releases this safe controller pause without moving an axis.';button.textContent='Enable positioning';button.disabled=!!baseBlocked;button.onclick=function(){cncRecoverController(button);};}
@@ -1932,6 +1933,8 @@ function cncJogFrameCheck(health,axis,distance){
 }
 function cncPresentationState(job,health,controller){
   var state=String(job&&job.agentState||''),jobAt=Date.parse(job&&job.agentAt||''),healthAt=Date.parse(CNC.agent&&CNC.agent.at||'');
+  var stopped=state==='error'&&/PROGRAM_STOP_REQUESTED/.test(String(job&&job.agentMsg||''))&&!health.moving;
+  if(stopped)return {state:'stopped',recoveredError:false,errorMessage:''};
   var recovered=state==='error'&&controller&&controller.idle&&!health.moving&&!health.incident&&Number.isFinite(jobAt)&&Number.isFinite(healthAt)&&healthAt-jobAt>=15000;
   return {state:recovered?'ready':state,recoveredError:recovered,errorMessage:recovered?String(job&&job.agentMsg||''):''};
 }
@@ -1973,14 +1976,15 @@ function cncRenderAgent(job){
     else if(state==='ready'&&presentation.recoveredError) cncCommandBanner('ready','Controls ready','The previous command error is historical. Fresh controller health is green; use the visible Project controls to retry.');
     else if(state==='ready') cncCommandBanner('ready',(label||'Command')+' complete ✓',detail||'The controller confirmed completion.');
     else if(state==='done') cncCommandBanner('done','Carve complete ✓',detail||'The controller finished the program.');
-    else if(state==='stopped') cncCommandBanner('stopped','Machine stopped',detail||'No program is running.');
+    else if(state==='stopped') cncCommandBanner('stopped','Cut stopped',controller.idle?'Manual positioning is available. The cut will not resume.':'No more G-code is being sent. Reconnecting to make manual positioning available.');
     else if(controller.recoverable) cncCommandBanner('accepted','Controller paused · enable positioning','The external router may be removed. Enable positioning changes GRBL from '+controller.state+' to Idle without moving an axis.');
     else if(controller.idle&&!frame.ok) cncCommandBanner('error','Start position is outside the calibrated frame',frame.reason);
     else cncCommandBanner(controller.idle?'ready':'error',controller.idle?'Controls ready':'Positioning locked',controller.idle?'One press sends one command. Its receipt and machine acknowledgment stay visible here.':'Project is waiting for GRBL Idle; this is controller state, not a physical-router check.');
     if(!['queued','accepted','running','paused'].includes(state)) cncRestoreCommandButton();
   }
   if(!as) return;
-  if(presentation.recoveredError) as.innerHTML='✅ Machine ready <span style="opacity:.7">— previous command reported: '+cncEsc(presentation.errorMessage)+'</span>';
+  if(state==='stopped')as.textContent='Cut stopped — no automatic restart.';
+  else if(presentation.recoveredError) as.innerHTML='✅ Machine ready <span style="opacity:.7">— previous command reported: '+cncEsc(presentation.errorMessage)+'</span>';
   else if(job&&state){ var m={queued:'⏳ Command queued',accepted:'⏳ Machine preparing',running:'▶ Machine running'+((job.progress!=null)?(' — '+Math.round(job.progress)+'%'):''),paused:'⏸ Machine paused',stopped:'■ Machine stopped',done:'✅ Carve complete',error:'⚠ Machine error'}[state]||state; as.innerHTML=m+(job.agentMsg?(' <span style="opacity:.7">— '+cncEsc(job.agentMsg)+'</span>'):''); }
   else as.textContent=ready?'Machine is ready.':'Start is locked until every required readiness check is green.';
 }

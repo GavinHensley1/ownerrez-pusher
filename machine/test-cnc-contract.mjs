@@ -629,7 +629,8 @@ test("connection loss fails closed without GRBL soft reset or automatic motion r
   assert.match(daemon, /maxProgramSocketLines: 0/);
   assert.match(agent, /frameValid: health\?\.frameValid === true/);
   assert.match(api, /health\.frameValid===false&&!\["stop","reconnect_verify"\].includes\(act\)&&!setupRecovery/);
-  assert.match(html, /Cut stopped · verify saved coordinates/);
+  assert.match(html, /Manual positioning ready/);
+  assert.match(html, /Retry connection/);
   assert.doesNotMatch(html, /permanently blocked all motion/);
   assert.match(html, /\['Coordinate frame',h\.frameValid!==false\]/);
 });
@@ -638,4 +639,12 @@ test("bed re-probe atomically replaces Z and material measurements but preserves
   assert.match(daemon, /setup\.probeLocked && payload\.confirmReprobe !== true/);
   assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*removeMaterialProfile\(MATERIAL_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);/);
   assert.doesNotMatch(daemon, /removeXyLock\(XY_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\)/);
+});
+
+
+test("intentional Stop is a stopped receipt, not a persistent command-failure banner", () => {
+  const fn = new Function(`const CNC={agent:{}}; ${extractNamedFunction(html, "cncPresentationState")}; return cncPresentationState;`)();
+  assert.equal(fn({agentState:"error",agentMsg:"PROGRAM_STOP_REQUESTED"},{moving:false},{idle:true}).state,"stopped");
+  assert.equal(fn({agentState:"error",agentMsg:"unexpected alarm"},{moving:false},{idle:true}).state,"error");
+  assert.equal(fn({agentState:"error",agentMsg:"PROGRAM_STOP_REQUESTED"},{moving:true},{idle:false}).state,"error");
 });

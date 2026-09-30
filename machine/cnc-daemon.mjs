@@ -41,6 +41,7 @@ let frameRecovery = { active: false, message: "" };
 try { frameIncident = readFrameIncident(FRAME_INCIDENT_PATH); } catch (error) { frameIncident = writeFrameIncident(FRAME_INCIDENT_PATH, { reason: `INVALID_FRAME_INCIDENT_STATE:${error.message}`, duringMotion: false }); }
 let reconnectPromise;
 let nextReconnectAt = 0;
+let nextStoppedFrameCheckAt = 0;
 const RECONNECT_BACKOFF_MS = 10_000;
 const workspace = new VirtualWorkspace();
 const setup = { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
@@ -325,7 +326,18 @@ const probeRecoverySnapshot = () => {
   const continuousXyLock = setup.xyReady && new Set(["locked", "restored"]).has(setup.xyLockStatus);
   return { available: !!prior && Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 4 * 60 * 60 * 1000 && continuousXyLock && !setup.probeLocked, sourceProbeAt: prior?.at || null, stockThicknessMm: prior?.stockThicknessMm ?? null, maxCutDepthMm: prior?.maxCutDepthMm ?? null };
 };
+// Read-only recovery is housekeeping, not an operator prerequisite. It never
+// unlocks, resets coordinates, moves, or releases a held program.
+const autoVerifyStoppedFrame = () => {
+  if (!frameIncident?.latched || frameRecovery.active || hazardousOperationActive() || reconnectPromise || Date.now() < nextStoppedFrameCheckAt) return;
+  nextStoppedFrameCheckAt = Date.now() + RECONNECT_BACKOFF_MS;
+  void reconnectAndVerifyFrame().catch(error => {
+    incident = `STOPPED_FRAME_CHECK_FAILED:${error.message}`;
+    logConnectionEvent(incident, `[cnc] ${incident}`);
+  });
+};
 const health = () => {
+  autoVerifyStoppedFrame();
   if (!controller.connected && !hazardousOperationActive() && !frameIncident?.latched) void recoverIdleConnection();
   return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise), moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
 };
@@ -622,7 +634,10 @@ const stopProgram = async () => {
   while (moving && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
   if (moving) throw new Error("PROGRAM_STOP_DID_NOT_SETTLE");
   persistRunProgress({ state: "interrupted", message: "Stopped by Project" });
-  const recovery = await restoreStoppedControllerState({ discardBufferedProgram: true });
+  // Stop cancels host streaming. Only confirmed Idle enables manual positioning;
+  // a held controller buffer is never released with cycle-start.
+  // A latched cutting frame must not block this read-only recovery path.
+  const recovery = await reconnectAndVerifyFrame();
   Object.assign(job, { state: "stopped", message: "Stopped", updatedAt: new Date().toISOString() });
   captureInterruptedPosition(lastControllerStatus, "project_stop", { initial: true });
   recordEvent("program.stopped", { jobId: job.jobId, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine });
@@ -734,6 +749,7 @@ keepalive.unref();
 if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
 server.listen(SOCKET_PATH, () => { chmodSync(SOCKET_PATH, 0o600); process.stdout.write(JSON.stringify({ event: "CNC_DAEMON_READY", socket: SOCKET_PATH, host: HOST, port: PORT }) + "\n"); });
 uiServer.listen(LOCAL_UI_PORT, "127.0.0.1");
-if (!frameIncident?.latched) void recoverIdleConnection();
+if (frameIncident?.latched) autoVerifyStoppedFrame();
+else void recoverIdleConnection();
 const shutdown = async () => { clearInterval(keepalive); workspace.clear(); clearSetup(); if (moving) await controller.emergencyStop("DAEMON_SHUTDOWN_DURING_MOTION").catch(() => {}); await controller.close(); uiServer.close(); server.close(() => { try { if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH); } catch {} process.exit(0); }); };
 process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);

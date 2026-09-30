@@ -27,7 +27,7 @@ const request = (socketPath, path, payload) => new Promise((resolve, reject) => 
   });
   req.on("error", reject); req.end(data);
 });
-async function fixture(t, initialPosition, initialState = "Idle", { latched = true } = {}) {
+async function fixture(t, initialPosition, initialState = "Idle", { latched = true, streaming = false, stoppedState = "Idle" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "cnc-reconnect-test-")), socketPath = join(dir, "cnc.sock"), wire = [];
   let position = initialPosition, state = initialState, jogPolls = 0, g54 = [-75, -49, -45];
   const server = net.createServer(socket => {
@@ -36,12 +36,13 @@ async function fixture(t, initialPosition, initialState = "Idle", { latched = tr
       const char = String.fromCharCode(byte);
       if (char === "?") { wire.push("?"); socket.write(`<${jogPolls-- > 0 ? "Jog" : state}|MPos:${position}|FS:0,0>\r\n`); continue; }
       if (byte < 32 && char !== "\r" && char !== "\n") { wire.push(`byte:${byte}`); continue; }
-      if (char === "~" || char === "!") { wire.push(char); continue; }
+      if (char === "~" || char === "!") { wire.push(char); if(char === "!" && streaming){state=stoppedState;if(stoppedState==="Idle")position="0,0,0";} continue; }
       buffer += char;
       if (char !== "\r") continue;
       const command = buffer.trim(); buffer = ""; wire.push(command);
       if (command === "$#") socket.write(`[G54:${g54.join(",")}]\r\nok\r\n`);
       else if (command.startsWith("G10 L20 P1")) { const p = position.split(",").map(Number); for (const match of command.matchAll(/([XYZ])(-?[\d.]+)/g)) { const i = "XYZ".indexOf(match[1]); g54[i] = p[i] - Number(match[2]); } socket.write("ok\r\n"); }
+      else if (streaming && /^G1\b/.test(command)) { state="Run";setTimeout(()=>{if(!socket.destroyed)socket.write("ok\r\n");},500); }
       else if (command === "$$") socket.write("$21=1\r\nok\r\n");
       else if (command === "$X") { state = "Idle"; socket.write("ok\r\n"); }
       else if (command.startsWith("$J=")) { const p = position.split(",").map(Number), m = command.match(/([XYZ])(-?[\d.]+) F/); p["XYZ".indexOf(m[1])] += Number(m[2]); position = p.join(","); jogPolls = 1; socket.write("ok\r\n"); }
@@ -51,6 +52,7 @@ async function fixture(t, initialPosition, initialState = "Idle", { latched = tr
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const env = { ...process.env, CNC_HOST: "127.0.0.1", CNC_PORT: String(server.address().port), CNC_DAEMON_SOCKET: socketPath, CNC_LOCAL_UI_PORT: "0" };
   for (const key of ["PROBE_STATE", "MATERIAL_STATE", "XY_STATE", "PROGRAM_STATE", "RUN_STATE", "EVENT_JOURNAL", "FRAME_INCIDENT"]) env[`CNC_${key}`] = join(dir, key + ".json");
+  if(streaming)writeFileSync(env.CNC_PROGRAM_STATE,JSON.stringify({version:1,jobId:"fake",context:{stockWidthMm:300,stockHeightMm:200,stockReserveMm:5,manualRouter:true},gcode:"G21\nG90\nG0 Z5\nG1 X85 Y139 Z-0.1 F50\nG0 Z5\nM30"}));
   writeFileSync(env.CNC_XY_STATE, JSON.stringify(xy)); writeFileSync(env.CNC_PROBE_STATE, JSON.stringify(probe));
   if (latched) writeFrameIncident(env.CNC_FRAME_INCIDENT, { reason: "Wi-Fi timeout", duringMotion: true });
   const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.url).pathname], { env, stdio: ["ignore", "ignore", "pipe"] });
@@ -58,6 +60,9 @@ async function fixture(t, initialPosition, initialState = "Idle", { latched = tr
   t.after(async () => { const exited = new Promise(resolve => child.once("exit", resolve)); child.kill("SIGTERM"); await exited; await new Promise(resolve => server.close(resolve)); });
   const deadline = Date.now() + 5000; while (!existsSync(socketPath) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
   assert(existsSync(socketPath), errors);
+  // Startup now performs the same read-only check automatically.
+  let startup; const readyDeadline=Date.now()+5000;
+  do { startup=(await request(socketPath,"/health")).body; if(!startup.moving)break;await new Promise(r=>setTimeout(r,20)); } while(Date.now()<readyDeadline);
   return { request: (path, payload) => request(socketPath, path, payload), wire, env, getPosition: () => position };
 }
 
@@ -155,7 +160,9 @@ test("visible disconnected-state recovery button dispatches read-only reconnect,
   assert.match(nodes.cncPositioningDetail.textContent, /Saved zeros and probes are retained/);
   nodes.cncControllerRecoverBtn.onclick(); assert.equal(calls[0][0], "reconnect_verify");
   context.cncRenderPositioning({ connected: true, frameValid: false, frameRecovery: { active: true, message: "Saved X/Y verified; touch off Z" }, lastControllerStatus: { state: "Idle", FS: "0,0" } }, false);
-  assert.match(nodes.cncPositioningTitle.textContent, /Setup controls available/);
+  assert.match(nodes.cncPositioningTitle.textContent, /Manual positioning ready/);
+  assert.equal(nodes.cncControllerRecoverBtn.disabled,true);
+  assert.equal(nodes.cncControllerRecoverBtn.onclick,null);
 });
 
 test("recovery jog selector preserves operator-selected travel without issuing motion or changing calibration", () => {
@@ -177,4 +184,35 @@ test("recovery jog selector preserves operator-selected travel without issuing m
   context.cncSyncJogStep({frameRecovery:{active:false}});
   assert(select.options.every(o=>!o.disabled));assert.equal(note.textContent,"");
   select.value="50";assert.equal(context.cncSyncJogStep({}),50);
+});
+
+test("Stop restores manual positioning without a reconnect click, but never validates reset cutting coordinates", async t => {
+ const f=await fixture(t,"0,0,0");
+ const stop=await f.request("/job/stop",{});
+ assert.equal(stop.status,200,JSON.stringify(stop));
+ const h=(await f.request("/health")).body;assert.equal(h.job.state,"stopped");
+ assert.equal(h.frameValid,false);assert.equal(h.frameRecovery.active,true);
+ assert.equal(h.setup.xyReady,false);assert.equal(h.setup.probeLocked,false);
+ assert.equal((await f.request("/job/start",{})).status,500);
+ const jog=await f.request("/jog/z",{distanceMm:5,feedMmPerMin:100,manualPositioning:true});
+ assert.equal(jog.status,200,JSON.stringify(jog));assert.equal(f.getPosition(),"0,0,5");
+ assert(!f.wire.includes("~"));assert(!f.wire.some(c=>c.startsWith("G10")));
+});
+test("startup exposes manual positioning after a recorded stop without requiring reconnect", async t => {
+ const f=await fixture(t,"0,0,0");const h=(await f.request("/health")).body;
+ assert.equal(h.frameRecovery.active,true);assert.equal(h.frameValid,false);
+ assert(f.wire.every(c=>c==='?'||c==='$#'));
+ assert.equal((await f.request("/jog/z",{distanceMm:1,feedMmPerMin:100,manualPositioning:true})).status,200);
+});
+
+for(const stoppedState of ["Idle","Hold:0"])test(`actual streamed-program Stop unwinds and handles ${stoppedState} without resuming`,async t=>{
+ const f=await fixture(t,"10,90,5","Idle",{streaming:true,stoppedState});
+ const run=f.request("/job/start",{jobId:"fake",stockWidthMm:300,stockHeightMm:200,stockReserveMm:5,manualRouter:true,gcode:"G21\nG90\nG0 Z5\nG1 X85 Y139 Z-0.1 F50\nG0 Z5\nM30"});
+ const deadline=Date.now()+3000;while(!f.wire.some(c=>/^G1\b/.test(c))&&Date.now()<deadline)await new Promise(r=>setTimeout(r,10));
+ assert(f.wire.some(c=>/^G1\b/.test(c)),JSON.stringify(await Promise.race([run,Promise.resolve(f.wire)])));
+ const stop=await f.request("/job/stop",{});assert.equal(stop.status,200,JSON.stringify(stop));
+ assert.equal((await run).status,500);const h=(await f.request("/health")).body;assert.equal(h.job.state,"stopped");assert.equal(h.frameValid,false);
+ const jog=await f.request("/jog/z",{distanceMm:1,feedMmPerMin:100,manualPositioning:true});
+ assert.equal(jog.status,stoppedState==="Idle"?200:500,JSON.stringify(jog));
+ assert(!f.wire.includes("~"));assert(!f.wire.includes("byte:24"));
 });
