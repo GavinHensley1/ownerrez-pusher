@@ -582,6 +582,7 @@
     <div style="margin-top:14px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.09);border-radius:10px;padding:13px">
       <div style="font-weight:600;margin-bottom:9px">4 &middot; Run</div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <p id="cncCutAuditHold" style="display:none;color:#ffcf79;font-size:12px" role="status"></p>
         <button id="cncStartBtn" class="cncCommandBtn" onclick="cncStart(this)" disabled style="font-size:16px;padding:12px 22px;font-weight:700">&#9654; Start carve</button>
         <button id="cncPauseBtn" class="cncCommandBtn" onclick="cncMachineAction('pause',{},this)">Pause</button>
         <button id="cncResumeBtn" class="cncCommandBtn" onclick="cncResume(this)">Resume</button>
@@ -1758,7 +1759,7 @@ function cncControllerReadout(health){
   var mp=raw.match(/MPos:([^|>]+)/), fs=raw.match(/FS:([^|>]+)/), xyz='';
   if(mp){ var a=mp[1].split(','); xyz=' · X '+(a[0]||'?')+' · Y '+(a[1]||'?')+' · Z '+(a[2]||'?'); }
   var spindle=fs?(' · feed/spindle '+fs[1]):'';
-  el.textContent=(health.frameValid===false?'FRAME INVALID · ':"")+(health.connected?'Controller '+state:'Controller offline')+xyz+spindle+(health.moving?' · MOVING':' · stationary');
+  el.textContent=(health.frameValid===false?'Cut setup unverified · ':"")+(health.connected?'Controller '+state:'Controller offline')+xyz+spindle+(health.reconnecting?' · checking connection':health.moving?' · MOVING':health.connected?' · stationary':' · position unverified');
 }
 function cncControllerState(health){
   health=health||{};var s=health.lastControllerStatus||{},raw=String(s.raw||''),state=String(s.state||(health.connected?'Connected':'Offline'));
@@ -1933,7 +1934,7 @@ function cncJogFrameCheck(health,axis,distance){
 }
 function cncPresentationState(job,health,controller){
   var state=String(job&&job.agentState||''),jobAt=Date.parse(job&&job.agentAt||''),healthAt=Date.parse(CNC.agent&&CNC.agent.at||'');
-  var stopped=state==='error'&&/PROGRAM_STOP_REQUESTED/.test(String(job&&job.agentMsg||''))&&!health.moving;
+  var stopped=state==='error'&&/PROGRAM_STOP_REQUESTED/.test(String(job&&job.agentMsg||''))&&(!health.moving||health.reconnecting);
   if(stopped)return {state:'stopped',recoveredError:false,errorMessage:''};
   var recovered=state==='error'&&controller&&controller.idle&&!health.moving&&!health.incident&&Number.isFinite(jobAt)&&Number.isFinite(healthAt)&&healthAt-jobAt>=15000;
   return {state:recovered?'ready':state,recoveredError:recovered,errorMessage:recovered?String(job&&job.agentMsg||''):''};
@@ -1947,9 +1948,10 @@ function cncRenderAgent(job){
   var checks=[['Bridge',!!CNC.agent],['Coordinate frame',h.frameValid!==false],['Controller ready',!!controller.idle&&h.frameValid!==false],['Machine boundaries',!!ws.calibrated],['Start position',!!frame.ok&&h.frameValid!==false],['Stock fit',!!fit.ok],['X/Y stock zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked]];
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
   var ready=checks.every(function(c){return c[1];}),resumePoint=h.resume||{},resumeInvalidatedAt=Date.parse(String(job&&job.resumeInvalidatedAt||'')),resumeUpdatedAt=Date.parse(String(resumePoint.updatedAt||'')),hasSavedResume=String(resumePoint.state||'')==='interrupted'&&Number(resumePoint.lastCompletedLine)>0&&!(Number.isFinite(resumeInvalidatedAt)&&Number.isFinite(resumeUpdatedAt)&&resumeInvalidatedAt>=resumeUpdatedAt);
-  var start=document.getElementById('cncStartBtn'); if(start){start.disabled=!(ready&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&state!=='running'&&state!=='queued');start.textContent=hasSavedResume?'▶ Restart stage from beginning':'▶ Start carve';}
+  var auditHold=String(job&&job.cutAuditHold||''),auditNote=document.getElementById('cncCutAuditHold');if(auditNote){auditNote.textContent=auditHold;auditNote.style.display=auditHold?'':'none';}
+  var start=document.getElementById('cncStartBtn'); if(start){start.disabled=!(ready&&!auditHold&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&state!=='running'&&state!=='queued');start.textContent=hasSavedResume?'▶ Restart stage from beginning':'▶ Start carve';}
   var pause=document.getElementById('cncPauseBtn'); if(pause) pause.disabled=state!=='running';
-  var resume=document.getElementById('cncResumeBtn'); if(resume){resume.disabled=h.frameValid===false||(state!=='paused'&&!(hasSavedResume&&controller.idle&&!h.moving));resume.textContent=hasSavedResume&&state!=='paused'?'Resume saved carve':'Resume';}
+  var resume=document.getElementById('cncResumeBtn'); if(resume){resume.disabled=!!auditHold||h.frameValid===false||(state!=='paused'&&!(hasSavedResume&&controller.idle&&!h.moving));resume.textContent=hasSavedResume&&state!=='paused'?'Resume saved carve':'Resume';}
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!h.moving&&!['queued','accepted','running','paused'].includes(state);
   var motionBlocked=baseBlocked||!controller.idle;
   var jogStep=cncSyncJogStep(h);document.querySelectorAll('.cncJogBtn').forEach(function(btn){var axis=String(btn.dataset.axis||''),dir=Number(btn.dataset.dir)||0,check=cncJogFrameCheck(h,axis,jogStep*dir);btn.disabled=motionBlocked||!check.ok;btn.title=check.reason||'';});

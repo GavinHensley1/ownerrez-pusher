@@ -87,6 +87,7 @@ async function heartbeat() {
   const projectHealth = {
     ok: health?.ok === true,
     connected: health?.connected === true,
+    reconnecting: health?.reconnecting === true,
     moving: health?.moving === true,
     error: health?.error ? String(health.error).slice(0, 300) : "",
     incident: health?.incident ? String(health.incident).slice(0, 300) : "",

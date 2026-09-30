@@ -10,6 +10,7 @@
 //   Overrides pin a night. No occupancy data at all -> price at market.
 let redis=null; try{ const {Redis}=require("@upstash/redis"); redis=new Redis({url:process.env.KV_REST_API_URL,token:process.env.KV_REST_API_TOKEN}); }catch{ redis=null; }
 const { loadCertifiedLibrary: loadCertifiedCncLibrary } = require("./cnc-certified-library.cjs");
+const { programAuditHold } = require("./cnc-program-holds.cjs");
 const FLOOR=99, CEIL=300, OV_MIN=50, OV_MAX=1000, ENDPOINT="https://api.ownerrez.com/v2/spotrates";
 const UNITS=[
   {orp:486910,name:"Bear Claw",offset:0},{orp:486911,name:"Flyin' Horse",offset:5},
@@ -2673,6 +2674,7 @@ if(action==="email_recipients"){
       if(!st||typeof st!=="object") st={jobs:[],config:{}};
       if(!Array.isArray(st.jobs)) st.jobs=[];
       if(!st.config||typeof st.config!=="object") st.config={};
+      for(const entry of st.jobs) if(entry) entry.cutAuditHold=programAuditHold(entry);
       // This 4040-PRO uses the fixed 20 mm Genmitsu Z-probe puck. Treating it
       // as the old generic 12.1 mm plate raises stock zero by 7.9 mm and causes
       // shallow relief programs to air-cut.
@@ -2903,6 +2905,7 @@ if(action==="email_recipients"){
               if(act==="zero_z"&&(!setup.probeLocked||!setup.stockProbeReady)) return res.status(409).json({error:"Lock a measured stock calibration before setting physical stock Z zero",cnc:st});
               if(act==="zero_z"&&b.confirm!==true) return res.status(400).json({error:"Explicit stock Z-zero confirmation is required",cnc:st});
               if(act==="start"){
+                const auditHold=programAuditHold(job);if(auditHold)return res.status(409).json({error:auditHold,cnc:st});
                 if(!job.hasGcode) return res.status(409).json({error:"Generate the design before Start",cnc:st});
                 if(metalJob&&(job.camProvider!=="kiri-moto"||job.camCertification!=="verified"||!/^[a-f0-9]{64}$/.test(String(job.camSourceHash||""))||!/^[a-f0-9]{64}$/.test(String(job.camAuditHash||"")))) return res.status(409).json({error:"Metal Start is blocked. Import an animated and certified Kiri:Moto operation first.",cnc:st});
                 if(metalJob){let imported=[];try{imported=JSON.parse(job.gcodeStages||"[]");}catch(e){}const required=["rough","cleanup","finish","profile","release"],missing=required.filter(stage=>!imported.includes(stage));if(missing.length)return res.status(409).json({error:"Metal Start is blocked until all five certified Kiri:Moto stages are imported. Missing: "+missing.join(", "),cnc:st});}

@@ -1,4 +1,5 @@
 import http from "node:http";
+import programHolds from "../api/cnc-program-holds.cjs";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
@@ -42,6 +43,7 @@ try { frameIncident = readFrameIncident(FRAME_INCIDENT_PATH); } catch (error) { 
 let reconnectPromise;
 let nextReconnectAt = 0;
 let nextStoppedFrameCheckAt = 0;
+let connectionCheckActive = false;
 const RECONNECT_BACKOFF_MS = 10_000;
 const workspace = new VirtualWorkspace();
 const setup = { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
@@ -263,6 +265,7 @@ const restoreVerifiedCalibration = (status, workOffset) => {
 const reconnectAndVerifyFrame = async () => {
   if (hazardousOperationActive()) throw new Error("Stop the active operation before reconnecting");
   if (reconnectPromise) throw new Error("A connection check is already in progress");
+  connectionCheckActive = true;
   moving = true; // serialize connection verification against setup and Start
   try {
   frameRecovery = { active: false, message: "Reading controller state and saved calibration" };
@@ -280,7 +283,7 @@ const reconnectAndVerifyFrame = async () => {
   restoreVerifiedCalibration(after, workOffset);
   recordEvent("controller.reconnected_read_only", { xyVerified: setup.xyReady, zVerified: setup.probeLocked, status: after.raw });
   return { ok: true, status: after, setup: { ...setup }, frameRecovery };
-  } finally { moving = false; }
+  } finally { connectionCheckActive = false; moving = false; }
 };
 const recoverIdleConnection = async () => {
   if (frameIncident?.latched) return;
@@ -339,7 +342,7 @@ const autoVerifyStoppedFrame = () => {
 const health = () => {
   autoVerifyStoppedFrame();
   if (!controller.connected && !hazardousOperationActive() && !frameIncident?.latched) void recoverIdleConnection();
-  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise), moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
+  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
 };
 const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (new Set(["Door:0", "Hold:0"]).has(status.state)) throw new Error(`Controller positioning is paused in ${status.state}. The external router may be removed; use Enable positioning first.`); if (status.state !== "Idle") throw new Error(`Controller must report Idle before positioning, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`); return status; };
@@ -571,6 +574,8 @@ const unlockProbeCalibration = async (payload) => {
   return { ok: true, setup: { ...setup } };
 };
 const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", material = "", camProvider = "", camCertification = "", camSourceHash = "", camAuditHash = "", camStage = "", camTool = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
+  const auditHold = programHolds.programAuditHold({ camSourceHash });
+  if (auditHold) throw new Error(auditHold);
   assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (/C752 nickel silver/i.test(String(material || "")) && createHash("sha256").update(String(gcode || "")).digest("hex") !== String(camSourceHash || "")) throw new Error("Metal G-code no longer matches its certified Kiri:Moto source hash");

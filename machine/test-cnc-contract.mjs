@@ -647,4 +647,5 @@ test("intentional Stop is a stopped receipt, not a persistent command-failure ba
   assert.equal(fn({agentState:"error",agentMsg:"PROGRAM_STOP_REQUESTED"},{moving:false},{idle:true}).state,"stopped");
   assert.equal(fn({agentState:"error",agentMsg:"unexpected alarm"},{moving:false},{idle:true}).state,"error");
   assert.equal(fn({agentState:"error",agentMsg:"PROGRAM_STOP_REQUESTED"},{moving:true},{idle:false}).state,"error");
+  assert.equal(fn({agentState:"error",agentMsg:"PROGRAM_STOP_REQUESTED"},{moving:true,reconnecting:true},{idle:false}).state,"stopped");
 });
