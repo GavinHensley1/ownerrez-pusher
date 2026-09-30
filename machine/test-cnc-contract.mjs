@@ -27,7 +27,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter(Boolean);
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncRestoreXyBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeToolBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncPlanOffsetX", "cncPlanOffsetY", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
+  for (const id of ["cncCommandPanel", "cncCommandTitle", "cncCommandDetail", "cncControllerReadout", "cncReadiness", "cncJogStep", "cncZeroBtn", "cncRestoreXyBtn", "cncProbeBedBtn", "cncProbeStockBtn", "cncProbeToolBtn", "cncProbeLockBtn", "cncStockZZeroBtn", "cncProbeUnlockBtn", "cncProbeRecoverBtn", "cncControllerRecoverBtn", "cncMeasuredStock", "cncOriginFootprint", "cncPlanOffsetX", "cncPlanOffsetY", "cncCertifiedInstallBtn", "cncCertifiedInstallStatus", "cncStartBtn", "cncPauseBtn", "cncResumeBtn", "cncStopBtn"]) assert.match(html, new RegExp(`id=["']${id}["']`));
   assert.match(html, /cncQueueMachineAction\('jog'/);
   assert.match(html, /if\(action==='jog'\)return 'Move'/);
   assert.match(html, /One press sends one command/);
@@ -140,6 +140,9 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /METAL CAM CERTIFICATION · KIRI:MOTO ONLY/);
   assert.match(html, /option value="cleanup">W01015 progressive cleanup/);
   assert.match(html, /Stages are sequential: Rough → Cleanup → Finish → Profile → Release/);
+  assert.match(html, /Load certified five-stage job/);
+  assert.match(html, /Project stores and verifies these programs; no local file or Boxer is required/);
+  assert.match(html, /installCertifiedProgram:'rambo-buckle-c752-v1'/);
   assert.match(html, /cncCamAnimated/);
   assert.match(html, /cncCamOrigin/);
   assert.match(html, /cncCamToolDepth/);
@@ -413,6 +416,9 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /gcodeStagesGzip/);
   assert.match(api, /Project metal G-code generation is retired/);
   assert.match(api, /Metal import requires a fully certified Kiri:Moto operation/);
+  assert.match(api, /loadCertifiedCncLibrary/);
+  assert.match(api, /installCertifiedProgram/);
+  assert.match(api, /certifiedLibraryId=library\.manifest\.id/);
   assert.match(api, /\["rough","cleanup","finish","profile","release"\]/);
   assert.match(api, /camCertificates/);
   assert.match(api, /stageCompletions/);
@@ -431,7 +437,7 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /job\.stageRequiresProbe=true;job\.stageActivatedAt=now;job\.resumeInvalidatedAt=now/);
   assert.match(api, /interrupted checkpoint belongs to an older generated program/);
   assert.match(html, /resumeInvalidatedAt>=resumeUpdatedAt/);
-  assert.match(api, /\["rough","finish","detail","all","profile","release"\]/);
+  assert.match(api, /\["rough","cleanup","finish","detail","all","profile","release"\]/);
   assert.match(api, /Complete the Profile stage before loading Final Release/);
   assert.match(api, /target\.activeStage==="profile"\)target\.profileCompletedAt=now/);
   assert.match(api, /@gzip:/);

@@ -9,6 +9,7 @@
 //     Then a GENTLE per-unit nudge (~20%, capped +/-$25) for unit-level scarcity vs the resort.
 //   Overrides pin a night. No occupancy data at all -> price at market.
 let redis=null; try{ const {Redis}=require("@upstash/redis"); redis=new Redis({url:process.env.KV_REST_API_URL,token:process.env.KV_REST_API_TOKEN}); }catch{ redis=null; }
+const { loadCertifiedLibrary: loadCertifiedCncLibrary } = require("./cnc-certified-library.cjs");
 const FLOOR=99, CEIL=300, OV_MIN=50, OV_MAX=1000, ENDPOINT="https://api.ownerrez.com/v2/spotrates";
 const UNITS=[
   {orp:486910,name:"Bear Claw",offset:0},{orp:486911,name:"Flyin' Horse",offset:5},
@@ -2802,6 +2803,24 @@ if(action==="email_recipients"){
           const jid=String(b.jobId); let job=null; for(let i=0;i<st.jobs.length;i++){ if(st.jobs[i]&&st.jobs[i].id===jid){ job=st.jobs[i]; break; } }
           if(!job) return res.status(404).json({error:"job not found"});
           const metalJob=/C752 nickel silver/i.test(String(job.material||""))||String(job.metalMode||"")==="raised-surface";
+          if(b.installCertifiedProgram!==undefined){
+            if(!metalJob)return res.status(409).json({error:"Certified metal programs can be installed only into a raised C752 job."});
+            if(["queued","accepted","running","paused"].includes(String(job.agentState||"")))return res.status(409).json({error:"Stop the current machine operation before replacing its program library",cnc:st});
+            if(!redis)return res.status(503).json({error:"CNC program storage is unavailable"});
+            let library;try{library=loadCertifiedCncLibrary(String(b.installCertifiedProgram||""));}catch(e){return res.status(409).json({error:"Certified program verification failed: "+String(e&&e.message||e)});}
+            const order=library.manifest.order.slice(),certs={},names={};
+            try{
+              for(const oldStage of ["rough","cleanup","finish","detail","all","profile","release"])await redis.del("parkside:cnc:gc:"+jid+":"+oldStage);
+              for(const stage of order){const program=library.programs[stage];await redis.set("parkside:cnc:gc:"+jid+":"+stage,"@gzip:"+program.gzipBase64);certs[stage]=program.certificate;names[stage]=program.file;}
+              await redis.set("parkside:cnc:gc:"+jid,"@gzip:"+library.programs.rough.gzipBase64);
+            }catch(e){return res.status(500).json({error:"Could not persist the certified program library"});}
+            const active=certs.rough,design=library.manifest.design,stock=library.manifest.stock;
+            job.material=library.manifest.material;job.metalMode="raised-surface";job.carveType="3D relief";job.status="Relief";
+            job.sizeMM=String(design.widthMm);job.sizeVal=String(design.widthMm);job.sizeUnit="mm";job.pieceW=String(design.widthMm);job.pieceH=String(design.heightMm);job.originOffsetXMm=String(design.offsetXMm);job.originOffsetYMm=String(design.offsetYMm);job.reliefDepth=String(design.reliefDepthMm);job.matThick=String(stock.thicknessMm);job.profileMode="sacrificial-through";job.profileDepthMm="4.024";job.profilePassDepthMm="0.05";job.sacrificialBackingConfirmed="true";
+            job.planTools=JSON.stringify({roughBit:library.manifest.stages.rough.tool,finishBit:library.manifest.stages.finish.tool,profileBit:library.manifest.stages.profile.tool,roughRpm:18000,finishRpm:18000});job.planStatus="approved";job.planVersion="certified-library-1";
+            job.hasGcode=true;job.gcodeEncoding="gzip-base64";job.gcodeStages=JSON.stringify(order);job.gcodeNames=JSON.stringify(names);job.camCertificates=JSON.stringify(certs);job.stageCompletions="{}";job.activeStage="rough";job.gcodeName=names.rough;job.progress=0;job.stageRequiresProbe=true;job.stageActivatedAt=now;job.resumeInvalidatedAt=now;job.certifiedLibraryId=library.manifest.id;job.certifiedLibraryVersion=String(library.manifest.version);job.certifiedLibraryInstalledAt=now;
+            job.camProvider=active.provider;job.camCertification=active.certification;job.camCertifiedAt=active.certifiedAt;job.camSourceHash=active.sourceHash;job.camAuditHash=active.auditHash;job.camStage="rough";job.camTool=active.tool;job.camAudit=active.audit;delete job.profileCompletedAt;job.updatedAt=now;
+          }
           if(b.creativeImage!==undefined){
             const d=String(b.creativeImage||""); if(d.length>800000) return res.status(413).json({error:"image too large"});
             try{ if(redis){ if(d) await redis.set("parkside:cnc:img:"+jid, d); else await redis.del("parkside:cnc:img:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
@@ -2818,14 +2837,14 @@ if(action==="email_recipients"){
           }
           if(b.gcodeStages&&typeof b.gcodeStages==="object"){
             if(metalJob) return res.status(409).json({error:"Project metal G-code generation is retired. Build and animate the operation in Kiri:Moto, then import the certified .nc file."});
-            const order=[]; for(const stage of ["rough","finish","detail","all","profile","release"]){ if(b.gcodeStages[stage]===undefined) continue; const text=String(b.gcodeStages[stage]||""); if(!text||text.length>800000) return res.status(text?413:400).json({error:"invalid "+stage+" stage G-code"}); order.push(stage); try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,text);}catch(e){return res.status(500).json({error:"db error"});} }
+            const order=[]; for(const stage of ["rough","cleanup","finish","detail","all","profile","release"]){ if(b.gcodeStages[stage]===undefined) continue; const text=String(b.gcodeStages[stage]||""); if(!text||text.length>800000) return res.status(text?413:400).json({error:"invalid "+stage+" stage G-code"}); order.push(stage); try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,text);}catch(e){return res.status(500).json({error:"db error"});} }
             if(!order.length) return res.status(400).json({error:"at least one G-code stage is required"});
             const active=order[0]; try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
             job.hasGcode=true; job.gcodeStages=JSON.stringify(order); job.activeStage=active; job.gcodeName="auto-"+active+".nc"; job.planStatus="approved"; job.stageRequiresProbe=true; job.stageActivatedAt=now; job.resumeInvalidatedAt=now; delete job.profileCompletedAt; job.updatedAt=now;
           }
           if(b.gcodeStagesGzip&&typeof b.gcodeStagesGzip==="object"){
             if(metalJob) return res.status(409).json({error:"Project metal G-code generation is retired. Build and animate the operation in Kiri:Moto, then import the certified .nc file."});
-            const order=[];for(const stage of ["rough","finish","detail","all","profile","release"]){if(b.gcodeStagesGzip[stage]===undefined)continue;const data=String(b.gcodeStagesGzip[stage]||"");if(!data||data.length>3800000||!/^[A-Za-z0-9+/=]+$/.test(data))return res.status(data?413:400).json({error:"invalid compressed "+stage+" stage G-code"});order.push(stage);try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,"@gzip:"+data);}catch(e){return res.status(500).json({error:"db error"});}}
+            const order=[];for(const stage of ["rough","cleanup","finish","detail","all","profile","release"]){if(b.gcodeStagesGzip[stage]===undefined)continue;const data=String(b.gcodeStagesGzip[stage]||"");if(!data||data.length>3800000||!/^[A-Za-z0-9+/=]+$/.test(data))return res.status(data?413:400).json({error:"invalid compressed "+stage+" stage G-code"});order.push(stage);try{if(redis)await redis.set("parkside:cnc:gc:"+jid+":"+stage,"@gzip:"+data);}catch(e){return res.status(500).json({error:"db error"});}}
             if(!order.length)return res.status(400).json({error:"at least one compressed G-code stage is required"});
             const active=order[0];try{if(redis){const code=await redis.get("parkside:cnc:gc:"+jid+":"+active);await redis.set("parkside:cnc:gc:"+jid,String(code||""));}}catch(e){return res.status(500).json({error:"db error"});}
             job.hasGcode=true;job.gcodeStages=JSON.stringify(order);job.activeStage=active;job.gcodeName="auto-"+active+".nc";job.planStatus="approved";job.gcodeEncoding="gzip-base64";job.stageRequiresProbe=true;job.stageActivatedAt=now;job.resumeInvalidatedAt=now;delete job.profileCompletedAt;job.updatedAt=now;

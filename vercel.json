@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/app.js": {
+      "includeFiles": "api/cnc-certified-programs/**"
+    }
+  },
   "crons": [
     { "path": "/api/app?action=run", "schedule": "45 6 * * *" },
     { "path": "/api/app?action=run_escalations", "schedule": "*/5 * * * *" }
