@@ -21,6 +21,7 @@ const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.u
     CNC_XY_STATE: xyStatePath,
     CNC_PROGRAM_STATE: programStatePath,
     CNC_RUN_STATE: runStatePath,
+    CNC_FRAME_INCIDENT: path.join(os.tmpdir(), `cnc-daemon-offline-frame-${process.pid}.json`),
   },
   stdio: ["ignore", "pipe", "pipe"],
 });

@@ -28,6 +28,7 @@ const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.u
     CNC_PROGRAM_STATE: path.join(os.tmpdir(), `cnc-silent-program-${process.pid}.json`),
     CNC_RUN_STATE: path.join(os.tmpdir(), `cnc-silent-run-${process.pid}.json`),
     CNC_EVENT_JOURNAL: path.join(os.tmpdir(), `cnc-silent-events-${process.pid}.jsonl`),
+    CNC_FRAME_INCIDENT: path.join(os.tmpdir(), `cnc-silent-frame-${process.pid}.json`),
   },
   stdio: ["ignore", "pipe", "pipe"],
 });

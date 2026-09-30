@@ -847,12 +847,16 @@ export class GrblTcpController extends EventEmitter {
   async #emergencyStop(reason) {
     if (this.connected) {
       try {
+        // Fail closed without GRBL soft reset. A soft reset can invalidate the
+        // machine-position frame while leaving persistent G54 offsets intact.
+        // That combination caused the September 29 metal incident. Feed hold
+        // and jog cancel stop accepted motion; destroying the socket below
+        // prevents any line replay or continuation.
         this.socket.write("!");
         this.socket.write(Buffer.from([0x9e]));
         this.socket.write("M5\r");
         this.socket.write(Buffer.from([0x85]));
         await sleep(100);
-        this.socket.write(Buffer.from([0x18]));
       } catch {}
     }
     this.#latchFault(new Error(reason), true);

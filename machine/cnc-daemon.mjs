@@ -13,6 +13,7 @@ import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
 import { completeStockProbe, completeToolTouch } from "./cnc-setup-flow.mjs";
 import { appendCncEvent, readLatestCompletedStockProbe } from "./cnc-event-journal.mjs";
 import { assertWorkJogWithinStock, positioningBoundsFromStock } from "./cnc-positioning-envelope.mjs";
+import { assertFrameValid, readFrameIncident, writeFrameIncident } from "./cnc-frame-incident.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
@@ -24,6 +25,7 @@ const XY_STATE_PATH = process.env.CNC_XY_STATE || join(homedir(), ".openclaw", "
 const PROGRAM_STATE_PATH = process.env.CNC_PROGRAM_STATE || join(homedir(), ".openclaw", "state", "cnc-last-program.json");
 const RUN_STATE_PATH = process.env.CNC_RUN_STATE || join(homedir(), ".openclaw", "state", "cnc-run-checkpoint.json");
 const EVENT_JOURNAL_PATH = process.env.CNC_EVENT_JOURNAL || join(homedir(), ".openclaw", "state", "cnc-events.jsonl");
+const FRAME_INCIDENT_PATH = process.env.CNC_FRAME_INCIDENT || join(homedir(), ".openclaw", "state", "cnc-frame-incident.json");
 const STATUS_TIMEOUT_MS = Number(process.env.CNC_STATUS_TIMEOUT_MS || 1500);
 const MAX_BODY_BYTES = 900_000;
 // High-resolution Finish programs are transported as decoded G-code over the
@@ -32,6 +34,8 @@ const MAX_BODY_BYTES = 900_000;
 const MAX_PROGRAM_BODY_BYTES = 10_000_000;
 const PROBE_PUCK_THICKNESS_MM = 20;
 let controller, lastControllerStatus, lastWorkOffset, incident, moving = false, keepaliveBusy = false;
+let frameIncident;
+try { frameIncident = readFrameIncident(FRAME_INCIDENT_PATH); } catch (error) { frameIncident = writeFrameIncident(FRAME_INCIDENT_PATH, { reason: `INVALID_FRAME_INCIDENT_STATE:${error.message}`, duringMotion: false }); }
 let reconnectPromise;
 let nextReconnectAt = 0;
 const RECONNECT_BACKOFF_MS = 10_000;
@@ -44,9 +48,19 @@ try { activeRunCheckpoint = readRunCheckpoint(RUN_STATE_PATH); } catch { activeR
 
 const json = (res, status, value) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
 const recordEvent = (type, detail = {}) => { try { appendCncEvent(EVENT_JOURNAL_PATH, type, detail); } catch (error) { logConnectionEvent?.(`journal:${error.message}`, `[cnc] event journal: ${error.message}`); } };
-const motionGuard = async () => ({ state: "controller_and_software_guards" });
+const motionGuard = async () => { assertFrameValid(frameIncident); return { state: "controller_and_software_guards", frameValid: true }; };
+const latchFrameIncident = (reason, duringMotion = hazardousOperationActive?.() === true) => {
+  const message = String(reason || "CONTROLLER_CONNECTION_LOST");
+  frameIncident = writeFrameIncident(FRAME_INCIDENT_PATH, { reason: message, occurredAt: new Date().toISOString(), duringMotion, jobId: job.jobId || "" });
+  incident = message;
+  workspace.clear();
+  clearSetup();
+  recordEvent("controller.frame_invalidated", { reason: message, duringMotion, jobId: job.jobId, jobState: job.state });
+  return frameIncident;
+};
 
 const programGuard = async ({ before, analysis, programContext }) => {
+  assertFrameValid(frameIncident);
   const snap = workspace.snapshot();
   if (!snap.calibrated) throw new Error("Virtual boundaries are not calibrated");
   if (!setup.xyReady) throw new Error("Set X/Y zero before starting");
@@ -77,7 +91,7 @@ const programGuard = async ({ before, analysis, programContext }) => {
   }
 };
 
-controller = new GrblTcpController({ host: HOST, port: PORT, statusTimeoutMs: STATUS_TIMEOUT_MS, commandTimeoutMs: 20_000, motionGuard, workspaceGuard: (request) => workspace.assertJog(request), programGuard, maxJogMm: 25, maxJogFeed: 500, maxSessionTravelMm: 2000, maxSpindleTestRpm: 2000 });
+controller = new GrblTcpController({ host: HOST, port: PORT, statusTimeoutMs: STATUS_TIMEOUT_MS, commandTimeoutMs: 20_000, motionGuard, workspaceGuard: (request) => workspace.assertJog(request), programGuard, maxJogMm: 25, maxJogFeed: 500, maxSessionTravelMm: 2000, maxSpindleTestRpm: 2000, maxProgramSocketLines: 0 });
 const persistRunProgress = (patch) => {
   if (!activeRunCheckpoint) return null;
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { ...activeRunCheckpoint, ...patch, updatedAt: new Date().toISOString() });
@@ -223,6 +237,7 @@ const logConnectionEvent = (key, message) => {
 controller.on("fault", (error) => {
   const hazardous = hazardousOperationActive();
   incident = error?.message || "CONTROLLER_FAULT";
+  if (hazardous || /timeout|socket|connection|EHOSTUNREACH|ECONN|GRBL response/i.test(incident)) latchFrameIncident(incident, hazardous);
   logConnectionEvent(`fault:${incident}`, `[cnc] controller fault hazardous=${hazardous}: ${incident}`);
   recordEvent("controller.fault", { hazardous, incident, jobId: job.jobId, jobState: job.state });
   if (["running", "paused"].includes(job.state)) {
@@ -232,7 +247,7 @@ controller.on("fault", (error) => {
 });
 controller.on("close", () => {
   const hazardous = hazardousOperationActive();
-  if (hazardous) incident = "CONTROLLER_CONNECTION_LOST";
+  latchFrameIncident("CONTROLLER_CONNECTION_LOST", hazardous);
   logConnectionEvent(`close:${hazardous}`, `[cnc] controller close hazardous=${hazardous}`);
   recordEvent("controller.close", { hazardous, incident, jobId: job.jobId, jobState: job.state });
   if (["running", "paused"].includes(job.state)) {
@@ -243,6 +258,7 @@ controller.on("close", () => {
 
 const readStatus = async () => (lastControllerStatus = parseStatus(await controller.status({ attempts: 5 })));
 const recoverIdleConnection = async () => {
+  if (frameIncident?.latched) return;
   if (controller.connected || hazardousOperationActive()) return;
   if (reconnectPromise) return reconnectPromise;
   if (Date.now() < nextReconnectAt) return;
@@ -285,13 +301,14 @@ const probeRecoverySnapshot = () => {
   return { available: !!prior && Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 4 * 60 * 60 * 1000 && continuousXyLock && !setup.probeLocked, sourceProbeAt: prior?.at || null, stockThicknessMm: prior?.stockThicknessMm ?? null, maxCutDepthMm: prior?.maxCutDepthMm ?? null };
 };
 const health = () => {
-  if (!controller.connected && !hazardousOperationActive()) void recoverIdleConnection();
-  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise), moving, incident, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, xyRecovery: controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
+  if (!controller.connected && !hazardousOperationActive() && !frameIncident?.latched) void recoverIdleConnection();
+  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise), moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, xyRecovery: !frameIncident?.latched && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
 };
 const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (new Set(["Door:0", "Hold:0"]).has(status.state)) throw new Error(`Controller positioning is paused in ${status.state}. The external router may be removed; use Enable positioning first.`); if (status.state !== "Idle") throw new Error(`Controller must report Idle before positioning, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`); return status; };
 
 const jog = async (axis, payload) => {
+  assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   moving = true; incident = undefined;
   try {
@@ -317,12 +334,14 @@ const jog = async (axis, payload) => {
   catch (error) { incident = error?.message || "JOG_FAILED"; throw error; } finally { moving = false; }
 };
 const spindleTest = async () => {
+  assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   moving = true; incident = undefined;
   try { await motionGuard(); const result = await controller.spindleTest(1000, 2000); lastControllerStatus = result.after; return result; }
   catch (error) { incident = error?.message || "SPINDLE_TEST_FAILED"; throw error; } finally { moving = false; }
 };
 const setXyZero = async (payload) => {
+  assertFrameValid(frameIncident);
   if (payload.confirmNewProject !== true) throw new Error("Explicit new-project X/Y reset confirmation is required");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   await motionGuard(); const before = await assertIdle(); await controller.setWorkOffset({ x: 0, y: 0 });
@@ -335,6 +354,7 @@ const setXyZero = async (payload) => {
   return { setup: { ...setup }, status: before, probePreserved: setup.probeLocked === true };
 };
 const restoreProbeAfterXyOnlyReset = async (payload) => {
+  assertFrameValid(frameIncident);
   if (payload.confirm !== true) throw new Error("Explicit X/Y-only probe restoration confirmation is required");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (!setup.xyReady || !new Set(["locked", "restored"]).has(setup.xyLockStatus)) throw new Error("A continuous saved X/Y frame is required before restoring probes");
@@ -369,6 +389,7 @@ const restoreProbeAfterXyOnlyReset = async (payload) => {
   return { ok: true, setup: { ...setup }, status, sourceProbeAt: prior.at };
 };
 const restoreXyAfterPowerCycle = async (payload) => {
+  assertFrameValid(frameIncident);
   if (payload.confirmGantryUnmoved !== true) throw new Error("Confirm the gantry was not moved while controller power was off");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   await motionGuard();
@@ -396,6 +417,7 @@ const restoreXyAfterPowerCycle = async (payload) => {
   return { ok: true, status: lastControllerStatus, setup: { ...setup }, restoredWorkPosition: plan.savedWorkPosition, lock: { lockedAt: lock.lockedAt, lastKnownMPos: lock.lastKnownMPos } };
 };
 const setStockZZero = async (payload) => {
+  assertFrameValid(frameIncident);
   if (payload.confirm !== true) throw new Error("Explicit stock Z-zero confirmation is required");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (!setup.probeLocked || !setup.stockProbeReady || !Number.isFinite(setup.stockThicknessMm)) throw new Error("Lock a measured stock calibration before setting physical stock Z zero");
@@ -419,6 +441,7 @@ const setStockZZero = async (payload) => {
   return { ok: true, setup: { ...setup }, status: lastControllerStatus, workOffset };
 };
 const probeSurface = async (kind, payload) => {
+  assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (!new Set(["bed", "stock", "tool"]).has(kind)) throw new Error("Unknown probe surface");
   let materialProfile;
@@ -480,6 +503,7 @@ const probeSurface = async (kind, payload) => {
   } catch (error) { incident = error?.message || "PROBE_FAILED"; setup.probePhase = error?.code === "PROBE_SEARCH_EXHAUSTED" ? "returned_no_contact" : "error"; setup.updatedAt = new Date().toISOString(); recordEvent("probe.failed", { kind, code: error?.code, message: incident, travelledMm: setup.probeTravelledMm, limitMm: setup.probeSearchLimitMm }); throw error; } finally { moving = false; }
 };
 const lockProbeCalibration = async () => {
+  assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (!setup.bedProbeReady || !setup.stockProbeReady || !setup.probeReady) throw new Error("Probe both the bed and stock before locking calibration");
   await motionGuard();
@@ -493,6 +517,7 @@ const lockProbeCalibration = async () => {
   return { ok: true, setup: { ...setup }, lock: { lockedAt: lock.lockedAt, lastKnownMPos: lock.lastKnownMPos } };
 };
 const unlockProbeCalibration = async (payload) => {
+  assertFrameValid(frameIncident);
   if (payload.confirm !== true) throw new Error("Explicit unlock confirmation is required");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   await assertIdle();
@@ -502,6 +527,7 @@ const unlockProbeCalibration = async (payload) => {
   return { ok: true, setup: { ...setup } };
 };
 const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
+  assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true, operation: String(operation || ""), allowSacrificialCutThrough: allowSacrificialCutThrough === true, sacrificialBackingConfirmed: sacrificialBackingConfirmed === true, profileDepthMm: Number.isFinite(Number(profileDepthMm)) ? Number(profileDepthMm) : null } });
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { version: 1, jobId: savedProgram.jobId, programCapturedAt: savedProgram.capturedAt, state: "running", lastCompletedLine: 0, totalLines: savedProgram.analysis.executableLines, message: "Preflight checks", updatedAt: new Date().toISOString() });
@@ -511,6 +537,7 @@ const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockRe
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); persistRunProgress({ state: "interrupted", message: incident }); recordEvent("program.interrupted", { jobId, message: incident, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine }); throw error; } finally { moving = false; }
 };
 const resumeSavedProgram = async (payload) => {
+  assertFrameValid(frameIncident);
   if (payload.confirm !== true) throw new Error("Explicit resume confirmation is required");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   const saved = readProgram(PROGRAM_STATE_PATH);
@@ -534,6 +561,7 @@ const resumeSavedProgram = async (payload) => {
   return { ...result, resume: resumed };
 };
 const restoreStoppedControllerState = async ({ discardBufferedProgram = false } = {}) => {
+  assertFrameValid(frameIncident);
   await controller.resetConnection();
   if (discardBufferedProgram) {
     const beforeDiscard = parseStatus(await controller.status({ attempts: 5 }));
@@ -569,6 +597,7 @@ const stopProgram = async () => {
   return { ok: true, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null, recovery };
 };
 const recoverStoppedController = async (payload) => {
+  assertFrameValid(frameIncident);
   if (payload.confirm !== true) throw new Error("Explicit stopped-controller recovery confirmation is required");
   if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
   const recovered = await restoreStoppedControllerState({ discardBufferedProgram: activeRunCheckpoint?.state === "interrupted" });
@@ -576,6 +605,7 @@ const recoverStoppedController = async (payload) => {
   return { ok: true, ...recovered, setup: { ...setup }, workspace: workspace.snapshot() };
 };
 const recoverRearYLimit = async (payload) => {
+  assertFrameValid(frameIncident);
   if (payload.confirm !== true) throw new Error("Explicit rear-Y limit recovery confirmation is required");
   if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
   moving = true; incident = undefined;
@@ -611,7 +641,7 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && req.url === "/observe") return json(res, 200, await observe());
     if (req.method === "POST" && req.url === "/query") { const { command } = await bodyJson(req); return json(res, 200, { command, lines: await controller.query(command) }); }
     if (req.method === "POST" && /^\/jog\/[xyz]$/.test(req.url)) return json(res, 200, await jog(req.url.at(-1).toUpperCase(), await bodyJson(req)));
-    if (req.method === "POST" && req.url === "/workspace/set") { removeXyLock(XY_STATE_PATH); setup.xyReady = false; setup.xyLockStatus = "unlocked"; setup.xyLockedAt = null; setup.xyOriginMPos = null; setup.updatedAt = new Date().toISOString(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
+    if (req.method === "POST" && req.url === "/workspace/set") { assertFrameValid(frameIncident); removeXyLock(XY_STATE_PATH); setup.xyReady = false; setup.xyLockStatus = "unlocked"; setup.xyLockedAt = null; setup.xyOriginMPos = null; setup.updatedAt = new Date().toISOString(); return json(res, 200, workspace.setBounds(await bodyJson(req))); }
     if (req.method === "POST" && req.url === "/zero/xy") return json(res, 200, await setXyZero(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/zero/xy/restore-after-power-cycle") return json(res, 200, await restoreXyAfterPowerCycle(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/restore-after-xy-zero") return json(res, 200, await restoreProbeAfterXyOnlyReset(await bodyJson(req)));
@@ -629,6 +659,7 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && req.url === "/spindle/test") return json(res, 200, await spindleTest());
     if (req.method === "POST" && req.url === "/spindle/stop") { const lines = await controller.spindleOff(); lastControllerStatus = await readStatus(); return json(res, 200, { lines, status: lastControllerStatus }); }
     if (req.method === "POST" && req.url === "/controller/acknowledge-power-on") {
+      assertFrameValid(frameIncident);
       const payload = await bodyJson(req);
       if (payload.powerCycleConfirmed !== true) throw new Error("Power-cycle confirmation is required");
       if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
@@ -663,6 +694,6 @@ keepalive.unref();
 if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
 server.listen(SOCKET_PATH, () => { chmodSync(SOCKET_PATH, 0o600); process.stdout.write(JSON.stringify({ event: "CNC_DAEMON_READY", socket: SOCKET_PATH, host: HOST, port: PORT }) + "\n"); });
 uiServer.listen(LOCAL_UI_PORT, "127.0.0.1");
-void recoverIdleConnection();
+if (!frameIncident?.latched) void recoverIdleConnection();
 const shutdown = async () => { clearInterval(keepalive); workspace.clear(); clearSetup(); if (moving) await controller.emergencyStop("DAEMON_SHUTDOWN_DURING_MOTION").catch(() => {}); await controller.close(); uiServer.close(); server.close(() => { try { if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH); } catch {} process.exit(0); }); };
 process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);

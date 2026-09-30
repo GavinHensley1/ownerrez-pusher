@@ -89,6 +89,14 @@ async function heartbeat() {
     moving: health?.moving === true,
     error: health?.error ? String(health.error).slice(0, 300) : "",
     incident: health?.incident ? String(health.incident).slice(0, 300) : "",
+    frameValid: health?.frameValid === true,
+    frameIncident: health?.frameIncident && typeof health.frameIncident === "object" ? {
+      latched: health.frameIncident.latched === true,
+      reason: String(health.frameIncident.reason || "").slice(0, 300),
+      occurredAt: String(health.frameIncident.occurredAt || ""),
+      duringMotion: health.frameIncident.duringMotion === true,
+      recoveryRequired: String(health.frameIncident.recoveryRequired || "").slice(0, 200),
+    } : null,
     lastControllerStatus: health?.lastControllerStatus || null,
     workspace: health?.workspace || null,
     setup: health?.setup || null,
@@ -110,6 +118,10 @@ async function execute(command) {
   const axis = String(command.axis || "").toUpperCase();
   const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);
+  if (command.action !== "stop") {
+    const health = await localRequest("/health");
+    if (health.frameValid === false) return report(command, "error", `Controller frame is invalid after ${health.frameIncident?.reason || health.incident || "connection loss"}. Motion is blocked until X/Y and Z are deliberately re-established in Project.`, { terminal: true });
+  }
   const programAction = new Set(["start", "resume_saved"]).has(command.action);
   const claim = claimCommand(COMMAND_LEDGER_PATH, command);
   if (!claim.claimed) {

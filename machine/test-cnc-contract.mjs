@@ -578,6 +578,20 @@ test("daemon persists per-line recovery checkpoints and validates position befor
   assert.match(daemon, /saved probe puck is/);
 });
 
+test("connection loss fails closed without GRBL soft reset or automatic motion recovery", () => {
+  assert.doesNotMatch(controller, /Buffer\.from\(\[0x18\]\)/);
+  assert.match(controller, /this\.socket\.write\("!"\)/);
+  assert.match(controller, /this\.socket\.write\(Buffer\.from\(\[0x85\]\)\)/);
+  assert.match(daemon, /CNC_FRAME_INCIDENT/);
+  assert.match(daemon, /frameValid: !frameIncident\?\.latched/);
+  assert.match(daemon, /if \(frameIncident\?\.latched\) return/);
+  assert.match(daemon, /maxProgramSocketLines: 0/);
+  assert.match(agent, /frameValid: health\?\.frameValid === true/);
+  assert.match(api, /health\.frameValid===false&&act!=="stop"/);
+  assert.match(html, /Connection lost · coordinate frame invalid/);
+  assert.match(html, /\['Coordinate frame',h\.frameValid!==false\]/);
+});
+
 test("bed re-probe atomically replaces Z and material measurements but preserves X/Y", () => {
   assert.match(daemon, /setup\.probeLocked && payload\.confirmReprobe !== true/);
   assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*removeMaterialProfile\(MATERIAL_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);/);

@@ -2845,6 +2845,7 @@ if(action==="email_recipients"){
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
             else if(["jog","probe_bed","probe_stock","probe_tool","restore_probe","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
+              if(health.frameValid===false&&act!=="stop") return res.status(409).json({error:"Controller connection was lost and the coordinate frame is invalid. Project has blocked Start, Resume, jog, probe, zero, unlock, and recovery until X/Y and Z are deliberately re-established.",cnc:st});
               if(!st.agent||(["recover_controller","recover_rear_y_limit"].indexOf(act)===-1&&!health.connected)) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
               if(act==="probe_bed"&&job.stageRequiresProbe&&setup.materialReady) return res.status(409).json({error:"This stage changed bits. Use Changed bit · Touch off on stock; do not re-probe the bed or reset X/Y.",cnc:st});

@@ -3,7 +3,7 @@ import net from "node:net";
 import test from "node:test";
 import { GrblTcpController, parseProbeResult, parseStatus, parseWorkOffset, probeRetractTimeoutMs, VirtualWorkspace } from "./cnc-controller.mjs";
 
-const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, probeContactAtMm = 1, failSlowProbe = false, startProbeAlarm = false, startLimitY = false, startAlarm = false, startDoor = false, startHold = false } = {}) => {
+const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, probeContactAtMm = 1, failSlowProbe = false, startProbeAlarm = false, startLimitY = false, startAlarm = false, startDoor = false, startHold = false } = {}) => {
   let connections = 0, statusQueries = 0, probeCommands = 0, x = 0, y = startLimitY ? 151.55 : 0, z = startProbeAlarm ? -74 : 0, incremental = false, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm || startLimitY || startAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, yLimitActive = startLimitY, hardLimits = true, probeSucceeded = false, probeZ = z;
   const probeSurfaceZ = -Math.abs(Number(probeContactAtMm));
   const writes = [];
@@ -70,6 +70,7 @@ const makeMock = async ({ ignoreFirstStatus = false, delimiter = "\r\n", jogNeve
             else if (command === "G21 G91") { incremental = true; socket.write(`ok${delimiter}`); }
             else if (command === "G90") { incremental = false; socket.write(`ok${delimiter}`); }
             else if (/^G0 Z-?\d/.test(command)) { const value = Number(command.match(/Z(-?\d+(?:\.\d+)?)/)?.[1] || 0); z = incremental ? z + value : value; socket.write(`ok${delimiter}`); }
+            else if (ignoreLinearMotionAck && /^G1\b/.test(command)) {}
             else if (/^(G21(?: G91)?|G90|G17|G0\b|G1\b|G4\b|M2\b)/.test(command)) socket.write(`ok${delimiter}`);
             else if (command === "$H") {
               homing = true; homePolls = 0;
@@ -327,6 +328,22 @@ test("manual-router program streams without controller spindle commands only whe
   assert.equal(result.after.state, "Idle"); assert.equal(seenMode, "manual");
   assert(!mock.bytes.includes(Buffer.from("M3"))); assert(!mock.bytes.includes(Buffer.from("M5")));
   assert(!mock.bytes.includes(Buffer.from("M2\r")));
+  await c.close(); await mock.close();
+});
+
+test("motion acknowledgement loss holds and quarantines without GRBL soft reset or replay", async () => {
+  const mock = await makeMock({ ignoreLinearMotionAck: true });
+  const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, commandTimeoutMs: 25, motionGuard: async () => {}, programGuard: async () => {} });
+  const source = "G21\nG90\nG17\nG0 Z2\nG1 X1 Y1 Z-0.01 F20\nG1 X2 Y2 Z-0.02 F20";
+  await assert.rejects(() => c.runProgram(source, { programContext: { manualRouter: true } }), /GRBL response timeout/);
+  await new Promise((resolve) => setTimeout(resolve, 125));
+  assert(mock.bytes.includes("!".charCodeAt(0)));
+  assert(mock.bytes.includes(0x85));
+  assert(mock.bytes.includes(Buffer.from("M5\r")));
+  assert.equal(mock.bytes.includes(0x18), false, "transport failure must never soft-reset GRBL");
+  assert.equal((mock.bytes.toString("latin1").match(/G1 X1 Y1/g) || []).length, 1, "timed-out motion line must not replay");
+  assert.equal(mock.bytes.includes(Buffer.from("G1 X2 Y2")), false, "no later motion may be streamed");
+  await assert.rejects(() => c.status(), /fault is latched/);
   await c.close(); await mock.close();
 });
 

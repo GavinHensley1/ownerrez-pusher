@@ -71,7 +71,7 @@ async function makeGrbl() {
 
 test("daemon completes new-board setup, changed-bit touch-off, and no-contact recovery without live hardware", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "cnc-daemon-probe-")), socketPath = join(dir, "cnc.sock"), grbl = await makeGrbl();
-  const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.url).pathname], { cwd: new URL("../", import.meta.url).pathname, env: { ...process.env, CNC_HOST: "127.0.0.1", CNC_PORT: String(grbl.port), CNC_DAEMON_SOCKET: socketPath, CNC_LOCAL_UI_PORT: "0", CNC_PROBE_STATE: join(dir, "probe.json"), CNC_MATERIAL_STATE: join(dir, "material.json"), CNC_XY_STATE: join(dir, "xy.json"), CNC_PROGRAM_STATE: join(dir, "program.json"), CNC_RUN_STATE: join(dir, "run.json"), CNC_EVENT_JOURNAL: join(dir, "events.jsonl") }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.url).pathname], { cwd: new URL("../", import.meta.url).pathname, env: { ...process.env, CNC_HOST: "127.0.0.1", CNC_PORT: String(grbl.port), CNC_DAEMON_SOCKET: socketPath, CNC_LOCAL_UI_PORT: "0", CNC_PROBE_STATE: join(dir, "probe.json"), CNC_MATERIAL_STATE: join(dir, "material.json"), CNC_XY_STATE: join(dir, "xy.json"), CNC_PROGRAM_STATE: join(dir, "program.json"), CNC_RUN_STATE: join(dir, "run.json"), CNC_EVENT_JOURNAL: join(dir, "events.jsonl"), CNC_FRAME_INCIDENT: join(dir, "frame-incident.json") }, stdio: ["ignore", "pipe", "pipe"] });
   let stderr = ""; child.stderr.on("data", (chunk) => { stderr += chunk; });
   t.after(async () => { child.kill("SIGTERM"); await new Promise((resolve) => child.once("exit", resolve)); await grbl.close(); });
   await waitFor(() => existsSync(socketPath));
