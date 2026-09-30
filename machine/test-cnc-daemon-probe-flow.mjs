@@ -40,8 +40,8 @@ async function makeGrbl() {
         buffer += char;
         if (char !== "\r") continue;
         const command = buffer.trim(); buffer = "";
-        if (command === "$$") socket.write(`$21=${hardLimits ? 1 : 0}\r\nok\r\n`);
-        else if (command === "$#") socket.write(`[G54:0.000,0.000,${g54z.toFixed(3)},0.000]\r\n[PRB:0.000,0.000,${probeZ.toFixed(3)}:${probeSucceeded ? 1 : 0}]\r\nok\r\n`);
+        if (command === "$$") socket.write(`$13=0\r\n$21=${hardLimits ? 1 : 0}\r\nok\r\n`);
+        else if (command === "$#") socket.write(`[G54:0.000,0.000,${g54z.toFixed(3)},0.000]\r\n[G92:0,0,0]\r\n[TLO:0]\r\n[PRB:0.000,0.000,${probeZ.toFixed(3)}:${probeSucceeded ? 1 : 0}]\r\nok\r\n`);
         else if (command === "$G") socket.write(`[GC:G0 G54 G17 G21 ${incremental ? "G91" : "G90"} G94 M5 M9 T0 F0 S0]\r\nok\r\n`);
         else if (/^\$21=[01]$/.test(command)) { hardLimits = command.endsWith("1"); socket.write("ok\r\n"); }
         else if (command === "M5") socket.write("ok\r\n");

@@ -31,7 +31,7 @@ export function analyzeProgram(source, { maxBytes = 10_000_000, maxLines = 750_0
 
   const lines = [];
   const bounds = { X: { min: Infinity, max: -Infinity }, Y: { min: Infinity, max: -Infinity }, Z: { min: Infinity, max: -Infinity } };
-  let metric = false, absolute = false, spindleStart = false, spindleStop = false, maxS = 0;
+  let metric = false, absolute = false, spindleStart = false, spindleStop = false, maxS = 0, motion, feed;
   for (const raw of text.split(/\r?\n/)) {
     const line = cleanProgramLine(raw);
     if (!line) continue;
@@ -42,29 +42,50 @@ export function analyzeProgram(source, { maxBytes = 10_000_000, maxLines = 750_0
     if (line.includes("$")) throw new Error("GRBL settings/system commands are not allowed in a carve file");
     if (/\bG(?:10|28|30|38(?:\.\d+)?|53|92)\b/.test(line)) throw new Error(`Unsafe coordinate/probe command is not allowed: ${line}`);
     if (/\bG91(?:\.\d+)?\b/.test(line)) throw new Error("Relative motion is not allowed in a carve file");
-    const gCodes = [...line.matchAll(/\bG0*(\d+(?:\.\d+)?)\b/g)].map((match) => Number(match[1]));
+    const words = [...line.matchAll(new RegExp(`([GMXYZFSP])(${NUMBER})`, "g"))].map((match) => ({ letter: match[1], value: Number(match[2]) }));
+    // Downstream envelope/resume parsers consume spaced words. Reject compact
+    // input instead of allowing different components to interpret different paths.
+    if (line.split(/\s+/).length !== words.length) throw new Error("G-code words must be separated by whitespace");
+    for (const letter of ["X", "Y", "Z", "F", "S", "P"]) {
+      if (words.filter(word => word.letter === letter).length > 1) throw new Error(`Duplicate ${letter} word: ${line}`);
+    }
+    const gCodes = words.filter(word => word.letter === "G").map(word => word.value);
+    if (gCodes.filter(code => code === 0 || code === 1).length > 1) throw new Error(`Conflicting motion modes: ${line}`);
     for (const code of gCodes) {
+      if ([10, 28, 30, 38.2, 38.3, 53, 92].includes(code)) throw new Error(`Unsafe coordinate/probe command is not allowed: ${line}`);
+      if (code === 91) throw new Error("Relative motion is not allowed in a carve file");
+      if (code === 0 || code === 1) motion = code;
       if (![0, 1, 4, 17, 21, 90].includes(code)) throw new Error(`Unsupported G-code G${code}`);
       if (code === 21) metric = true;
       if (code === 90) absolute = true;
     }
-    const mCodes = [...line.matchAll(/\bM0*(\d+)\b/g)].map((match) => Number(match[1]));
+    const feedWord = words.find(word => word.letter === "F");
+    if (feedWord) {
+      if (!(Number.isFinite(feedWord.value) && feedWord.value > 0)) throw new Error("Program feed must be finite and positive");
+      feed = feedWord.value;
+    }
+    const hasAxes = words.some(word => ["X", "Y", "Z"].includes(word.letter));
+    if (hasAxes && (!metric || !absolute)) throw new Error("G21 and G90 must be established before the first axis command");
+    if (hasAxes && motion === undefined) throw new Error("Program must establish G0/G1 before axis motion");
+    if (hasAxes && motion === 1 && feed === undefined) throw new Error("G1 motion requires an explicit positive feed before cutting");
+    if (hasAxes && gCodes.includes(4)) throw new Error("Dwell blocks must not contain axes");
+    const mCodes = words.filter(word => word.letter === "M").map(word => word.value);
     for (const code of mCodes) {
       if (![2, 3, 5, 30].includes(code)) throw new Error(`Unsupported M-code M${code}`);
       if (code === 3) spindleStart = true;
       if (code === 5) spindleStop = true;
     }
     for (const axis of ["X", "Y", "Z"]) {
-      const match = line.match(new RegExp(`\\b${axis}(${NUMBER})\\b`));
-      if (!match) continue;
-      const value = Number(match[1]);
+      const word = words.find(word => word.letter === axis);
+      if (!word) continue;
+      const value = word.value;
       if (!Number.isFinite(value)) throw new Error(`Invalid ${axis} coordinate`);
       bounds[axis].min = Math.min(bounds[axis].min, value);
       bounds[axis].max = Math.max(bounds[axis].max, value);
     }
-    const s = line.match(new RegExp(`\\bS(${NUMBER})\\b`));
+    const s = words.find(word => word.letter === "S");
     if (s) {
-      const rpm = Number(s[1]);
+      const rpm = s.value;
       if (!Number.isFinite(rpm) || rpm < 0 || rpm > maxSpindleRpm) throw new Error(`Spindle speed must be 0-${maxSpindleRpm} RPM`);
       maxS = Math.max(maxS, rpm);
     }

@@ -44,7 +44,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /cncCurrentJob\(\)\|\|await cncEnsureJob\(\)/);
   assert.match(html, /confirmNewProject:true/);
   assert.match(html, /confirmGantryUnmoved/);
-  assert.match(html, /external router does not need to be installed/i);
+  assert.match(html, /Manual movement and zero-setting are available/i);
   assert.match(html, /button\.disabled=!!baseBlocked/);
   assert.match(html, /Controller stopped · recovery required/);
   assert.match(html, /function cncResume/);
@@ -141,7 +141,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /option value="cleanup">W01015 progressive cleanup/);
   assert.match(html, /Stages are sequential: Rough → Cleanup → Finish → Profile → Release/);
   assert.match(html, /Load certified five-stage job/);
-  assert.match(html, /Project stores and verifies these programs; no local file or Boxer is required/);
+  assert.match(html, /cutting approval has been withdrawn/);
   assert.match(html, /installCertifiedProgram:'rambo-buckle-c752-v1'/);
   assert.match(html, /cncCamAnimated/);
   assert.match(html, /cncCamOrigin/);

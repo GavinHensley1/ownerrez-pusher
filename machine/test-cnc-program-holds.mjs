@@ -12,5 +12,5 @@ test("audit hold is limited to G-code Start and does not gate manual setup",()=>
  const daemon=readFileSync(new URL("./cnc-daemon.mjs",import.meta.url),"utf8");
  const start=daemon.indexOf("const startProgram =");const end=daemon.indexOf("const resumeSavedProgram =",start);
  assert.match(daemon.slice(start,end),/programHolds.programAuditHold/);
- assert.equal((daemon.match(/programHolds.programAuditHold/g)||[]).length,1);
+ assert.doesNotMatch(daemon.slice(0,start)+daemon.slice(end),/programHolds.programAuditHold/);
 });

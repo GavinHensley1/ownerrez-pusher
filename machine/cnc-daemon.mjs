@@ -131,6 +131,7 @@ const captureInterruptedPosition = (status, reason, { initial = false, moved = f
     positionUpdatedAt: new Date().toISOString(),
   });
 };
+controller.on("cutFrameVerified", value => recordEvent("program.effective_frame_verified", value));
 controller.on("programProgress", (value) => {
   Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() });
   persistRunProgress({ state: "running", lastCompletedLine: value.line, totalLines: value.total, message: job.message });
@@ -516,9 +517,10 @@ const probeSurface = async (kind, payload) => {
       maxSearchMm: payload.maxSearchMm,
     });
     const thickness = Number(result.thicknessMm);
-    const contactZ = coordinates(result.finalContact).Z;
+    const contactZ = result.finalProbe.position.Z;
     const surfaceZ = contactZ - thickness;
-    lastWorkOffset = { ...(lastWorkOffset || {}), Z: surfaceZ };
+    if (!result.frameReadback?.verified || Math.abs(result.actualWorkOffset.Z - surfaceZ) > 0.02) throw new Error("Probe effective offset was not verified");
+    lastWorkOffset = result.actualWorkOffset;
     setup.probeThickness = thickness;
     if (kind === "bed") {
       workspace.clear();
@@ -544,7 +546,7 @@ const probeSurface = async (kind, payload) => {
     persistLockedXy(result.after);
     finishFrameRecovery();
     captureInterruptedPosition(result.after, `probe_${kind}`, { moved: true });
-    recordEvent("probe.completed", { kind, searchedMm: result.searchedMm, probeThickness: setup.probeThickness, bedSurfaceMPos: setup.bedSurfaceMPos, stockSurfaceMPos: setup.stockSurfaceMPos, stockThicknessMm: setup.stockThicknessMm, safetyFloorMm: setup.safetyFloorMm, maxCutDepthMm: setup.maxCutDepthMm, zOriginMPos: setup.zOriginMPos, lockStatus: setup.probeLockStatus });
+    recordEvent("probe.completed", { kind, firstProbe: result.firstProbe, finalProbe: result.finalProbe, actualWorkOffset: result.actualWorkOffset, after: result.after, searchedMm: result.searchedMm, probeThickness: setup.probeThickness, bedSurfaceMPos: setup.bedSurfaceMPos, stockSurfaceMPos: setup.stockSurfaceMPos, stockThicknessMm: setup.stockThicknessMm, safetyFloorMm: setup.safetyFloorMm, maxCutDepthMm: setup.maxCutDepthMm, zOriginMPos: setup.zOriginMPos, lockStatus: setup.probeLockStatus });
     return { ...result, setup: { ...setup } };
   } catch (error) { incident = error?.message || "PROBE_FAILED"; setup.probePhase = error?.code === "PROBE_SEARCH_EXHAUSTED" ? "returned_no_contact" : "error"; setup.updatedAt = new Date().toISOString(); recordEvent("probe.failed", { kind, code: error?.code, message: incident, travelledMm: setup.probeTravelledMm, limitMm: setup.probeSearchLimitMm }); throw error; } finally { moving = false; }
 };
@@ -574,7 +576,8 @@ const unlockProbeCalibration = async (payload) => {
   return { ok: true, setup: { ...setup } };
 };
 const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", material = "", camProvider = "", camCertification = "", camSourceHash = "", camAuditHash = "", camStage = "", camTool = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
-  const auditHold = programHolds.programAuditHold({ camSourceHash });
+  const actualSourceHash = createHash("sha256").update(String(gcode || "")).digest("hex");
+  const auditHold = programHolds.programAuditHold({ camSourceHash }) || programHolds.programAuditHold({ camSourceHash: actualSourceHash });
   if (auditHold) throw new Error(auditHold);
   assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
@@ -583,7 +586,7 @@ const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockRe
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { version: 1, jobId: savedProgram.jobId, programCapturedAt: savedProgram.capturedAt, state: "running", lastCompletedLine: 0, totalLines: savedProgram.analysis.executableLines, message: "Preflight checks", updatedAt: new Date().toISOString() });
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
   recordEvent("program.started", { jobId, executableLines: savedProgram.analysis.executableLines, manualRouter: manualRouter === true });
-  try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); persistRunProgress({ state: "done", lastCompletedLine: activeRunCheckpoint.totalLines, message: "Carve complete" }); recordEvent("program.completed", { jobId, totalLines: activeRunCheckpoint.totalLines }); return result; }
+  try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, expectedOrigin: { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos }, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); persistRunProgress({ state: "done", lastCompletedLine: activeRunCheckpoint.totalLines, message: "Carve complete" }); recordEvent("program.completed", { jobId, totalLines: activeRunCheckpoint.totalLines }); return result; }
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); persistRunProgress({ state: "interrupted", message: incident }); recordEvent("program.interrupted", { jobId, message: incident, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine }); throw error; } finally { moving = false; }
 };
 const resumeSavedProgram = async (payload) => {

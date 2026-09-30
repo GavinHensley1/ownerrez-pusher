@@ -3,12 +3,14 @@ import net from "node:net";
 import test from "node:test";
 import { GrblTcpController, parseProbeResult, parseStatus, parseWorkOffset, probeRetractTimeoutMs, VirtualWorkspace } from "./cnc-controller.mjs";
 
-const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, probeContactAtMm = 1, failSlowProbe = false, startProbeAlarm = false, startLimitY = false, startAlarm = false, startDoor = false, startHold = false } = {}) => {
+const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, probeContactAtMm = 1, failSlowProbe = false, startProbeAlarm = false, startLimitY = false, startAlarm = false, startDoor = false, startHold = false, modalState = "G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0", g92Z = 0, tlo = 0, initialOffsetZ = 0, ignoreOffsetWrite = false, probeReportError = 0, slowContactDelta = 0, resetOnLinear = false, reportInches = false, resetOnCommand, refreshOffsetDelta = 0, pinAfterStatus = Infinity } = {}) => {
   let connections = 0, statusQueries = 0, probeCommands = 0, x = 0, y = startLimitY ? 151.55 : 0, z = startProbeAlarm ? -74 : 0, incremental = false, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm || startLimitY || startAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, yLimitActive = startLimitY, hardLimits = true, probeSucceeded = false, probeZ = z;
   const probeSurfaceZ = -Math.abs(Number(probeContactAtMm));
+  const workOffset = {X:0,Y:0,Z:initialOffsetZ};
   const writes = [];
   const server = net.createServer((socket) => {
     connections += 1;
+    if (connections > 1) workOffset.Z += refreshOffsetDelta;
     let buffer = "";
     socket.on("data", (chunk) => {
       writes.push(Buffer.from(chunk));
@@ -29,17 +31,18 @@ const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = fal
               else { state = "Idle"; socket.write(`ok${delimiter}`); }
             }
           }
-          const pins = `${probeActive ? "P" : ""}${yLimitActive ? "Y" : ""}${zLimitActive ? "Z" : ""}`;
+          const pins = `${statusQueries >= pinAfterStatus ? "P" : ""}${probeActive ? "P" : ""}${yLimitActive ? "Y" : ""}${zLimitActive ? "Z" : ""}`;
           socket.write(`<${state}|MPos:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}|FS:${state === "Idle" || state === "Alarm" || state.startsWith("Door") || state.startsWith("Hold") ? `0,${spindle}` : "100,0"}${pins ? `|Pn:${pins}` : ""}>${delimiter}`);
         } else {
           buffer += char;
           if (char === "\r") {
             const command = buffer.trim(); buffer = "";
-            if (command === "$G") setTimeout(() => socket.write(`[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]${delimiter}ok${delimiter}`), lateQueryAckMs);
-            else if (command === "$#") socket.write(`[G54:0.000,0.000,0.000]${delimiter}[PRB:${x.toFixed(3)},${y.toFixed(3)},${probeZ.toFixed(3)}:${probeSucceeded ? 1 : 0}]${delimiter}ok${delimiter}`);
+            if (command === resetOnCommand) socket.write(`Grbl 1.1h [reset]${delimiter}`);
+            else if (command === "$G") setTimeout(() => socket.write(`[GC:${modalState}]${delimiter}ok${delimiter}`), lateQueryAckMs);
+            else if (command === "$#") socket.write(`[G54:${workOffset.X.toFixed(3)},${workOffset.Y.toFixed(3)},${workOffset.Z.toFixed(3)}]${delimiter}[G92:0.000,0.000,${g92Z.toFixed(3)}]${delimiter}[TLO:${tlo.toFixed(3)}]${delimiter}[PRB:${x.toFixed(3)},${y.toFixed(3)},${probeZ.toFixed(3)}:${probeSucceeded ? 1 : 0}]${delimiter}ok${delimiter}`);
             else if (command === "$$") {
               if (alarmed) socket.write(`error:9${delimiter}`);
-              else socket.write(`$3=4${delimiter}$21=${hardLimits ? 1 : 0}${delimiter}$27=3.000${delimiter}ok${delimiter}`);
+              else socket.write(`$3=4${delimiter}$13=${reportInches ? 1 : 0}${delimiter}$21=${hardLimits ? 1 : 0}${delimiter}$27=3.000${delimiter}ok${delimiter}`);
             }
             else if (command === "$X") { alarmed = false; socket.write(`ok${delimiter}`); }
             else if (command.startsWith("$J=")) {
@@ -53,14 +56,14 @@ const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = fal
             else if (/^M3 S\d+$/.test(command)) { spindle = Number(command.slice(command.indexOf("S") + 1)); socket.write(`ok${delimiter}`); }
             else if (command === "M5") { spindle = 0; socket.write(`ok${delimiter}`); }
             else if (/^\$(20|21|22)=[01]$/.test(command)) { if (command.startsWith("$21=")) hardLimits = command.endsWith("1"); socket.write(`ok${delimiter}`); }
-            else if (command.startsWith("G10 L20 P1 ")) socket.write(`ok${delimiter}`);
+            else if (command.startsWith("G10 L20 P1 ")) { for(const m of command.matchAll(/([XYZ])([-+0-9.]+)/g)) if (!ignoreOffsetWrite) workOffset[m[1]]=({X:x,Y:y,Z:z})[m[1]]-Number(m[2]); socket.write(`ok${delimiter}`); }
             else if (/^G38\.[23] Z-/.test(command)) {
               probeCommands += 1;
               const requested = Math.abs(Number(command.match(/Z(-?\d+(?:\.\d+)?)/)?.[1] || 0));
               const target = z - requested;
               probeSucceeded = !(failSlowProbe && probeCommands > 1) && target <= probeSurfaceZ;
-              z = probeSucceeded ? probeSurfaceZ : target;
-              probeZ = z;
+              z = probeSucceeded ? probeSurfaceZ + (probeCommands > 1 ? slowContactDelta : 0) : target;
+              probeZ = z + probeReportError;
               probeActive = probeSucceeded;
               zLimitActive = probeSucceeded && probeAssertsZ;
               if (/^G38\.2/.test(command) && !probeSucceeded) { alarmed = true; socket.write(`ALARM:5${delimiter}`); }
@@ -70,6 +73,7 @@ const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = fal
             else if (command === "G21 G91") { incremental = true; socket.write(`ok${delimiter}`); }
             else if (command === "G90") { incremental = false; socket.write(`ok${delimiter}`); }
             else if (/^G0 Z-?\d/.test(command)) { const value = Number(command.match(/Z(-?\d+(?:\.\d+)?)/)?.[1] || 0); z = incremental ? z + value : value; socket.write(`ok${delimiter}`); }
+            else if (resetOnLinear && /^G1\b/.test(command)) socket.write(`Grbl 1.1h ['$' for help]${delimiter}`);
             else if (ignoreLinearMotionAck && /^G1\b/.test(command)) {}
             else if (/^(G21(?: G91)?|G90|G17|G0\b|G1\b|G4\b|M2\b)/.test(command)) socket.write(`ok${delimiter}`);
             else if (command === "$H") {
@@ -315,7 +319,7 @@ test("program streaming requires both motion and envelope guards", async () => {
   const mock = await makeMock(); let motionGuards = 0, programGuards = 0;
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { motionGuards += 1; }, programGuard: async ({ analysis }) => { programGuards += 1; assert.equal(analysis.bounds.X.max, 10); } });
   const source = "G21\nG90\nG17\nG0 X0 Y0 Z2\nM3 S1000\nG1 X10 Y10 Z-1 F100\nM5\nM2";
-  const result = await c.runProgram(source);
+  const result = await c.runProgram(source, { expectedOrigin: {X:0,Y:0,Z:0} });
   assert.equal(result.after.state, "Idle"); assert.equal(programGuards, 1); assert(motionGuards >= 2); assert(mock.bytes.includes(Buffer.from("G1 X10 Y10 Z-1 F100\r")));
   await c.close(); await mock.close();
 });
@@ -324,7 +328,7 @@ test("manual-router program streams without controller spindle commands only whe
   const mock = await makeMock(); let seenMode = "";
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {}, programGuard: async ({ analysis }) => { seenMode = analysis.spindleMode; } });
   const source = "G21\nG90\nG17\nG0 X0 Y0 Z2\nG1 X10 Y10 Z-1 F100\nM2";
-  const result = await c.runProgram(source, { programContext: { manualRouter: true } });
+  const result = await c.runProgram(source, { expectedOrigin: {X:0,Y:0,Z:0}, programContext: { manualRouter: true } });
   assert.equal(result.after.state, "Idle"); assert.equal(seenMode, "manual");
   assert(!mock.bytes.includes(Buffer.from("M3"))); assert(!mock.bytes.includes(Buffer.from("M5")));
   assert(!mock.bytes.includes(Buffer.from("M2\r")));
@@ -335,7 +339,7 @@ test("motion acknowledgement loss holds and quarantines without GRBL soft reset 
   const mock = await makeMock({ ignoreLinearMotionAck: true });
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, commandTimeoutMs: 25, motionGuard: async () => {}, programGuard: async () => {} });
   const source = "G21\nG90\nG17\nG0 Z2\nG1 X1 Y1 Z-0.01 F20\nG1 X2 Y2 Z-0.02 F20";
-  await assert.rejects(() => c.runProgram(source, { programContext: { manualRouter: true } }), /GRBL response timeout/);
+  await assert.rejects(() => c.runProgram(source, { expectedOrigin: {X:0,Y:0,Z:0}, programContext: { manualRouter: true } }), /GRBL response timeout/);
   await new Promise((resolve) => setTimeout(resolve, 125));
   assert(mock.bytes.includes("!".charCodeAt(0)));
   assert(mock.bytes.includes(0x85));
@@ -360,7 +364,7 @@ test("long programs refresh the Wi-Fi transport only at a safe Idle retract boun
   const refreshes = [];
   c.on("programTransportRefreshed", (value) => refreshes.push(value));
   const source = "G21\nG90\nG17\nG0 Z2\nG0 X1 Y1\nG1 Z-1 F60\nG1 X2 F100\nG0 Z2\nG0 X3 Y3\nG1 Z-1 F60\nG1 X4 F100\nG0 Z2\nM2";
-  const result = await c.runProgram(source, { programContext: { manualRouter: true } });
+  const result = await c.runProgram(source, { expectedOrigin: {X:0,Y:0,Z:0}, programContext: { manualRouter: true } });
   assert.equal(result.after.state, "Idle");
   assert.equal(refreshes.length, 3);
   assert.deepEqual(refreshes.map((value) => value.line), [4, 8, 12]);
@@ -413,4 +417,97 @@ test("unsafe program is rejected before transmission", async () => {
   await assert.rejects(() => c.runProgram("G21\nG90\nG38.2 Z-5\nM3 S1000\nM5"), /Unsafe coordinate\/probe/);
   assert(!mock.bytes.includes(Buffer.from("G38.2")));
   await c.close(); await mock.close();
+});
+
+for (const [label, options, expected, pattern] of [
+  ["inch reports", {reportInches:true}, {X:0,Y:0,Z:0}, /Millimeter coordinate reports/],
+  ["wrong active WCS", { modalState: "G0 G55 G17 G21 G90 G94 M5" }, {X:0,Y:0,Z:0}, /active G54/],
+  ["hidden G92 Z", { g92Z: -1.04 }, {X:0,Y:0,Z:0}, /zero G92/],
+  ["tool length offset", { tlo: 1.04 }, {X:0,Y:0,Z:0}, /tool-length offset/],
+  ["changed G54 Z", { initialOffsetZ: -1.04 }, {X:0,Y:0,Z:0}, /differs from calibrated/],
+  ["missing calibrated origin", {}, undefined, /Expected X origin/],
+]) test(`effective frame rejects ${label} before any program command`, async () => {
+  const mock = await makeMock(options);
+  const c = new GrblTcpController({ host:"127.0.0.1", port:mock.port, motionGuard:async()=>{}, programGuard:async()=>{} });
+  try {
+    await assert.rejects(c.runProgram("G21\nG90\nG0 Z4.99\nG1 X1 Y1 Z-0.06 F75", {expectedOrigin:expected, programContext:{manualRouter:true}}), pattern);
+    assert(!mock.bytes.toString().includes("G21\r"), "no preamble or axis command may be sent");
+    assert(!mock.bytes.toString().includes("G10"), "verification must not repair offsets silently");
+  } finally { await c.close(); await mock.close(); }
+});
+
+test("controller reset banner aborts streaming before the next cutting line", async () => {
+  const mock = await makeMock({resetOnLinear:true});
+  const c = new GrblTcpController({host:"127.0.0.1",port:mock.port,motionGuard:async()=>{},programGuard:async()=>{}});
+  try {
+    await assert.rejects(c.runProgram("G21\nG90\nG0 Z4.99\nG1 X1 Y1 Z-0.06 F75\nG1 X2 Y2 Z-0.06", {expectedOrigin:{X:0,Y:0,Z:0},programContext:{manualRouter:true}}), /CONTROLLER_RESET_DURING_PROGRAM/);
+    assert(!mock.bytes.toString().includes("G1 X2"));
+    assert(!mock.bytes.includes(0x18), "do not send another soft reset");
+  } finally { await c.close(); await mock.close(); }
+});
+
+for (const [label, options, pattern, beforeOffsetWrite] of [
+  ["PRB and stopped MPos disagree", {probeReportError:1.04}, /telemetry disagreement/, true],
+  ["first and slow contacts disagree", {slowContactDelta:0.1}, /touches disagree/, true],
+  ["G10 did not update G54", {ignoreOffsetWrite:true}, /differs from calibrated/, false],
+]) test(`probe refuses calibration when ${label}`, async () => {
+  const mock = await makeMock(options);
+  const c = new GrblTcpController({host:"127.0.0.1",port:mock.port,motionGuard:async()=>{}});
+  try {
+    await assert.rejects(c.probeZ({thicknessMm:20}), pattern);
+    if(beforeOffsetWrite) assert(!mock.bytes.toString().includes("G10 L20"));
+  } finally { await c.close(); await mock.close(); }
+});
+
+for (const command of ["$$", "$G", "$#"]) test(`reset during ${command} preflight cannot reach first motion`, async () => {
+  const mock = await makeMock({resetOnCommand:command});
+  const c = new GrblTcpController({host:"127.0.0.1",port:mock.port,motionGuard:async()=>{},programGuard:async()=>{}});
+  try {
+    await assert.rejects(c.runProgram("G21\nG90\nG0 Z4.99\nG1 X1 Y1 Z-0.06 F75", {expectedOrigin:{X:0,Y:0,Z:0},programContext:{manualRouter:true}}), /CONTROLLER_RESET_DURING_FRAME_VERIFICATION/);
+    assert(!mock.bytes.toString().includes("G21\r"));
+  } finally {await c.close();await mock.close();}
+});
+
+for (const options of [{reportInches:true}, {resetOnCommand:"$G"}, {resetOnCommand:"G10 L20 P1 Z20.000"}]) test(`probe rejects invalid reporting or reset: ${JSON.stringify(options)}`, async () => {
+  const mock = await makeMock(options);
+  const c = new GrblTcpController({host:"127.0.0.1",port:mock.port,motionGuard:async()=>{}});
+  try {
+    await assert.rejects(c.probeZ({thicknessMm:20}), /Millimeter coordinate reports|CONTROLLER_RESET_DURING_FRAME_VERIFICATION/);
+    const commands = mock.bytes.toString();
+    if(options.resetOnCommand?.startsWith("G10")) assert(!commands.slice(commands.indexOf("G10")+5).includes("$J="), "no retract after reset");
+    else assert(!commands.includes("G38."), "no probe travel on invalid preflight");
+  } finally {await c.close();await mock.close();}
+});
+
+
+test("final preflight input-pin change blocks streaming", async () => {
+  const mock = await makeMock({pinAfterStatus:2});
+  const c = new GrblTcpController({host:"127.0.0.1",port:mock.port,motionGuard:async()=>{},programGuard:async()=>{}});
+  try {
+    await assert.rejects(c.runProgram("G21\nG90\nG0 Z4.99\nG1 X1 F75", {expectedOrigin:{X:0,Y:0,Z:0},programContext:{manualRouter:true}}), /changed during cut-frame verification/);
+    assert(!mock.bytes.toString().includes("G21\r"));
+  } finally {await c.close();await mock.close();}
+});
+
+test("transport refresh rejects changed effective offset before further axis motion", async () => {
+  const mock = await makeMock({refreshOffsetDelta:1.04});
+  const c = new GrblTcpController({host:"127.0.0.1",port:mock.port,motionGuard:async()=>{},programGuard:async()=>{},maxProgramSocketLines:3});
+  try {
+    await assert.rejects(c.runProgram("G21\nG90\nG0 Z4.99\nG1 X1 F75", {expectedOrigin:{X:0,Y:0,Z:0},programContext:{manualRouter:true}}), /differs from calibrated/);
+    assert.equal(mock.connections,2);
+    assert(!mock.bytes.toString().includes("G1 X1"));
+  } finally {await c.close();await mock.close();}
+});
+
+test("probe zero uses the latched trigger position, not small post-trigger stopping travel", async () => {
+  const mock = await makeMock({probeReportError:0.01});
+  const c = new GrblTcpController({host:"127.0.0.1",port:mock.port,motionGuard:async()=>{}});
+  try {
+    const result = await c.probeZ({thicknessMm:20});
+    assert.equal(result.finalContact.MPos,"0.000,0.000,-1.000");
+    assert.equal(result.finalProbe.position.Z,-0.99);
+    assert.equal(result.actualWorkOffset.Z,-20.99);
+    assert.equal(result.frameReadback.verified,true);
+    assert(mock.bytes.toString().includes("G10 L20 P1 Z19.990\r"));
+  } finally {await c.close();await mock.close();}
 });

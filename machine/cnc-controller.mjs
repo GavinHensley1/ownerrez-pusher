@@ -1,4 +1,5 @@
 import net from "node:net";
+import { inspectEffectiveCutFrame } from "./cnc-effective-frame.mjs";
 import { EventEmitter } from "node:events";
 import { analyzeProgram } from "./cnc-program.mjs";
 
@@ -67,6 +68,7 @@ export class GrblTcpController extends EventEmitter {
     this.statusWaiter = undefined;
     this.lineWaiter = undefined;
     this.queue = Promise.resolve();
+    this.frameVerificationActive = false;
     this.programRunning = false;
     this.pauseRequested = false;
     this.abortRequested = false;
@@ -396,6 +398,17 @@ export class GrblTcpController extends EventEmitter {
     });
   }
 
+  async #withFrameVerificationUnlocked(operation) {
+    await this.connect();
+    this.frameVerificationActive = true;
+    try { return await operation(); }
+    finally { this.frameVerificationActive = false; }
+  }
+
+  async #requireMetricReportsUnlocked() {
+    if (await this.#booleanSettingUnlocked(13)) throw new Error("Millimeter coordinate reports required ($13=0); report-inches is not a valid cutting/probing frame");
+  }
+
   async #booleanSettingUnlocked(setting) {
     const lines = await this.#lineCommandUnlocked("$$", false);
     const match = lines.map((line) => line.match(new RegExp(`^\\$${Number(setting)}=(0|1)(?:\\s|$)`))).find(Boolean);
@@ -478,7 +491,7 @@ export class GrblTcpController extends EventEmitter {
   }
 
   probeZ({ thicknessMm = 12.1, maxSearchMm = 70, searchSegmentMm = 5, fastFeed = 100, slowTravelMm = 2, slowFeed = 10, retractMm = 3 } = {}) {
-    return this.#enqueue(async () => {
+    return this.#enqueue(() => this.#withFrameVerificationUnlocked(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for probing");
       const thickness = Number(thicknessMm), searchLimit = Math.abs(Number(maxSearchMm)), searchSegment = Math.abs(Number(searchSegmentMm)), fast = Number(fastFeed), slowTravel = Math.abs(Number(slowTravelMm)), slow = Number(slowFeed), retract = Number(retractMm);
       if (!Number.isFinite(thickness) || thickness < 1 || thickness > 30) throw new Error("Probe thickness must be 1-30 mm");
@@ -493,6 +506,13 @@ export class GrblTcpController extends EventEmitter {
       const [feed, spindle] = feedAndSpindle(before);
       if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before probe: ${before.FS}`);
       if (before.Pn) throw new Error(`Active input pins before probe: ${before.Pn}`);
+      await this.#requireMetricReportsUnlocked();
+      const probeModes = await this.#lineCommandUnlocked("$G", false);
+      const probeParameters = await this.#lineCommandUnlocked("$#", false);
+      const probeOriginBefore = parseWorkOffset(probeParameters);
+      const probeStatus = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      if (probeStatus.MPos !== before.MPos || probeStatus.FS !== "0,0" || probeStatus.Pn) throw new Error("Controller changed during probe-frame verification");
+      inspectEffectiveCutFrame({ modalLines: probeModes, parameterLines: probeParameters, status: probeStatus, expectedOrigin: probeOriginBefore });
       this.emit("probeProgress", { phase: "searching", travelledMm: 0, limitMm: searchLimit });
       const hardLimitsWereEnabled = await this.#booleanSettingUnlocked(21);
       let hardLimitsSuppressed = false;
@@ -564,7 +584,15 @@ export class GrblTcpController extends EventEmitter {
           }
           throw new ProbeVerificationError(`The slow confirmation touch did not see the plate. Z returned to its starting height; check the clip and plate, then retry.`);
         }
-        await this.#lineCommandUnlocked(`G10 L20 P1 Z${thickness.toFixed(3)}`, false);
+        for (const [name, contact, sample] of [["first", firstContact, firstProbe], ["slow", finalContact, finalProbe]]) {
+          const position = coordinates(contact);
+          for (const axis of ["X", "Y", "Z"]) if (Math.abs(position[axis] - sample.position[axis]) > 0.05) throw new Error(`${name} probe PRB/${axis} telemetry disagreement`);
+        }
+        if (Math.abs(finalProbe.position.Z - firstProbe.position.Z) > 0.05) throw new Error("Probe touches disagree by more than 0.05 mm");
+        // PRB is latched at trigger; stopped MPos may include deceleration travel.
+        // Establish zero from the trigger point, not the later stopped endpoint.
+        const workZAtStop = thickness + coordinates(finalContact).Z - finalProbe.position.Z;
+        await this.#lineCommandUnlocked(`G10 L20 P1 Z${workZAtStop.toFixed(3)}`, false);
         this.emit("probeProgress", { phase: "final_retract", travelledMm: searchedMm, limitMm: searchLimit });
         let finalRetract;
         try { finalRetract = await this.#probeRetractUnlocked(retract, fast); }
@@ -575,10 +603,15 @@ export class GrblTcpController extends EventEmitter {
           await this.#lineCommandUnlocked("$21=1", false);
           hardLimitsSuppressed = false;
         }
+        const finalModes = await this.#lineCommandUnlocked("$G", false);
+        const finalParameters = await this.#lineCommandUnlocked("$#", false);
         const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+        const actualWorkOffset = parseWorkOffset(finalParameters);
+        const expectedProbeOrigin = { ...probeOriginBefore, Z: finalProbe.position.Z - thickness };
+        const frameReadback = inspectEffectiveCutFrame({ modalLines: finalModes, parameterLines: finalParameters, status: after, expectedOrigin: expectedProbeOrigin });
         this.emit("probeProgress", { phase: "complete", travelledMm: searchedMm, limitMm: searchLimit });
         await this.motionGuard();
-        return { thicknessMm: thickness, before, search, searchedMm, fastReply, firstContact, firstProbe, firstRetract, slowReply, finalContact, finalProbe, finalRetract, after, hardLimitsRestored: hardLimitsWereEnabled };
+        return { actualWorkOffset, frameReadback, thicknessMm: thickness, before, search, searchedMm, fastReply, firstContact, firstProbe, firstRetract, slowReply, finalContact, finalProbe, finalRetract, after, hardLimitsRestored: hardLimitsWereEnabled };
       } catch (error) {
         await this.#lineCommandUnlocked("G90", false).catch(() => {});
         if (hardLimitsWereEnabled && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
@@ -586,11 +619,12 @@ export class GrblTcpController extends EventEmitter {
         if (!this.fault) await this.#emergencyStop(`PROBE_FAILED:${error.message}`);
         throw this.fault || error;
       }
-    });
+    }));
   }
 
-  runProgram(source, { onProgress, programContext } = {}) {
-    return this.#enqueue(async () => {
+  runProgram(source, { onProgress, programContext, expectedOrigin } = {}) {
+    expectedOrigin = expectedOrigin ? { ...expectedOrigin } : undefined;
+    return this.#enqueue(() => this.#withFrameVerificationUnlocked(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for programs");
       if (typeof this.programGuard !== "function") throw new Error("Program guard is required");
       const spindleMode = programContext?.manualRouter === true ? "manual" : "controller";
@@ -602,6 +636,15 @@ export class GrblTcpController extends EventEmitter {
       if (feed !== 0 || spindle !== 0) throw new Error(`Non-zero feed/spindle before program: ${before.FS}`);
       if (before.Pn) throw new Error(`Active input pins before program: ${before.Pn}`);
       await this.programGuard({ before, analysis, programContext });
+      await this.#requireMetricReportsUnlocked();
+      // Read-only proof of the effective frame, inside the same serialized queue
+      // as the first program command. Do not silently clear/replace any offsets.
+      const modalLines = await this.#lineCommandUnlocked("$G", false);
+      const parameterLines = await this.#lineCommandUnlocked("$#", false);
+      const verifiedStatus = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      if (verifiedStatus.MPos !== before.MPos || verifiedStatus.FS !== "0,0" || verifiedStatus.Pn) throw new Error("Controller changed during cut-frame verification");
+      const effectiveFrame = inspectEffectiveCutFrame({ modalLines, parameterLines, status: verifiedStatus, expectedOrigin });
+      this.emit("cutFrameVerified", { effectiveFrame, modalLines, parameterLines, status: verifiedStatus });
       this.programRunning = true;
       this.pauseRequested = false;
       this.abortRequested = false;
@@ -633,7 +676,7 @@ export class GrblTcpController extends EventEmitter {
           if (typeof onProgress === "function" && (index === analysis.lines.length - 1 || index % 20 === 0)) await onProgress({ progress, line: index + 1, total: analysis.lines.length });
           const safeRetract = /^G0*0\b/.test(analysis.lines[index]) && Number(analysis.lines[index].match(/\bZ([-+]?(?:\d+(?:\.\d*)?|\.\d+))\b/)?.[1]) >= 0;
           if (Number.isInteger(this.maxProgramSocketLines) && this.maxProgramSocketLines > 0 && index + 1 - lastSocketRefreshLine >= this.maxProgramSocketLines && safeRetract) {
-            const refreshed = await this.#refreshProgramSocketUnlocked();
+            const refreshed = await this.#refreshProgramSocketUnlocked({ expectedOrigin });
             lastSocketRefreshLine = index + 1;
             this.emit("programTransportRefreshed", { line: index + 1, total: analysis.lines.length, ...refreshed });
           }
@@ -661,7 +704,7 @@ export class GrblTcpController extends EventEmitter {
         this.programRunning = false;
         this.pauseRequested = false;
       }
-    });
+    }));
   }
 
   pauseProgramNow() {
@@ -782,7 +825,7 @@ export class GrblTcpController extends EventEmitter {
     throw this.fault;
   }
 
-  async #refreshProgramSocketUnlocked({ timeoutMs = 60_000 } = {}) {
+  async #refreshProgramSocketUnlocked({ timeoutMs = 60_000, expectedOrigin } = {}) {
     const deadline = now() + timeoutMs;
     let before;
     while (now() < deadline) {
@@ -812,7 +855,12 @@ export class GrblTcpController extends EventEmitter {
     await sleep(250);
 
     await this.connect();
+    await this.#requireMetricReportsUnlocked();
+    const modalLines = await this.#lineCommandUnlocked("$G", false);
+    const parameterLines = await this.#lineCommandUnlocked("$#", false);
     const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+    if (after.Pn) throw new Error("Active input pins after transport refresh");
+    inspectEffectiveCutFrame({ modalLines, parameterLines, status: after, expectedOrigin });
     if (after.state !== "Idle") throw new Error(`Controller must remain Idle after transport refresh, got ${after.state}`);
     const [afterFeed, afterSpindle] = feedAndSpindle(after);
     if (afterFeed !== 0 || afterSpindle !== 0) throw new Error(`Non-zero controller feed/spindle after transport refresh: ${after.FS}`);
@@ -873,6 +921,10 @@ export class GrblTcpController extends EventEmitter {
       this.buffer = this.buffer.slice(index + 1);
       if (!line) continue;
       this.emit("line", line);
+      if (/^Grbl\b/i.test(line) && (this.programRunning || this.frameVerificationActive)) {
+        this.#latchFault(new Error(this.programRunning ? "CONTROLLER_RESET_DURING_PROGRAM" : "CONTROLLER_RESET_DURING_FRAME_VERIFICATION"), true);
+        return;
+      }
       if (line.startsWith("<") && line.endsWith(">") && this.statusWaiter?.generation === generation) {
         const waiter = this.statusWaiter; this.statusWaiter = undefined; waiter.resolve(line); continue;
       }
@@ -927,8 +979,8 @@ export function parseStatus(line) {
 }
 
 export function coordinates(status) {
-  const source = status.MPos || status.WPos;
-  if (!source) throw new Error(`Status lacks MPos/WPos: ${status.raw}`);
+  const source = status.MPos;
+  if (!source) throw new Error(`Status lacks machine coordinates (MPos): ${status.raw}`);
   const [x, y, z] = source.split(",").map(Number);
   if (![x, y, z].every(Number.isFinite)) throw new Error(`Invalid coordinates: ${source}`);
   return { X: x, Y: y, Z: z };

@@ -75,3 +75,15 @@ test("permits a bounded sacrificial through-cut only for profile and final relea
   assert.throws(() => approvedProgramDepth(setup, { operation: "profile", allowSacrificialCutThrough: true, profileDepthMm: 4.014 }), /Sacrificial backing confirmation/);
   assert.throws(() => approvedProgramDepth(setup, { operation: "profile", allowSacrificialCutThrough: true, sacrificialBackingConfirmed: true, profileDepthMm: 4.2 }), /outside the approved/);
 });
+
+
+test("modal declarations must precede motion and G1 must establish a positive feed", () => {
+  for (const program of ["G0 Z2\nG21\nG90", "G21\nG0 Z2\nG90", "G21\nG90\nG1 X1", "G21\nG90\nG1 X1 F0", "G21\nG90\nG1 X1 F-10", "G21\nG90\nX1"])
+    assert.throws(() => analyzeProgram(program, {spindleMode:"manual"}));
+});
+
+test("compact and duplicate-word G-code cannot bypass downstream mode and bounds checks", () => {
+  assert.throws(() => analyzeProgram("G21G90\nG0X0Y0Z2\nG1X100Y80Z-1F100", {spindleMode:"manual"}), /separated by whitespace/);
+  for (const line of ["G91X1", "G92Z0", "G10L20P1Z0", "G1X1X2F100", "G0G1X1F100", "G1X1F0", "M3S1000"])
+    assert.throws(() => analyzeProgram("G21\nG90\nG0 Z2\n" + line, {spindleMode:"manual"}));
+});

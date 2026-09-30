@@ -44,7 +44,7 @@ test("buffered stop accepts a controller position one line ahead of the durable 
 });
 
 test("buffered stop rejects a controller position beyond the bounded forward window", () => {
-  const longerProgram = ["G21", "G90", "G17", "G0 Z3.6", ...Array.from({ length: 24 }, (_, index) => `G1 X${index + 1} Z-1`), "G0 Z3.6", "M2"].join("\n");
+  const longerProgram = ["G21", "G90", "G17", "G0 Z3.6", ...Array.from({ length: 24 }, (_, index) => `G1 X${index + 1} Z-1 F100`), "G0 Z3.6", "M2"].join("\n");
   assert.throws(
     () => buildBufferedStopResume(longerProgram, 5, { X: 22, Y: 0, Z: -1 }, { spindleMode: "manual", forwardSearchWindow: 4 }),
     /guarded checkpoint window/,
