@@ -2647,7 +2647,7 @@ if(action==="email_recipients"){
         let st={jobs:[],config:{}}; try{ const raw=await redis.get("parkside:cnc"); const o=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); if(o&&typeof o==="object")st=o; }catch(e){}
         if(!Array.isArray(st.jobs))st.jobs=[];
         const jid=String(b.jobId||""); const target=st.jobs.find(function(x){return x&&x.id===jid;});
-        if(target){ target.agentState=state; target.agentMsg=String(b.message||"").slice(0,500); target.agentAt=now; target.agentCommandId=commandId||target.agentCommandId||""; target.agentAction=String(b.action||target.agentAction||"").slice(0,32); target.updatedAt=now; if(state==="running"&&["start","resume_saved"].includes(String(b.action)))target.status="Carving"; if(state==="done"&&["start","resume_saved"].includes(String(b.action))){target.status="Done";target.progress=100;if(target.activeStage==="profile")target.profileCompletedAt=now;} if(state==="stopped")target.status="Relief"; }
+        if(target){ target.agentState=state; target.agentMsg=String(b.message||"").slice(0,500); target.agentAt=now; target.agentCommandId=commandId||target.agentCommandId||""; target.agentAction=String(b.action||target.agentAction||"").slice(0,32); target.updatedAt=now; if(state==="running"&&["start","resume_saved"].includes(String(b.action)))target.status="Carving"; if(state==="done"&&["start","resume_saved"].includes(String(b.action))){target.status="Done";target.progress=100;let completed={};try{completed=JSON.parse(target.stageCompletions||"{}");}catch(e){}if(target.activeStage)completed[target.activeStage]=now;target.stageCompletions=JSON.stringify(completed);if(target.activeStage==="profile")target.profileCompletedAt=now;} if(state==="stopped")target.status="Relief"; }
         try{await redis.set("parkside:cnc",JSON.stringify(st));}catch(e){return res.status(500).json({error:"db error"});}
         return res.status(200).json({ok:true});
       }
@@ -2661,7 +2661,7 @@ if(action==="email_recipients"){
       const q=req.query||{};
       if(req.method!=="POST" && q.file){
         const jid=String(q.jobId||""), requestedStage=String(q.stage||"");
-        const gcKey=(requestedStage&&["rough","finish","detail","profile","release","all"].indexOf(requestedStage)!==-1)?("parkside:cnc:gc:"+jid+":"+requestedStage):("parkside:cnc:gc:"+jid);
+        const gcKey=(requestedStage&&["rough","cleanup","finish","detail","profile","release","all"].indexOf(requestedStage)!==-1)?("parkside:cnc:gc:"+jid+":"+requestedStage):("parkside:cnc:gc:"+jid);
         const key=(q.file==="gc")?gcKey:((q.file==="depth")?("parkside:cnc:depth:"+jid):((q.file==="plan")?("parkside:cnc:plan:"+jid):("parkside:cnc:img:"+jid)));
         let val=""; try{ if(redis){ const v=await redis.get(key); val=(v==null)?"":(typeof v==="string"?v:JSON.stringify(v)); } }catch(e){ val=""; }
         if(q.file==="gc"&&val.startsWith("@gzip:"))return res.status(200).json({file:"gc",jobId:jid,encoding:"gzip-base64",data:val.slice(6)});
@@ -2718,10 +2718,10 @@ if(action==="email_recipients"){
         } else if(b.updateJob&&typeof b.updateJob==="object"){
           const u=b.updateJob; const id=String(u.id||"");
           st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","metalMode","depthApprovalStatus","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","originOffsetXMm","originOffsetYMm","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight","xyOriginXMPos","xyOriginYMPos","xyLockedAt","stockThicknessMm","maxCutDepthMm","probeLockedAt","profileMode","profileDepthMm","profilePassDepthMm","sacrificialBackingConfirmed"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); if(u.invalidatePlan===true){x.planStatus="draft";x.hasGcode=false;delete x.planHash;delete x.gcodeStages;delete x.activeStage;} x.updatedAt=now; } return x; });
-          if(u.invalidatePlan===true) try{if(redis){await redis.del("parkside:cnc:plan:"+id);await redis.del("parkside:cnc:gc:"+id);for(const stage of ["rough","finish","detail","profile","release","all"])await redis.del("parkside:cnc:gc:"+id+":"+stage);}}catch(e){}
+          if(u.invalidatePlan===true) try{if(redis){await redis.del("parkside:cnc:plan:"+id);await redis.del("parkside:cnc:gc:"+id);for(const stage of ["rough","cleanup","finish","detail","profile","release","all"])await redis.del("parkside:cnc:gc:"+id+":"+stage);}}catch(e){}
         } else if(b.delJob){
           const id=String(b.delJob); st.jobs=st.jobs.filter(function(x){ return x&&x.id!==id; });
-          try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); await redis.del("parkside:cnc:depth:"+id); await redis.del("parkside:cnc:plan:"+id); for(const stage of ["rough","finish","detail","profile","release"]) await redis.del("parkside:cnc:gc:"+id+":"+stage); } }catch(e){}
+          try{ if(redis){ await redis.del("parkside:cnc:img:"+id); await redis.del("parkside:cnc:gc:"+id); await redis.del("parkside:cnc:depth:"+id); await redis.del("parkside:cnc:plan:"+id); for(const stage of ["rough","cleanup","finish","detail","profile","release"]) await redis.del("parkside:cnc:gc:"+id+":"+stage); } }catch(e){}
         } else if(b.config&&typeof b.config==="object"){
           const c=b.config;
           if(c.reliefWidth!==undefined) st.config.reliefWidth=Math.max(20,Math.min(600,Number(c.reliefWidth)||100));
@@ -2805,7 +2805,7 @@ if(action==="email_recipients"){
           if(b.creativeImage!==undefined){
             const d=String(b.creativeImage||""); if(d.length>800000) return res.status(413).json({error:"image too large"});
             try{ if(redis){ if(d) await redis.set("parkside:cnc:img:"+jid, d); else await redis.del("parkside:cnc:img:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
-            job.hasCreative=!!d; job.hasGcode=false; job.hasDepth=false; job.planStatus="draft"; delete job.planHash; delete job.gcodeStages; delete job.activeStage; try{ if(redis){ await redis.del("parkside:cnc:depth:"+jid); await redis.del("parkside:cnc:gc:"+jid); await redis.del("parkside:cnc:plan:"+jid); for(const stage of ["rough","finish","detail","profile","release"]) await redis.del("parkside:cnc:gc:"+jid+":"+stage); } }catch(e){} job.updatedAt=now;
+            job.hasCreative=!!d; job.hasGcode=false; job.hasDepth=false; job.planStatus="draft"; delete job.planHash; delete job.gcodeStages; delete job.activeStage; try{ if(redis){ await redis.del("parkside:cnc:depth:"+jid); await redis.del("parkside:cnc:gc:"+jid); await redis.del("parkside:cnc:plan:"+jid); for(const stage of ["rough","cleanup","finish","detail","profile","release"]) await redis.del("parkside:cnc:gc:"+jid+":"+stage); } }catch(e){} job.updatedAt=now;
           }
           if(b.machiningPlan!==undefined){
             const plan=(b.machiningPlan&&typeof b.machiningPlan==="object")?b.machiningPlan:null;
@@ -2814,7 +2814,7 @@ if(action==="email_recipients"){
             try{ if(redis) await redis.set("parkside:cnc:plan:"+jid,raw); }catch(e){ return res.status(500).json({error:"db error"}); }
             job.planHash=String(plan.hash||"").slice(0,80); job.planStatus=String(plan.status||"draft").slice(0,20); job.planVersion=String(plan.version||1).slice(0,12); job.planTools=JSON.stringify(plan.tools||{}).slice(0,4000); job.planCutout=String((plan.cutout||{}).mode||"none").slice(0,20); job.planUpdatedAt=now;
             job.hasGcode=false; delete job.gcodeStages; delete job.activeStage;
-            try{ if(redis){ await redis.del("parkside:cnc:gc:"+jid); for(const stage of ["rough","finish","detail","profile","release"]) await redis.del("parkside:cnc:gc:"+jid+":"+stage); } }catch(e){}
+            try{ if(redis){ await redis.del("parkside:cnc:gc:"+jid); for(const stage of ["rough","cleanup","finish","detail","profile","release"]) await redis.del("parkside:cnc:gc:"+jid+":"+stage); } }catch(e){}
           }
           if(b.gcodeStages&&typeof b.gcodeStages==="object"){
             if(metalJob) return res.status(409).json({error:"Project metal G-code generation is retired. Build and animate the operation in Kiri:Moto, then import the certified .nc file."});
@@ -2831,26 +2831,38 @@ if(action==="email_recipients"){
             job.hasGcode=true;job.gcodeStages=JSON.stringify(order);job.activeStage=active;job.gcodeName="auto-"+active+".nc";job.planStatus="approved";job.gcodeEncoding="gzip-base64";job.stageRequiresProbe=true;job.stageActivatedAt=now;job.resumeInvalidatedAt=now;delete job.profileCompletedAt;job.updatedAt=now;
           }
           if(b.activateStage!==undefined){
-            const stage=String(b.activateStage||""); if(["rough","finish","detail","profile","release","all"].indexOf(stage)===-1) return res.status(400).json({error:"invalid machining stage"});
+            const stage=String(b.activateStage||""); if(["rough","cleanup","finish","detail","profile","release","all"].indexOf(stage)===-1) return res.status(400).json({error:"invalid machining stage"});
             if(["queued","accepted","running","paused"].indexOf(String(job.agentState||""))!==-1) return res.status(409).json({error:"Stop the current machine operation before loading another stage",cnc:st});
+            let stageOrder=[];try{stageOrder=JSON.parse(job.gcodeStages||"[]");}catch(e){}let completed={};try{completed=JSON.parse(job.stageCompletions||"{}");}catch(e){}const certifiedOrder=["rough","cleanup","finish","profile","release"],certifiedIndex=certifiedOrder.indexOf(stage);
+            if(metalJob&&certifiedIndex>0){const required=certifiedOrder[certifiedIndex-1];if(!stageOrder.includes(required))return res.status(409).json({error:"Import the certified "+required+" stage before loading "+stage,cnc:st});if(!completed[required])return res.status(409).json({error:"Complete the "+required+" stage before loading "+stage,cnc:st});}
             if(stage==="release"&&!job.profileCompletedAt)return res.status(409).json({error:"Complete the Profile stage before loading Final Release",cnc:st});
             let code=""; try{if(redis){const v=await redis.get("parkside:cnc:gc:"+jid+":"+stage);code=(v==null)?"":String(v);}}catch(e){} if(!code)return res.status(404).json({error:"stage G-code not found"});
+            let certs={},names={};try{certs=JSON.parse(job.camCertificates||"{}");}catch(e){}try{names=JSON.parse(job.gcodeNames||"{}");}catch(e){}const priorCert=certs[job.activeStage]||null,nextCert=certs[stage]||null;if(metalJob&&!nextCert)return res.status(409).json({error:"Certified CAM metadata is missing for "+stage,cnc:st});
             try{if(redis)await redis.set("parkside:cnc:gc:"+jid,code);}catch(e){return res.status(500).json({error:"db error"});}
-            let stageOrder=[];try{stageOrder=JSON.parse(job.gcodeStages||"[]");}catch(e){} job.activeStage=stage; job.gcodeName="auto-"+stage+".nc"; job.hasGcode=true; job.status="Relief"; job.stageRequiresProbe=stageOrder.indexOf(stage)>0; job.stageActivatedAt=now; job.updatedAt=now;
+            job.activeStage=stage;job.gcodeName=names[stage]||("kiri-"+stage+".nc");job.hasGcode=true;job.status="Relief";job.stageRequiresProbe=!priorCert||!nextCert||String(priorCert.tool)!==String(nextCert.tool);job.stageActivatedAt=now;job.updatedAt=now;
+            if(nextCert){job.camProvider=nextCert.provider;job.camCertification=nextCert.certification;job.camCertifiedAt=nextCert.certifiedAt;job.camSourceHash=nextCert.sourceHash;job.camAuditHash=nextCert.auditHash;job.camStage=stage;job.camTool=nextCert.tool;job.camAudit=nextCert.audit;}
           }
           if(b.gcode!==undefined||b.gcodeGzip!==undefined){
-            let t=String(b.gcode||""),stored=t;
+            let t=String(b.gcode||""),stored=t,metalImportedStage="",metalActiveStage="";
             if(b.gcodeGzip!==undefined){const data=String(b.gcodeGzip||"");if(!data||data.length>3800000||!/^[A-Za-z0-9+/=]+$/.test(data))return res.status(data?413:400).json({error:"invalid compressed G-code"});try{t=require("zlib").gunzipSync(Buffer.from(data,"base64")).toString("utf8");}catch(e){return res.status(400).json({error:"compressed G-code could not be decoded"});}if(t.length>10000000)return res.status(413).json({error:"decoded G-code too large"});stored="@gzip:"+data;}else if(t.length>800000)return res.status(413).json({error:"gcode too large"});
             if(metalJob&&t){
               const provider=String(b.camProvider||""),certification=String(b.camCertification||""),stage=String(b.camStage||""),tool=String(b.camTool||"").trim(),sourceHash=String(b.camSourceHash||""),auditHash=String(b.camAuditHash||""),audit=String(b.camAudit||"");
-              if(provider!=="kiri-moto"||certification!=="verified"||!["rough","finish","profile","release"].includes(stage)||!tool||![b.camAnimated,b.camOriginVerified,b.camToolDepthVerified,b.camRetractsVerified].every(v=>v===true)) return res.status(409).json({error:"Metal import requires a fully certified Kiri:Moto operation."});
+              if(provider!=="kiri-moto"||certification!=="verified"||!["rough","cleanup","finish","profile","release"].includes(stage)||!tool||![b.camAnimated,b.camOriginVerified,b.camToolDepthVerified,b.camRetractsVerified].every(v=>v===true)) return res.status(409).json({error:"Metal import requires a fully certified Kiri:Moto operation."});
               if(!/^[a-f0-9]{64}$/.test(sourceHash)||!/^[a-f0-9]{64}$/.test(auditHash)||!audit||audit.length>2000) return res.status(409).json({error:"Metal CAM certificate hashes or audit are invalid."});
               const crypto=require("crypto"),actualSourceHash=crypto.createHash("sha256").update(t).digest("hex"),actualAuditHash=crypto.createHash("sha256").update(sourceHash+"\n"+audit+"\n"+provider+"\n"+stage+"\n"+tool).digest("hex");
               if(actualSourceHash!==sourceHash||actualAuditHash!==auditHash) return res.status(409).json({error:"The imported metal G-code does not match its CAM certificate."});
-              job.camProvider=provider;job.camCertification=certification;job.camCertifiedAt=String(b.camCertifiedAt||now).slice(0,40);job.camSourceHash=sourceHash;job.camAuditHash=auditHash;job.camStage=stage;job.camTool=tool.slice(0,240);job.camAudit=audit;job.planStatus="approved";job.gcodeStages=JSON.stringify([stage]);job.activeStage=stage;job.stageRequiresProbe=true;job.stageActivatedAt=now;job.resumeInvalidatedAt=now;delete job.profileCompletedAt;
+              const fixedOrder=["rough","cleanup","finish","profile","release"],firstExternal=!job.camCertificates;if(firstExternal&&stage!=="rough")return res.status(409).json({error:"Import the certified Rough stage first so Project can preserve the required operation order."});
+              let certs={},stageOrder=[],names={},completed={};try{certs=JSON.parse(job.camCertificates||"{}");}catch(e){}try{stageOrder=JSON.parse(job.gcodeStages||"[]");}catch(e){}try{names=JSON.parse(job.gcodeNames||"{}");}catch(e){}try{completed=JSON.parse(job.stageCompletions||"{}");}catch(e){}
+              if(firstExternal){certs={};stageOrder=[];names={};completed={};if(redis)for(const oldStage of ["rough","cleanup","finish","detail","all","profile","release"])await redis.del("parkside:cnc:gc:"+jid+":"+oldStage);}
+              const certifiedAt=String(b.camCertifiedAt||now).slice(0,40),safeTool=tool.slice(0,240),safeName=String(b.gcodeName||("kiri-"+stage+".nc")).slice(0,120);
+              certs[stage]={provider,certification,certifiedAt,sourceHash,auditHash,audit,tool:safeTool};names[stage]=safeName;stageOrder=fixedOrder.filter(s=>s===stage||stageOrder.includes(s));
+              const changedAt=fixedOrder.indexOf(stage);for(const s of fixedOrder)if(fixedOrder.indexOf(s)>=changedAt)delete completed[s];
+              metalImportedStage=stage;metalActiveStage=stageOrder.includes(job.activeStage)?job.activeStage:stageOrder[0];const activeCert=certs[metalActiveStage];
+              job.camCertificates=JSON.stringify(certs);job.gcodeNames=JSON.stringify(names);job.stageCompletions=JSON.stringify(completed);job.gcodeStages=JSON.stringify(stageOrder);job.activeStage=metalActiveStage;job.planStatus="approved";job.hasGcode=true;job.stageRequiresProbe=firstExternal;job.stageActivatedAt=firstExternal?now:(job.stageActivatedAt||now);job.resumeInvalidatedAt=now;delete job.profileCompletedAt;
+              job.camProvider=activeCert.provider;job.camCertification=activeCert.certification;job.camCertifiedAt=activeCert.certifiedAt;job.camSourceHash=activeCert.sourceHash;job.camAuditHash=activeCert.auditHash;job.camStage=metalActiveStage;job.camTool=activeCert.tool;job.camAudit=activeCert.audit;job.gcodeName=names[metalActiveStage]||("kiri-"+metalActiveStage+".nc");
             }
-            try{ if(redis){ if(t) await redis.set("parkside:cnc:gc:"+jid, stored); else await redis.del("parkside:cnc:gc:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
-            job.hasGcode=!!t; job.gcodeEncoding=b.gcodeGzip!==undefined?"gzip-base64":"plain";job.gcodeName=String(b.gcodeName||job.gcodeName||"job.nc").slice(0,120); if(!t){delete job.camCertification;delete job.camSourceHash;delete job.camAuditHash;delete job.camStage;delete job.camTool;delete job.camAudit;} job.updatedAt=now;
+            try{ if(redis){ if(t&&metalImportedStage){await redis.set("parkside:cnc:gc:"+jid+":"+metalImportedStage,stored);if(metalActiveStage===metalImportedStage)await redis.set("parkside:cnc:gc:"+jid,stored);}else if(t)await redis.set("parkside:cnc:gc:"+jid,stored);else await redis.del("parkside:cnc:gc:"+jid); } }catch(e){ return res.status(500).json({error:"db error"}); }
+            job.hasGcode=!!t; job.gcodeEncoding=b.gcodeGzip!==undefined?"gzip-base64":"plain";if(!metalImportedStage)job.gcodeName=String(b.gcodeName||job.gcodeName||"job.nc").slice(0,120); if(!t){delete job.camCertification;delete job.camSourceHash;delete job.camAuditHash;delete job.camStage;delete job.camTool;delete job.camAudit;delete job.camCertificates;delete job.gcodeNames;delete job.stageCompletions;} job.updatedAt=now;
           }
           if(b.machineAction){
             const act=String(b.machineAction);
@@ -2873,6 +2885,7 @@ if(action==="email_recipients"){
               if(act==="start"){
                 if(!job.hasGcode) return res.status(409).json({error:"Generate the design before Start",cnc:st});
                 if(metalJob&&(job.camProvider!=="kiri-moto"||job.camCertification!=="verified"||!/^[a-f0-9]{64}$/.test(String(job.camSourceHash||""))||!/^[a-f0-9]{64}$/.test(String(job.camAuditHash||"")))) return res.status(409).json({error:"Metal Start is blocked. Import an animated and certified Kiri:Moto operation first.",cnc:st});
+                if(metalJob){let imported=[];try{imported=JSON.parse(job.gcodeStages||"[]");}catch(e){}const required=["rough","cleanup","finish","profile","release"],missing=required.filter(stage=>!imported.includes(stage));if(missing.length)return res.status(409).json({error:"Metal Start is blocked until all five certified Kiri:Moto stages are imported. Missing: "+missing.join(", "),cnc:st});}
                 if(job.hasCreative&&job.planStatus!=="approved") return res.status(409).json({error:"Approve the machining plan before Start",cnc:st});
                 if(!ws.calibrated) return res.status(409).json({error:"Virtual machine boundaries are not ready",cnc:st});
                 if(!setup.xyReady) return res.status(409).json({error:"Set X/Y zero before Start",cnc:st});

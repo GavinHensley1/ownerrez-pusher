@@ -138,12 +138,15 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Approve plan &amp; generate G-code/);
   assert.match(html, /Project metal G-code generation is permanently retired/);
   assert.match(html, /METAL CAM CERTIFICATION · KIRI:MOTO ONLY/);
+  assert.match(html, /option value="cleanup">W01015 progressive cleanup/);
+  assert.match(html, /Stages are sequential: Rough → Cleanup → Finish → Profile → Release/);
   assert.match(html, /cncCamAnimated/);
   assert.match(html, /cncCamOrigin/);
   assert.match(html, /cncCamToolDepth/);
   assert.match(html, /cncCamRetracts/);
   assert.match(html, /async function cncSha256/);
   assert.match(html, /gcodeGzip:compressed/);
+  assert.match(html, /maxCutSegmentMm:25,externalCam:true/);
   assert.match(html, /Save draft plan/);
   assert.match(html, /function cncPlanBuildMask/);
   assert.match(html, /smooth neutral-gray/);
@@ -164,7 +167,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /finishStepoverMm=\.16/);
   assert.match(html, /finishPassDepthMm=\.1/);
   assert.match(html, /finishLayerStep=Math\.min\(\.1,/);
-  assert.match(html, /stage==='finish'\?\.1001:\.0251/);
+  assert.match(html, /\(stage==='finish'\|\|stage==='cleanup'\)\?\.1001:\.0251/);
   assert.match(html, /split=wanted<currentZ-finishLayerStep\?Math\.ceil\(\(currentZ-wanted\)\/finishLayerStep\):1/);
   assert.match(html, /PROTECTED-SURFACE CONNECTOR: positive-Z feed moves may cross the detected buckle mask without touching stock/);
   assert.match(html, /DETAIL STOCK CONTRACT: contours must remain inside the RU2100-cleared and finished envelope/);
@@ -281,6 +284,13 @@ test("universal metal audit rejects unsafe modes, bounds, feeds, plunges, drops,
   assert.throws(() => audit(base.join("\n").replace("Z-0.1000", "Z-0.3000"), opts), /Z descends 0.2250 mm/);
   assert.throws(() => audit(base.join("\n").replace("Z-0.1000", "Z-0.9000"), opts), /Z descends|exceeds approved depth/);
   assert.throws(() => audit(base.slice(0, -2).join("\n"), opts), /does not retract after its final cut/);
+  const kiriCleanup = [
+    "G21", "G90", "G17", "G0 Z4.9900 F300", "G0 X0 Y0", "G0 X8 Y21",
+    "G1 X13 Y21 Z4.0 F45", "G1 X18 Y21 Z2.0", "G1 X23 Y21 Z0.0", "G1 X28 Y21 Z-0.1",
+    "G1 X33 Y21 Z-0.2", "G1 X38 Y21 Z-0.26", "G0 Z4.99", "M30",
+  ].join("\n");
+  assert.doesNotThrow(() => audit(kiriCleanup, { stage: "cleanup", maxDepthMm: 0.8, maxFeedMmMin: 250, stockX: 260, stockY: 130, maxCutSegmentMm: 25, externalCam: true }));
+  assert.throws(() => audit(kiriCleanup.replace("G0 Z4.9900", "G0 Z-0.0100"), { stage: "cleanup", maxDepthMm: 0.8, maxFeedMmMin: 250, stockX: 260, stockY: 130, maxCutSegmentMm: 25, externalCam: true }), /positive safe Z/);
 });
 
 test("RU2100 sacrificial profile uses one continuous 0.025 mm-per-lap spiral, six tabs, and the exact approved depth", () => {
@@ -403,12 +413,19 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /gcodeStagesGzip/);
   assert.match(api, /Project metal G-code generation is retired/);
   assert.match(api, /Metal import requires a fully certified Kiri:Moto operation/);
+  assert.match(api, /\["rough","cleanup","finish","profile","release"\]/);
+  assert.match(api, /camCertificates/);
+  assert.match(api, /stageCompletions/);
+  assert.match(api, /all five certified Kiri:Moto stages are imported/);
+  assert.match(api, /Import the certified Rough stage first/);
+  assert.match(api, /Complete the "\+required\+" stage before loading/);
   assert.match(api, /The imported metal G-code does not match its CAM certificate/);
   assert.match(api, /compressed G-code could not be decoded/);
   assert.match(api, /Metal Start is blocked\. Import an animated and certified Kiri:Moto operation first/);
   assert.match(api, /Saved-program resume is disabled for metal/);
   assert.match(agent, /camProvider: command\.camProvider/);
   assert.match(daemon, /Metal program is not a certified Kiri:Moto export/);
+  assert.match(daemon, /\["rough", "cleanup", "finish", "profile", "release"\]/);
   assert.match(daemon, /Metal G-code no longer matches its certified Kiri:Moto source hash/);
   assert.match(daemon, /Saved-program resume is disabled for metal/);
   assert.match(api, /job\.stageRequiresProbe=true;job\.stageActivatedAt=now;job\.resumeInvalidatedAt=now/);

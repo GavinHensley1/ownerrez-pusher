@@ -65,7 +65,7 @@ const programGuard = async ({ before, analysis, programContext }) => {
   if (/C752 nickel silver/i.test(String(programContext?.material || ""))) {
     if (programContext?.camProvider !== "kiri-moto" || programContext?.camCertification !== "verified") throw new Error("Metal program is not a certified Kiri:Moto export");
     for (const field of ["camSourceHash", "camAuditHash"]) if (!/^[a-f0-9]{64}$/.test(String(programContext?.[field] || ""))) throw new Error(`Metal CAM ${field} is invalid`);
-    if (!["rough", "finish", "profile", "release"].includes(String(programContext?.camStage || ""))) throw new Error("Metal CAM operation is invalid");
+    if (!["rough", "cleanup", "finish", "profile", "release"].includes(String(programContext?.camStage || ""))) throw new Error("Metal CAM operation is invalid");
     if (!String(programContext?.camTool || "").trim()) throw new Error("Metal CAM tool contract is missing");
   }
   const snap = workspace.snapshot();
