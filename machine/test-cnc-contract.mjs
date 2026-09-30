@@ -40,7 +40,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Enable positioning/);
   assert.match(html, /Restore saved X\/Y/);
   assert.match(html, /Set current point as X0\/Y0/);
-  assert.match(html, /setupActions=\['jog','probe_bed','probe_stock','probe_tool'/);
+  assert.match(html, /setupActions=\['reconnect_verify','jog','probe_bed','probe_stock','probe_tool'/);
   assert.match(html, /cncCurrentJob\(\)\|\|await cncEnsureJob\(\)/);
   assert.match(html, /confirmNewProject:true/);
   assert.match(html, /confirmGantryUnmoved/);
@@ -569,8 +569,8 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /\/controller\/recover-stopped/);
   assert.match(daemon, /\/job\/start-saved/);
   assert.match(daemon, /\/job\/import/);
-  assert.match(daemon, /restoreOrRebaseLockedXy\(result\.after, workOffset\)/);
-  assert.match(daemon, /auto_restored_after_power_cycle/);
+  assert.match(daemon, /restoreVerifiedCalibration\(result\.after, workOffset\)/);
+  assert.doesNotMatch(daemon, /auto_restored_after_power_cycle/);
   assert.match(daemon, /Explicit new-project X\/Y reset confirmation is required/);
   assert.match(html, /Restore probes after X\/Y-only reset/);
   assert.match(html, /function cncRestoreProbeAfterXy/);
@@ -580,7 +580,7 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(agent, /probeRecovery: health\?\.probeRecovery \|\| null/);
   assert.doesNotMatch(daemon, /Probe circuit is open|probeCircuitIsFresh|\/probe\/test/);
   assert.match(daemon, /removeProbeLock\(PROBE_STATE_PATH\);\s*removeMaterialProfile\(MATERIAL_STATE_PATH\);\s*clearProbeSetup\("reprobe_in_progress"\);/);
-  assert.match(daemon, /restoreLockedProbe\(result\.after, workOffset\)/);
+  assert.match(daemon, /restoreLockedProbe\(status, workOffset, \{ independentlyVerifiedZ: true \}\)/);
   assert.match(daemon, /Controller positioning is paused/);
   assert.match(daemon, /external router may be removed/);
   assert.match(daemon, /Enable positioning/);
@@ -628,8 +628,9 @@ test("connection loss fails closed without GRBL soft reset or automatic motion r
   assert.match(daemon, /if \(frameIncident\?\.latched\) return/);
   assert.match(daemon, /maxProgramSocketLines: 0/);
   assert.match(agent, /frameValid: health\?\.frameValid === true/);
-  assert.match(api, /health\.frameValid===false&&act!=="stop"/);
-  assert.match(html, /Connection lost · coordinate frame invalid/);
+  assert.match(api, /health\.frameValid===false&&!\["stop","reconnect_verify"\].includes\(act\)&&!setupRecovery/);
+  assert.match(html, /Cut stopped · verify saved coordinates/);
+  assert.doesNotMatch(html, /permanently blocked all motion/);
   assert.match(html, /\['Coordinate frame',h\.frameValid!==false\]/);
 });
 

@@ -93,9 +93,9 @@ export function calibrationFromSetup(setup, status, now = new Date().toISOString
   });
 }
 
-export function applyProbeLock(setup, raw, status, toleranceMm = 0.05, workOffset) {
+export function applyProbeLock(setup, raw, status, toleranceMm = 0.05, workOffset, { independentlyVerifiedZ = false } = {}) {
   const lock = validateProbeLock(raw), current = machinePosition(status);
-  if (controllerFrameLooksReset(lock.lastKnownMPos, current)) {
+  if (!independentlyVerifiedZ && controllerFrameLooksReset(lock.lastKnownMPos, current)) {
     throw new Error("Controller machine coordinates reset to zero; re-probe Z before restoring calibration");
   }
   const offsetZ = Number(workOffset?.Z);

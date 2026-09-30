@@ -75,7 +75,7 @@ test("daemon completes new-board setup, changed-bit touch-off, and no-contact re
   let stderr = ""; child.stderr.on("data", (chunk) => { stderr += chunk; });
   t.after(async () => { child.kill("SIGTERM"); await new Promise((resolve) => child.once("exit", resolve)); await grbl.close(); });
   await waitFor(() => existsSync(socketPath));
-  await waitFor(async () => (await unixRequest(socketPath, "/health")).value.connected === true);
+  await waitFor(async () => { const h = (await unixRequest(socketPath, "/health")).value; return h.connected === true && !h.moving; });
 
   grbl.setProbe({ startZ: 0, targetZ: -22 });
   const bed = await unixRequest(socketPath, "/probe/bed", { thicknessMm: 12.1, maxSearchMm: 73, confirmReprobe: true });

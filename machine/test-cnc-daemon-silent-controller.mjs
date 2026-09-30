@@ -54,7 +54,7 @@ try {
   const health = await requestHealth();
   assert.equal(health.status, 200);
   assert(health.elapsedMs < 1000, `health took ${health.elapsedMs} ms`);
-  assert.equal(health.body.moving, false);
+  assert.equal(health.body.moving && !health.body.reconnecting, false, "Only startup verification may own the operation guard; no machine motion is allowed");
   assert.equal(health.body.workspace.calibrated, false);
   process.stdout.write("PASS health remains nonblocking when the GRBL Wi-Fi socket accepts but never answers\n");
 } finally {

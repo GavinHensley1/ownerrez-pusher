@@ -90,6 +90,7 @@ async function heartbeat() {
     error: health?.error ? String(health.error).slice(0, 300) : "",
     incident: health?.incident ? String(health.incident).slice(0, 300) : "",
     frameValid: health?.frameValid === true,
+    frameRecovery: health?.frameRecovery || null,
     frameIncident: health?.frameIncident && typeof health.frameIncident === "object" ? {
       latched: health.frameIncident.latched === true,
       reason: String(health.frameIncident.reason || "").slice(0, 300),
@@ -116,11 +117,13 @@ async function report(command, state, message, extra = {}) {
 async function execute(command) {
   const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", probe_tool: "/probe/tool", restore_probe: "/probe/restore-after-xy-zero", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", recover_rear_y_limit: "/controller/recover-rear-y-limit", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", resume_saved: "/job/resume-saved", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
   const axis = String(command.axis || "").toUpperCase();
+  routes.reconnect_verify = "/controller/reconnect-verify";
   const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);
   if (command.action !== "stop") {
     const health = await localRequest("/health");
-    if (health.frameValid === false) return report(command, "error", `Controller frame is invalid after ${health.frameIncident?.reason || health.incident || "connection loss"}. Motion is blocked until X/Y and Z are deliberately re-established in Project.`, { terminal: true });
+    const setupRecovery = health.frameRecovery?.active === true && new Set(["jog", "probe_bed", "probe_stock", "probe_tool", "lock_probe", "unlock_probe", "recover_probe", "recover_controller", "recover_rear_y_limit", "restore_xy", "zero_xy", "zero_z"]).has(command.action);
+    if (health.frameValid === false && command.action !== "reconnect_verify" && !setupRecovery) return report(command, "error", "Cutting is blocked until saved coordinates are verified. Use Reconnect · verify saved coordinates in Project; this does not resume a cut.", { terminal: true });
   }
   const programAction = new Set(["start", "resume_saved"]).has(command.action);
   const claim = claimCommand(COMMAND_LEDGER_PATH, command);

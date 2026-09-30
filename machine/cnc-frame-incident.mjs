@@ -11,7 +11,7 @@ const normalize = (value) => {
     occurredAt: String(value.occurredAt || new Date().toISOString()),
     duringMotion: value.duringMotion === true,
     jobId: String(value.jobId || "").slice(0, 200),
-    recoveryRequired: "Re-establish X/Y and Z through visible Project controls",
+    recoveryRequired: "Reconnect and verify saved coordinates in Project; never resume automatically",
   };
 };
 
@@ -32,5 +32,14 @@ export function writeFrameIncident(path, value) {
 
 export function assertFrameValid(incident) {
   if (!incident?.latched) return true;
-  throw new Error(`Controller frame is invalid after ${incident.reason}. Re-establish X/Y and Z through visible Project controls before any motion.`);
+  throw new Error(`Cutting is blocked after ${incident.reason}. Reconnect and verify saved coordinates through Project; setup recovery does not resume the cut.`);
+}
+
+export function resolveFrameIncident(path, verification) {
+  if (verification?.xyReady !== true || verification?.probeLocked !== true) throw new Error("Verified X/Y and Z are required to clear the cutting interlock");
+  const resolved = { version: 1, latched: false, resolvedAt: new Date().toISOString(), verification };
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(resolved, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
+  return null;
 }

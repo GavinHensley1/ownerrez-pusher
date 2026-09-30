@@ -15,6 +15,6 @@ test("frame-invalid transport incident persists across process restarts and bloc
     assert.equal(written.duringMotion, true);
     const restored = readFrameIncident(file);
     assert.equal(restored.reason, "GRBL response timeout for motion command");
-    assert.throws(() => assertFrameValid(restored), /Re-establish X\/Y and Z through visible Project controls/);
+    assert.throws(() => assertFrameValid(restored), /Reconnect and verify saved coordinates through Project/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

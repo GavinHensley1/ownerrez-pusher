@@ -2886,12 +2886,13 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["jog","probe_bed","probe_stock","probe_tool","restore_probe","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["reconnect_verify","jog","probe_bed","probe_stock","probe_tool","restore_probe","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
-              if(health.frameValid===false&&act!=="stop") return res.status(409).json({error:"Controller connection was lost and the coordinate frame is invalid. Project has blocked Start, Resume, jog, probe, zero, unlock, and recovery until X/Y and Z are deliberately re-established.",cnc:st});
-              if(!st.agent||(["recover_controller","recover_rear_y_limit"].indexOf(act)===-1&&!health.connected)) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
+              const setupRecovery=health.frameRecovery&&health.frameRecovery.active===true&&["jog","probe_bed","probe_stock","probe_tool","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z"].includes(act);
+              if(health.frameValid===false&&!["stop","reconnect_verify"].includes(act)&&!setupRecovery) return res.status(409).json({error:"Cutting is blocked until saved coordinates are verified. Use Reconnect · verify saved coordinates; it does not reset zeros or resume the cut.",cnc:st});
+              if(!st.agent||(["reconnect_verify","recover_controller","recover_rear_y_limit"].indexOf(act)===-1&&!health.connected)) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
-              if(act==="probe_bed"&&job.stageRequiresProbe&&setup.materialReady) return res.status(409).json({error:"This stage changed bits. Use Changed bit · Touch off on stock; do not re-probe the bed or reset X/Y.",cnc:st});
+              if(act==="probe_bed"&&job.stageRequiresProbe&&setup.materialReady&&b.confirmReprobe!==true) return res.status(409).json({error:"This stage changed bits. Use Changed bit · Touch off on stock, or explicitly confirm a new material measurement. X/Y will be preserved.",cnc:st});
               if(act==="probe_stock"&&!setup.bedProbeReady) return res.status(409).json({error:"Probe the exposed bed before probing the stock",cnc:st});
               if(act==="probe_tool"&&!setup.materialReady&&!setup.stockThicknessMm) return res.status(409).json({error:"Complete one bed + stock setup before touching off a changed bit",cnc:st});
               if(act==="probe_stock"&&setup.probeLocked) return res.status(409).json({error:"Probe calibration is locked; re-probe the bed first to replace it",cnc:st});
@@ -2974,7 +2975,8 @@ if(action==="email_recipients"){
                 const maxStep=axis==="Z"?5:100;
                 if(!Number.isFinite(distance)||distance===0||Math.abs(distance)>maxStep) return res.status(400).json({error:axis==="Z"?"Z jogs are limited to 5 mm per click":"Jog step is outside the safe per-click limit",cnc:st});
                 if(!Number.isFinite(feed)||feed<20||feed>(axis==="Z"?150:400)) return res.status(400).json({error:"Jog feed is outside the safe range",cnc:st});
-                if(axis==="X"||axis==="Y"){
+                if(setupRecovery&&(Math.abs(distance)>5||feed>100)) return res.status(400).json({error:"Recovery positioning is limited to 5 mm at 100 mm/min per click",cnc:st});
+                if((axis==="X"||axis==="Y")&&!(setupRecovery&&!setup.xyReady)){
                   const raw=String((health.lastControllerStatus||{}).MPos||""),parts=raw.split(",").map(Number),origin=setup.xyOriginMPos||{},currentMachine=axis==="X"?parts[0]:parts[1],originAxis=Number(origin[axis]),current=currentMachine-originAxis,stock=axis==="X"?Number(st.config.machX):Number(st.config.machY),min=-60,max=stock+20,target=current+distance,returningLow=current<min-.001&&distance>0&&target>current,returningHigh=current>max+.001&&distance<0&&target<current;
                   if(![currentMachine,originAxis,current,stock].every(Number.isFinite)||!(stock>0)) return res.status(409).json({error:"Current position or entered stock size is unavailable",cnc:st});
                   if((current<min-.001&&distance<=0)||(current>max+.001&&distance>=0)||(!returningLow&&!returningHigh&&(target<min-.001||target>max+.001))) return res.status(409).json({error:axis+" move would reach "+target.toFixed(3)+" mm; Project allows "+min.toFixed(3)+".."+max.toFixed(3)+" mm around this stock",cnc:st});
