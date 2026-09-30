@@ -157,3 +157,24 @@ test("visible disconnected-state recovery button dispatches read-only reconnect,
   context.cncRenderPositioning({ connected: true, frameValid: false, frameRecovery: { active: true, message: "Saved X/Y verified; touch off Z" }, lastControllerStatus: { state: "Idle", FS: "0,0" } }, false);
   assert.match(nodes.cncPositioningTitle.textContent, /Setup controls available/);
 });
+
+test("recovery jog selector makes a stale large step usable without issuing motion or changing calibration", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const start = html.indexOf("function cncSyncJogStep("), end = html.indexOf("\nfunction ", start + 1);
+  const select = { value: "50", options: [.1,.25,.5,1,5,10,25,50,100].map(value => ({value:String(value),disabled:false})) };
+  const note = {textContent:""};
+  const context = vm.createContext({document:{getElementById:id=>id==="cncJogStep"?select:note},cncClamp:(v,min,max)=>Math.max(min,Math.min(max,Number(v)))});
+  vm.runInContext(html.slice(start,end),context);
+  const health = {frameRecovery:{active:true},frameValid:false,setup:{bedProbeReady:true,bedSurfaceMPos:-40.174,xyReady:false}};
+  const original = JSON.stringify(health);
+  assert.equal(context.cncSyncJogStep(health),5);
+  assert.equal(select.value,"5");
+  assert(select.options.filter(o=>Number(o.value)>5).every(o=>o.disabled));
+  assert(select.options.filter(o=>Number(o.value)<=5).every(o=>!o.disabled));
+  assert.match(note.textContent,/5 mm per click at 100 mm\/min/);
+  assert.equal(JSON.stringify(health),original);
+  select.value="1";assert.equal(context.cncSyncJogStep(health),1);
+  context.cncSyncJogStep({frameRecovery:{active:false}});
+  assert(select.options.every(o=>!o.disabled));assert.equal(note.textContent,"");
+  select.value="50";assert.equal(context.cncSyncJogStep({}),50);
+});
