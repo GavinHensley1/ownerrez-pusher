@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeProgram, approvedProgramDepth, cleanProgramLine, limitVerticalPlungeFeed, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
+import { analyzeProgram, approvedProgramDepth, assertPlungeFeedWithinLimit, cleanProgramLine, limitVerticalPlungeFeed, measuredStockProtection, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 
 const safe = `; sample\nG21\nG90\nG17\nG0 Z2\nM3 S9000\nG0 X0 Y0\nG1 Z-1 F100\nG1 X100 Y80 F200\nG0 Z2\nM5\nM2`;
 
@@ -86,4 +86,23 @@ test("compact and duplicate-word G-code cannot bypass downstream mode and bounds
   assert.throws(() => analyzeProgram("G21G90\nG0X0Y0Z2\nG1X100Y80Z-1F100", {spindleMode:"manual"}), /separated by whitespace/);
   for (const line of ["G91X1", "G92Z0", "G10L20P1Z0", "G1X1X2F100", "G0G1X1F100", "G1X1F0", "M3S1000"])
     assert.throws(() => analyzeProgram("G21\nG90\nG0 Z2\n" + line, {spindleMode:"manual"}));
+});
+
+test("vertical plunge limiter catches leading-dot Z forms and modal inherited feeds", () => {
+  // Leading-dot Z is legal G-code and must not slip past the limiter.
+  assert.equal(limitVerticalPlungeFeed("G1 Z-.5 F600", 60), "G1 Z-.5 F60");
+  assert.equal(limitVerticalPlungeFeed("G1 Z.5 F600", 60), "G1 Z.5 F60");
+  assert.equal(limitVerticalPlungeFeed("g1 z-2.0 f600", 60), "g1 z-2.0 F60");
+  // A plunge with an XY component is a ramp, not a plunge, and is left alone.
+  assert.equal(limitVerticalPlungeFeed("G1 X10 Z-2.0 F600", 60), "G1 X10 Z-2.0 F600");
+
+  // Feed is modal, so a plunge with no F word inherits an earlier feed. Rewriting it
+  // would change every later move, so the program is refused instead.
+  assert.throws(() => assertPlungeFeedWithinLimit("G1 X10 Y10 F900\nG1 Z-2.0", 60), /inherited from an earlier modal F/);
+  assert.throws(() => assertPlungeFeedWithinLimit("G1 Z-2.0", 60), /no feed rate established/);
+  // Within the limit, modal or explicit, it passes.
+  assert.deepEqual(assertPlungeFeedWithinLimit("G1 X10 Y10 F30\nG1 Z-2.0", 60), { ok: true, limitMmPerMin: 60 });
+  assert.deepEqual(assertPlungeFeedWithinLimit("G1 Z-2.0 F60", 60), { ok: true, limitMmPerMin: 60 });
+  // The rewrite pass plus this assertion together leave no fast plunge behind.
+  assert.deepEqual(assertPlungeFeedWithinLimit(limitVerticalPlungeFeed("G1 Z-.5 F600", 60), 60), { ok: true, limitMmPerMin: 60 });
 });

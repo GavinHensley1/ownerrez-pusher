@@ -495,8 +495,9 @@
           <select id="cncType" onchange="cncSaveSetup()"><option>3D relief</option><option>2D outline</option></select></label>
         <label class="muted" style="font-size:12px">Bit<br>
           <select id="cncBit" onchange="cncSaveSetup()"><option>30&deg; V-bit 0.1mm</option><option>3.175mm ball nose</option><option>3.175mm flat end mill</option></select></label>
-        <label class="muted" style="font-size:12px">Z-probe plate thickness (mm)<br>
-          <input id="cncProbeThickness" type="number" min="20" max="20" step="0.1" value="20.0" readonly style="width:120px" aria-label="Fixed 20 millimeter Genmitsu probe puck"></label>
+        <label class="muted" style="font-size:12px">Z-probe puck thickness (mm) — measure yours<br>
+          <input id="cncProbeThickness" type="number" min="5" max="30" step="0.01" value="14.19" onchange="cncSaveProbeThickness()" style="width:120px" aria-label="Measured Z-probe puck thickness in millimetres">
+          <span class="muted" style="display:block;font-size:11px;margin-top:3px">Genmitsu ships 14, 14.19 and 20.17&nbsp;mm pucks. An error here shifts every cut depth by the same amount and will not show up in the measured stock thickness.</span></label>
         <label class="muted" style="font-size:12px">Speed<br>
           <select id="cncSpeed" onchange="cncSaveSetup()"><option>Conservative (recommended)</option><option>Normal</option></select></label>
       </div>
@@ -574,6 +575,14 @@
         <button id="cncProbeUnlockBtn" class="cncCommandBtn" onclick="cncUnlockProbe(this)">Unlock calibration</button>
         <button id="cncProbeRecoverBtn" class="cncCommandBtn" onclick="cncMachineAction('recover_probe',{},this)">Retract from probe</button>
         <span id="cncMeasuredStock" class="muted" style="font-size:11.5px">Thickness not measured.</span>
+        <span id="cncAbsoluteReference" class="muted" style="font-size:11.5px;display:block;margin-top:4px"></span>
+      </div>
+      <div id="cncSurfaceProofCard" style="margin-top:11px;padding:10px 11px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(0,0,0,.18)">
+        <div style="font-size:12.5px;font-weight:600;margin-bottom:4px">Surface-contact proof <span class="muted" style="font-weight:400">&mdash; required before any cut</span></div>
+        <div class="muted" style="font-size:11.5px;margin-bottom:7px">The controller reporting work Z&nbsp;0 only means the probe arithmetic was self-consistent. This check measures the surface again <b>without the plate</b> &mdash; clip on the conductive stock, plate removed &mdash; so a wrong plate thickness shows up as a disagreement here instead of as a cut that is too deep.</div>
+        <button id="cncVerifySurfaceBtn" class="cncCommandBtn" onclick="cncVerifySurface('conductive-stock-touch',this)" disabled>Verify surface contact (measured touch)</button>
+        <button id="cncAttestSurfaceBtn" class="cncCommandBtn" onclick="cncVerifySurface('operator-attested-feeler',this)" disabled>Non-conductive stock &middot; attest by feel</button>
+        <span id="cncSurfaceProofState" class="muted" style="font-size:11.5px;display:block;margin-top:6px">Not verified.</span>
       </div>
       <div id="cncOriginFootprint" style="font-size:12px;margin-top:10px;padding:9px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.16)"></div>
       <div class="muted" style="font-size:11.5px;margin-top:8px">Project searches downward in short no-alarm segments using the configured machine Z travel, then returns to the starting height if no plate is found. A successful stock probe saves and locks calibration automatically. After changing bits, touch off only the stock; do not re-probe the bed or reset X/Y.</div>
@@ -1821,7 +1830,7 @@ async function loadCnc(){
   var el=document.getElementById('cncJobs'); if(el) el.textContent='Loading…';
   try{ var r=await fetch(api('cnc')+'&cb='+Date.now(),{headers:{'x-app-password':PW}}); var j=await r.json();
     CNC=(j&&j.cnc)||{jobs:[],config:{}}; if(!CNC.jobs) CNC.jobs=[]; if(!CNC.config) CNC.config={};
-    var pt=document.getElementById('cncProbeThickness'); if(pt) pt.value='20.0';
+    var pt=document.getElementById('cncProbeThickness'); if(pt){ var savedPuck=Number(CNC.config.probeThickness); pt.value=(savedPuck>=5&&savedPuck<=30)?String(savedPuck):'14.19'; }
     var rw=document.getElementById('cncRW'); if(rw&&CNC.config.reliefWidth) rw.value=CNC.config.reliefWidth;
     var rd=document.getElementById('cncRD'); if(rd&&CNC.config.reliefDepth) rd.value=CNC.config.reliefDepth;
     var dm=document.getElementById('cncDepthModel'); if(dm) dm.value=CNC.config.depthModel||''; cncFillMachine();
@@ -1945,7 +1954,12 @@ function cncRenderAgent(job){
   cncControllerReadout(h);
   var fit=cncStockFit(job);
   var storedState=job&&job.agentState||'',baseBlocked=CNC_COMMAND_IN_FLIGHT||!CNC.agent||!h.connected||(h.frameValid===false&&!(h.frameRecovery||{}).active)||!!h.moving||['queued','accepted','running','paused'].includes(storedState),controller=cncRenderPositioning(h,baseBlocked),presentation=cncPresentationState(job,h,controller),state=presentation.state,frame=cncStartFrameCheck(h);
-  var checks=[['Bridge',!!CNC.agent],['Coordinate frame',h.frameValid!==false],['Controller ready',!!controller.idle&&h.frameValid!==false],['Machine boundaries',!!ws.calibrated],['Start position',!!frame.ok&&h.frameValid!==false],['Stock fit',!!fit.ok],['X/Y stock zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked]];
+  // Surface-contact proof is a first-class readiness gate. Metal additionally needs
+  // the MEASURED method; an operator attestation is not enough where the whole
+  // relief is under 1 mm. The daemon enforces both independently of this badge.
+  var proofState=h.surfaceProof||null,plateState=h.plate||null,metalJob=cncIsMetalJob(job);
+  var proofOk=!!(proofState&&proofState.ready===true&&(!metalJob||String((proofState.proof||{}).method||'')==='conductive-stock-touch'))&&!!(plateState&&plateState.confirmed===true);
+  var checks=[['Bridge',!!CNC.agent],['Coordinate frame',h.frameValid!==false],['Controller ready',!!controller.idle&&h.frameValid!==false],['Machine boundaries',!!ws.calibrated],['Start position',!!frame.ok&&h.frameValid!==false],['Stock fit',!!fit.ok],['X/Y stock zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked],['Surface contact proof',proofOk]];
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
   var ready=checks.every(function(c){return c[1];}),resumePoint=h.resume||{},resumeInvalidatedAt=Date.parse(String(job&&job.resumeInvalidatedAt||'')),resumeUpdatedAt=Date.parse(String(resumePoint.updatedAt||'')),hasSavedResume=String(resumePoint.state||'')==='interrupted'&&Number(resumePoint.lastCompletedLine)>0&&!(Number.isFinite(resumeInvalidatedAt)&&Number.isFinite(resumeUpdatedAt)&&resumeInvalidatedAt>=resumeUpdatedAt);
   var auditHold=String(job&&job.cutAuditHold||''),auditNote=document.getElementById('cncCutAuditHold');if(auditNote){auditNote.textContent=auditHold;auditNote.style.display=auditHold?'':'none';}
@@ -1967,6 +1981,14 @@ function cncRenderAgent(job){
   var recoverProbe=document.getElementById('cncProbeRecoverBtn'); if(recoverProbe) recoverProbe.disabled=motionBlocked;
   var probeInput=document.getElementById('cncProbeThickness'); if(probeInput) probeInput.disabled=motionBlocked;
   var measured=document.getElementById('cncMeasuredStock'); if(measured){var probing=['searching','contact','first_retract','verifying','final_retract'].includes(String(su.probePhase||''));measured.textContent=probing?('Probing: '+String(su.probePhase).replace(/_/g,' ')+' · '+Number(su.probeTravelledMm||0).toFixed(1)+' / '+Number(su.probeSearchLimitMm||0).toFixed(1)+' mm'):su.probePhase==='returned_no_contact'?'No plate contact. Z returned to its starting height; check plate and clip, then retry.':su.stockProbeReady?('🔒 Saved · measured '+Number(su.stockThicknessMm).toFixed(3)+' mm; protected floor '+Number(su.safetyFloorMm).toFixed(3)+' mm; max cut '+Number(su.maxCutDepthMm).toFixed(3)+' mm.'):(su.materialReady?'Material thickness saved; touch off the current bit on the stock.':su.bedProbeReady?'Bed measurement saved. Position over the stock, place the puck on top, then Probe stock & save. Do not repeat the bed probe.':'Thickness not measured.');}
+  // Show the ABSOLUTE surface references and the puck they came from. Derived
+  // thickness alone hides a puck error, because the same error cancels out of
+  // bed-minus-stock. This readout is the only place a wrong zero is visible.
+  var absref=document.getElementById('cncAbsoluteReference');
+  if(absref){ var bedZ=Number(su.bedSurfaceMPos), stockZ=Number(su.stockSurfaceMPos), puck=Number(su.probeThickness);
+    if(Number.isFinite(stockZ)&&Number.isFinite(puck)){ absref.textContent='Absolute reference · stock top at machine Z '+stockZ.toFixed(3)+(Number.isFinite(bedZ)?('; bed at '+bedZ.toFixed(3)):'')+'; measured with a '+puck.toFixed(2)+' mm plate. If that plate figure is wrong, every cut is off by the same amount.'; }
+    else absref.textContent=''; }
+  cncRenderSurfaceProof(h,su,motionBlocked,metalJob,proofOk);
   cncRenderOriginFootprint(job,su);
   if(!CNC_COMMAND_IN_FLIGHT){
     var label=cncActionLabel(job&&job.agentAction||'',{}), detail=(job&&job.agentMsg)||'';
@@ -2518,8 +2540,45 @@ async function cncJog(axis,dir,button){
   var distance=step*(dir<0?-1:1),check=cncJogFrameCheck((CNC.agent&&CNC.agent.health)||{},axis,distance);if(!check.ok){alert('Move blocked before reaching the machine: '+check.reason);return;}var feed=axis==='Z'||(((CNC.agent||{}).health||{}).frameRecovery||{}).active?100:300, st=document.getElementById('cncJogStatus'); if(st)st.textContent='One move requested: '+axis+(distance>0?'+':'−')+Math.abs(distance)+' mm.';
   return cncQueueMachineAction('jog',{axis:axis,distanceMm:distance,feedMmPerMin:feed},button);
 }
-async function cncProbe(kind,button){ var t=20, label=kind==='bed'?'exposed bed':'top of the wood', su=((CNC.agent||{}).health||{}).setup||{}, replacing=kind==='bed'&&(!!su.probeLocked||!!su.materialReady), action=kind==='bed'?'probe_bed':kind==='tool'?'probe_tool':'probe_stock', explanation=kind==='tool'?'Project will preserve the saved material thickness and X/Y origin, then save the new bit\'s Z automatically.':'Project will search in short no-alarm segments and return to the starting height if it does not find the plate.'; var warning=replacing?'\n\nThis starts a new material measurement and replaces the saved bed/stock profile. X/Y remains unchanged.':''; if(!confirm((kind==='tool'?'Touch off the changed bit on the ':'Probe the ')+label+' with the fixed '+t.toFixed(1)+' mm Genmitsu puck?\nPlace the puck flat on the surface, attach the clip, and keep hands clear.\n\n'+explanation+warning))return; await cncSaveProbeThickness(); return cncMachineAction(action,{confirmReprobe:replacing},button); }
-async function cncSaveProbeThickness(){ var e=document.getElementById('cncProbeThickness'); if(e)e.value='20.0'; var j=await cncPost({config:{probeThickness:20}}); if(j&&j.cnc)CNC=j.cnc; }
+async function cncProbe(kind,button){ var t=cncPuckThicknessMm(); if(!(t>0)){ alert('Enter the measured Z-probe puck thickness before probing. It sets your cut depth one-for-one.'); return; } var label=kind==='bed'?'exposed bed':'top of the wood', su=((CNC.agent||{}).health||{}).setup||{}, replacing=kind==='bed'&&(!!su.probeLocked||!!su.materialReady), action=kind==='bed'?'probe_bed':kind==='tool'?'probe_tool':'probe_stock', explanation=kind==='tool'?'Project will preserve the saved material thickness and X/Y origin, then save the new bit\'s Z automatically.':'Project will search in short no-alarm segments and return to the starting height if it does not find the plate.'; var warning=replacing?'\n\nThis starts a new material measurement and replaces the saved bed/stock profile. X/Y remains unchanged.':''; if(!confirm((kind==='tool'?'Touch off the changed bit on the ':'Probe the ')+label+' using a '+t.toFixed(2)+' mm puck?\nConfirm that is the measured height of the puck you are about to use.\nPlace the puck flat on the surface, attach the clip, and keep hands clear.\n\n'+explanation+warning))return; if(!await cncSaveProbeThickness())return; return cncMachineAction(action,{confirmReprobe:replacing},button); }
+function cncPuckThicknessMm(){ var e=document.getElementById('cncProbeThickness'); var v=Number(e&&e.value); return (v>=5&&v<=30)?v:NaN; }
+async function cncSaveProbeThickness(){ var v=cncPuckThicknessMm(); if(!(v>0)){ alert('Enter the measured Z-probe plate thickness between 5 and 30 mm. This value sets your cut depth; measure the plate from the face that rests on the surface to the metal contact face.'); return false; } var j=await cncPost({config:{probeThickness:v}}); if(j&&j.cnc)CNC=j.cnc; return true; }
+// Surface-contact proof UI. Shows the measured-vs-stored disagreement in plain mm,
+// because that number is the only thing that would have made the 2026-09-30 plate
+// error visible before it reached the metal.
+function cncRenderSurfaceProof(h,su,motionBlocked,metalJob,proofOk){
+  var card=document.getElementById('cncSurfaceProofCard'); if(!card)return;
+  var state=h.surfaceProof||{},plate=h.plate||{},proof=state.proof||null;
+  var verifyBtn=document.getElementById('cncVerifySurfaceBtn'),attestBtn=document.getElementById('cncAttestSurfaceBtn'),out=document.getElementById('cncSurfaceProofState');
+  var canVerify=!motionBlocked&&!!su.stockProbeReady;
+  if(verifyBtn)verifyBtn.disabled=!canVerify;
+  // Attestation cannot authorise metal, so do not offer it there at all.
+  if(attestBtn){attestBtn.style.display=metalJob?'none':'';attestBtn.disabled=!canVerify;}
+  if(!out)return;
+  var plateNote=plate.confirmed===true?('Plate in use: '+Number(plate.thicknessMm).toFixed(2)+' mm (confirmed).'):('Plate thickness is still the unconfirmed '+Number(plate.thicknessMm||0).toFixed(2)+' mm default — confirm it, re-probe, then verify.');
+  if(proof&&proof.method==='conductive-stock-touch'&&Number.isFinite(Number(proof.deltaMm))){
+    var d=Number(proof.deltaMm);
+    out.innerHTML=(proofOk?'<span style="color:#7ee0ac">✓ ':'<span style="color:#ff9a9a">× ')
+      +'Measured surface machine Z '+Number(proof.measuredSurfaceMPosZ).toFixed(3)+' vs stored '+Number(proof.expectedSurfaceMPosZ).toFixed(3)
+      +' — disagreement '+d.toFixed(3)+' mm (limit '+Number(proof.toleranceMm).toFixed(3)+' mm).</span><br>'
+      +(Math.abs(d)>Number(proof.toleranceMm)?'<b>Do not cut.</b> A disagreement of this size means the stored zero is wrong by about that much — check the plate thickness and re-probe. ':'')
+      +cncEsc(plateNote)+' Verified '+cncEsc(String(proof.at||''))+'; expires '+cncEsc(String(proof.expiresAt||''))+'.';
+  } else if(proof&&proof.method==='operator-attested-feeler'){
+    out.innerHTML='<span style="color:#ffcf79">Operator-attested contact (no measurement).</span> Valid for non-conductive stock only; metal requires the measured touch. '+cncEsc(plateNote);
+  } else {
+    out.innerHTML='<span style="color:#ff9a9a">× Not verified.</span> '+cncEsc(String(state.reason||'Run the surface check immediately before starting.'))+' '+cncEsc(plateNote);
+  }
+}
+async function cncVerifySurface(method,button){
+  var job=cncCurrentJob(),metalJob=cncIsMetalJob(job);
+  if(method==='operator-attested-feeler'){
+    if(metalJob){alert('Metal requires the measured surface touch. An attestation cannot authorise a metal cut.');return;}
+    if(!confirm('Attest surface contact by feel?\n\nLower the bit to work Z 0 with the ROUTER OFF and confirm it is just touching the surface — paper drags but does not tear.\n\nThis records your judgement, not a measurement. It cannot authorise a metal cut.'))return;
+    return cncMachineAction('verify_surface',{method:method,confirm:true},button);
+  }
+  if(!confirm('Verify surface contact by measured touch?\n\nROUTER OFF. Remove the probe plate from under the bit. Attach the probe clip directly to the metal stock. Position the bit a few mm above BARE stock inside the waste area, hands clear.\n\nProject will touch down onto the stock itself and compare the result with the stored zero. It does NOT change any zero. A disagreement means the stored zero is wrong by that amount.'))return;
+  return cncMachineAction('verify_surface',{method:'conductive-stock-touch'},button);
+}
 async function cncSaveDepthToken(){ var v=(document.getElementById('cncDepthTok')||{}).value||''; var s=document.getElementById('cncTokState'); if(s) s.textContent='Saving...'; var j=await cncPost({secret:{depthToken:v}}); if(j&&j.cnc){ CNC=j.cnc; var el=document.getElementById('cncDepthTok'); if(el) el.value=''; if(s) s.textContent=CNC.config.hasDepthToken?'✓ token saved':'no token yet'; } else if(s) s.textContent='Error.'; }
 async function cncSaveDepthModel(){ var v=(document.getElementById('cncDepthModel')||{}).value||''; var j=await cncPost({config:{depthModel:v}}); if(j&&j.cnc) CNC=j.cnc; }
 async function saveReliefCfg(){ var w=document.getElementById('cncRW').value, d=document.getElementById('cncRD').value, s=document.getElementById('cncRelStatus'); if(s) s.textContent='Saving…';

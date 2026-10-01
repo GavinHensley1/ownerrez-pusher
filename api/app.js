@@ -11,6 +11,11 @@
 let redis=null; try{ const {Redis}=require("@upstash/redis"); redis=new Redis({url:process.env.KV_REST_API_URL,token:process.env.KV_REST_API_TOKEN}); }catch{ redis=null; }
 const { loadCertifiedLibrary: loadCertifiedCncLibrary } = require("./cnc-certified-library.cjs");
 const { programAuditHold } = require("./cnc-program-holds.cjs");
+// Operator-measured Z-probe puck height. SainSmart ships 14 / 14.19 / 20.17 mm
+// variants and documents unit-to-unit variation, so this is a default, not a fact.
+// An error here moves absolute Z zero one-for-one and is invisible in the derived
+// stock thickness, because the same error cancels in bed-minus-stock.
+const PROBE_PUCK_DEFAULT_MM=14.19, PROBE_PUCK_MIN_MM=5, PROBE_PUCK_MAX_MM=30;
 const FLOOR=99, CEIL=300, OV_MIN=50, OV_MAX=1000, ENDPOINT="https://api.ownerrez.com/v2/spotrates";
 const UNITS=[
   {orp:486910,name:"Bear Claw",offset:0},{orp:486911,name:"Flyin' Horse",offset:5},
@@ -2675,10 +2680,12 @@ if(action==="email_recipients"){
       if(!Array.isArray(st.jobs)) st.jobs=[];
       if(!st.config||typeof st.config!=="object") st.config={};
       for(const entry of st.jobs) if(entry) entry.cutAuditHold=programAuditHold(entry);
-      // This 4040-PRO uses the fixed 20 mm Genmitsu Z-probe puck. Treating it
-      // as the old generic 12.1 mm plate raises stock zero by 7.9 mm and causes
-      // shallow relief programs to air-cut.
-      st.config.probeThickness=20;
+      // Probe puck height is operator-measured, not fixed. SainSmart ships 14 /
+      // 14.19 / 20.17 mm variants and says thickness varies between units. Assuming
+      // 20 mm against the ~14.19 mm puck cut a buckle ~6 mm too deep on 2026-09-30,
+      // and it was invisible because the error cancels out of measured thickness.
+      // Only fill in the default when nothing has been measured yet; never overwrite.
+      if(!(Number(st.config.probeThickness)>=5&&Number(st.config.probeThickness)<=30)) st.config.probeThickness=PROBE_PUCK_DEFAULT_MM;
       let cncAgent=null; try{ if(redis){ const raw=await redis.get("parkside:cnc:agent"); cncAgent=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); } }catch(e){}
       st.agent=cncAgent||null;
       const now=new Date().toISOString();
@@ -2729,7 +2736,7 @@ if(action==="email_recipients"){
           const c=b.config;
           if(c.reliefWidth!==undefined) st.config.reliefWidth=Math.max(20,Math.min(600,Number(c.reliefWidth)||100));
           if(c.reliefDepth!==undefined) st.config.reliefDepth=Math.max(0.1,Math.min(10,Number(c.reliefDepth)||1.5));
-          if(c.probeThickness!==undefined) st.config.probeThickness=20;
+          if(c.probeThickness!==undefined){ const puck=Number(c.probeThickness); if(!(Number.isFinite(puck)&&puck>=PROBE_PUCK_MIN_MM&&puck<=PROBE_PUCK_MAX_MM)) return res.status(400).json({error:"Probe puck thickness must be between "+PROBE_PUCK_MIN_MM+" and "+PROBE_PUCK_MAX_MM+" mm"}); st.config.probeThickness=puck; }
           if(c.depthModel!==undefined) st.config.depthModel=String(c.depthModel||"").slice(0,120);
           if(c.machX!==undefined) st.config.machX=Math.max(50,Math.min(2000,Number(c.machX)||400));
           if(c.machY!==undefined) st.config.machY=Math.max(50,Math.min(2000,Number(c.machY)||400));
@@ -2888,9 +2895,9 @@ if(action==="email_recipients"){
           if(b.machineAction){
             const act=String(b.machineAction);
             if(act==="load"){ if(job.status==="Design") job.status="Relief"; job.loadedAt=now; }
-            else if(["reconnect_verify","jog","probe_bed","probe_stock","probe_tool","restore_probe","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
+            else if(["reconnect_verify","jog","probe_bed","probe_stock","probe_tool","verify_surface","set_plate","restore_probe","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z","start","resume_saved","pause","resume","stop"].indexOf(act)!==-1){
               const health=st.agent&&st.agent.health||{}, ws=health.workspace||{}, setup=health.setup||{};
-              const setupRecovery=health.frameRecovery&&health.frameRecovery.active===true&&["jog","probe_bed","probe_stock","probe_tool","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z"].includes(act);
+              const setupRecovery=health.frameRecovery&&health.frameRecovery.active===true&&["jog","probe_bed","probe_stock","probe_tool","verify_surface","set_plate","lock_probe","unlock_probe","recover_probe","recover_controller","recover_rear_y_limit","restore_xy","zero_xy","zero_z"].includes(act);
               if(health.frameValid===false&&!["stop","reconnect_verify"].includes(act)&&!setupRecovery) return res.status(409).json({error:"Cutting is blocked until saved coordinates are verified. Use Reconnect · verify saved coordinates; it does not reset zeros or resume the cut.",cnc:st});
               if(!st.agent||(["reconnect_verify","recover_controller","recover_rear_y_limit"].indexOf(act)===-1&&!health.connected)) return res.status(409).json({error:"CNC agent/controller is offline",cnc:st});
               if((health.moving||["running","paused"].indexOf((health.job||{}).state)!==-1)&&["pause","resume","stop"].indexOf(act)===-1) return res.status(409).json({error:"A CNC operation is already active",cnc:st});
@@ -2914,6 +2921,20 @@ if(action==="email_recipients"){
                 if(!setup.xyReady) return res.status(409).json({error:"Set X/Y zero before Start",cnc:st});
                 if(!setup.bedProbeReady||!setup.stockProbeReady||!setup.probeReady) return res.status(409).json({error:"Probe both the bed and stock before Start",cnc:st});
                 if(!setup.probeLocked) return res.status(409).json({error:"Lock the probe calibration before Start",cnc:st});
+                // SURFACE-CONTACT PROOF. The controller reporting work Z zero only means
+                // the probe arithmetic was self-consistent; it is not evidence that the bit
+                // is physically at the surface. A wrong plate thickness corrupts that whole
+                // chain consistently, which is how a ~6 mm depth error passed every gate on
+                // 2026-09-30. Require an independent plate-free measurement. Fail CLOSED:
+                // a missing agent snapshot blocks Start rather than skipping the check.
+                {
+                  const proofState=health.surfaceProof, plate=health.plate||{};
+                  if(!proofState) return res.status(409).json({error:"The Mac bridge has not reported a surface-contact proof. Update/restart the bridge, then verify surface contact before Start.",cnc:st});
+                  if(plate.confirmed!==true) return res.status(409).json({error:"Confirm the measured Z-probe plate thickness, re-probe, then verify surface contact before Start.",cnc:st});
+                  if(proofState.ready!==true) return res.status(409).json({error:"Surface-contact proof is required before Start. "+String(proofState.reason||"Run Verify surface contact."),cnc:st});
+                  // Metal has no margin for an attested eyeball check: require the measured touch.
+                  if(metalJob&&String((proofState.proof||{}).method||"")!=="conductive-stock-touch") return res.status(409).json({error:"Metal Start requires a measured surface-contact touch on the conductive blank, not an operator attestation. Attach the clip to the metal, remove the plate, and run Verify surface contact.",cnc:st});
+                }
                 if(job.stageRequiresProbe){
                   const probeLockedAt=Date.parse(String(setup.probeLockedAt||""));
                   const stageActivatedAt=Date.parse(String(job.stageActivatedAt||""));
@@ -2944,8 +2965,21 @@ if(action==="email_recipients"){
               if(act==="stop"&&!health.moving&&["running","paused","queued","accepted"].indexOf(liveRunState)===-1&&!(job.agentAction==="jog"&&["queued","accepted"].includes(job.agentState))) return res.status(409).json({error:"Stop requires an active carve or manual move",cnc:st});
               const cmd={id:"cmd_"+Date.now().toString(36)+Math.floor(Math.random()*1e5).toString(36),action:act,jobId:jid,createdAt:now};
               if(act==="probe_bed"||act==="probe_stock"||act==="probe_tool"){
-                cmd.probeThickness=20;
+                cmd.probeThickness=Number(st.config.probeThickness);
+                if(!(cmd.probeThickness>=PROBE_PUCK_MIN_MM&&cmd.probeThickness<=PROBE_PUCK_MAX_MM)) return res.status(409).json({error:"Measure and save the Z-probe plate thickness before probing",cnc:st});
                 cmd.maxSearchMm=Math.max(5,Math.min(73,(Number(st.config.machZ)||78)-5));
+              }
+              if(act==="set_plate"){
+                cmd.probeThickness=Number(st.config.probeThickness);
+                if(!(cmd.probeThickness>=PROBE_PUCK_MIN_MM&&cmd.probeThickness<=PROBE_PUCK_MAX_MM)) return res.status(409).json({error:"Enter a plate thickness between "+PROBE_PUCK_MIN_MM+" and "+PROBE_PUCK_MAX_MM+" mm first",cnc:st});
+              }
+              if(act==="verify_surface"){
+                // The verification touch needs a stored surface to corroborate, and a
+                // short downward search from a known height. It never sets zero.
+                if(!setup.stockProbeReady) return res.status(409).json({error:"Probe the stock before verifying surface contact",cnc:st});
+                cmd.method=b.method==="operator-attested-feeler"?"operator-attested-feeler":"conductive-stock-touch";
+                cmd.confirm=b.confirm===true;
+                cmd.maxSearchMm=Math.max(5,Math.min(25,Number(b.maxSearchMm)||10));
               }
               if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
               if(act==="start"){

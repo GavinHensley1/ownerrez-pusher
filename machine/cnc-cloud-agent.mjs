@@ -47,7 +47,7 @@ function localRequest(path, body = {}) {
     });
     const timeoutMs = new Set(["/job/start", "/job/resume-saved"]).has(path)
       ? 12 * 60 * 60 * 1000
-      : new Set(["/probe/bed", "/probe/stock", "/probe/tool", "/probe/recover"]).has(path)
+      : new Set(["/probe/bed", "/probe/stock", "/probe/tool", "/probe/recover", "/probe/verify-surface"]).has(path)
         ? PROBE_LOCAL_TIMEOUT_MS
         : 30_000;
     req.setTimeout(timeoutMs, () => req.destroy(new Error(`Local CNC request timeout after ${timeoutMs} ms`)));
@@ -117,14 +117,14 @@ async function report(command, state, message, extra = {}) {
 }
 
 async function execute(command) {
-  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", probe_tool: "/probe/tool", restore_probe: "/probe/restore-after-xy-zero", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", recover_rear_y_limit: "/controller/recover-rear-y-limit", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", resume_saved: "/job/resume-saved", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
+  const routes = { probe_bed: "/probe/bed", probe_stock: "/probe/stock", probe_tool: "/probe/tool", verify_surface: "/probe/verify-surface", set_plate: "/probe/plate", restore_probe: "/probe/restore-after-xy-zero", lock_probe: "/probe/lock", unlock_probe: "/probe/unlock", recover_probe: "/probe/recover", recover_controller: "/controller/recover-stopped", recover_rear_y_limit: "/controller/recover-rear-y-limit", restore_xy: "/zero/xy/restore-after-power-cycle", zero_xy: "/zero/xy", zero_z: "/zero/z", start: "/job/start", resume_saved: "/job/resume-saved", pause: "/job/pause", resume: "/job/resume", stop: "/job/stop" };
   const axis = String(command.axis || "").toUpperCase();
   routes.reconnect_verify = "/controller/reconnect-verify";
   const path = command.action === "jog" && new Set(["X", "Y", "Z"]).has(axis) ? `/jog/${axis.toLowerCase()}` : routes[command.action];
   if (!path) return report(command, "error", `Unsupported command: ${command.action}`);
   if (command.action !== "stop") {
     const health = await localRequest("/health");
-    const setupRecovery = health.frameRecovery?.active === true && new Set(["jog", "probe_bed", "probe_stock", "probe_tool", "lock_probe", "unlock_probe", "recover_probe", "recover_controller", "recover_rear_y_limit", "restore_xy", "zero_xy", "zero_z"]).has(command.action);
+    const setupRecovery = health.frameRecovery?.active === true && new Set(["jog", "probe_bed", "probe_stock", "probe_tool", "verify_surface", "set_plate", "lock_probe", "unlock_probe", "recover_probe", "recover_controller", "recover_rear_y_limit", "restore_xy", "zero_xy", "zero_z"]).has(command.action);
     if (health.frameValid === false && command.action !== "reconnect_verify" && !setupRecovery) return report(command, "error", "Cutting is blocked until saved coordinates are verified. Use Reconnect · verify saved coordinates in Project; this does not resume a cut.", { terminal: true });
   }
   if (command.action === "stop" && activeJog) activeJog.cancelled = true;
@@ -162,6 +162,10 @@ async function execute(command) {
         });
       } else {
         const payload = new Set(["probe_bed", "probe_stock", "probe_tool"]).has(command.action) ? { thicknessMm: command.probeThickness, maxSearchMm: command.maxSearchMm, confirmReprobe: command.confirmReprobe === true }
+          // The verification touch carries no plate figure: it measures the surface
+          // directly against the conductive stock, which is what makes it independent.
+          : command.action === "verify_surface" ? { method: command.method, maxSearchMm: command.maxSearchMm, confirm: command.confirm === true }
+          : command.action === "set_plate" ? { thicknessMm: command.probeThickness }
           : command.action === "restore_xy" ? { confirmGantryUnmoved: command.confirmGantryUnmoved === true }
           : command.action === "zero_xy" ? { confirmNewProject: command.confirmNewProject === true }
           : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller" || command.action === "recover_rear_y_limit" || command.action === "restore_probe") ? { confirm: command.confirm === true }

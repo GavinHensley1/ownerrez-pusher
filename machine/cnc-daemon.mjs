@@ -5,7 +5,7 @@ import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
-import { approvedProgramDepth, limitVerticalPlungeFeed, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
+import { approvedProgramDepth, assertPlungeFeedWithinLimit, limitVerticalPlungeFeed, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
 import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 import { applyMaterialProfile, materialProfileFromSetup, readMaterialProfile, removeMaterialProfile, writeMaterialProfile } from "./cnc-material-state.mjs";
 import { applyXyLock, planXyPowerCycleRecovery, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
@@ -17,6 +17,8 @@ import { appendCncEvent, readLatestCompletedStockProbe } from "./cnc-event-journ
 import { assertWorkJogWithinStock, positioningBoundsFromStock } from "./cnc-positioning-envelope.mjs";
 import { assertFrameValid, readFrameIncident, writeFrameIncident, resolveFrameIncident } from "./cnc-frame-incident.mjs";
 import { inspectSavedFrame } from "./cnc-frame-recovery.mjs";
+import { configuredPlateThickness, normalizePlateThickness, plateThicknessMatches, writePlateConfig, PLATE_THICKNESS_MIN_MM, PLATE_THICKNESS_MAX_MM } from "./cnc-plate-config.mjs";
+import { assertSurfaceProofReady, buildSurfaceProof, requiresMeasuredSurfaceProof, surfaceProofStatus, SURFACE_PROOF_ATTESTED, SURFACE_PROOF_CONDUCTIVE, SURFACE_PROOF_TOLERANCE_MM } from "./cnc-surface-proof.mjs";
 
 const HOST = process.env.CNC_HOST || "192.168.1.183";
 const PORT = Number(process.env.CNC_PORT || 10086);
@@ -29,13 +31,52 @@ const PROGRAM_STATE_PATH = process.env.CNC_PROGRAM_STATE || join(homedir(), ".op
 const RUN_STATE_PATH = process.env.CNC_RUN_STATE || join(homedir(), ".openclaw", "state", "cnc-run-checkpoint.json");
 const EVENT_JOURNAL_PATH = process.env.CNC_EVENT_JOURNAL || join(homedir(), ".openclaw", "state", "cnc-events.jsonl");
 const FRAME_INCIDENT_PATH = process.env.CNC_FRAME_INCIDENT || join(homedir(), ".openclaw", "state", "cnc-frame-incident.json");
+const PLATE_CONFIG_PATH = process.env.CNC_PLATE_CONFIG || join(homedir(), ".openclaw", "state", "cnc-plate-config.json");
 const STATUS_TIMEOUT_MS = Number(process.env.CNC_STATUS_TIMEOUT_MS || 1500);
 const MAX_BODY_BYTES = 900_000;
 // High-resolution Finish programs are transported as decoded G-code over the
 // loopback-only Unix socket. Keep ordinary control requests tightly bounded,
 // but allow machine-program endpoints to receive the generated payload.
 const MAX_PROGRAM_BODY_BYTES = 10_000_000;
-const PROBE_PUCK_THICKNESS_MM = 20;
+// Probe plate height is an OPERATOR-MEASURED value, not a machine constant.
+// SainSmart ships this plate in 14, 14.19 and 20.17 mm variants and documents that
+// thickness varies between units. A wrong value shifts absolute Z zero by exactly
+// that error while bed-minus-stock thickness still looks correct, because the same
+// error cancels in the subtraction. A 20 mm value was assumed against a ~14.19 mm
+// plate and cut a buckle about 6 mm too deep on 2026-09-30.
+//
+// The configured value is read from its OWN state file. It must never be seeded
+// from the calibration record that is validated against it: that is
+// self-validation, it always passes, and it would silently adopt exactly the
+// stale 20 mm calibration this check exists to reject.
+const PROBE_PUCK_MIN_MM = PLATE_THICKNESS_MIN_MM, PROBE_PUCK_MAX_MM = PLATE_THICKNESS_MAX_MM;
+const normalizePuckThickness = normalizePlateThickness;
+let plateConfig = configuredPlateThickness(PLATE_CONFIG_PATH);
+const configuredPlateMm = () => plateConfig.plateThicknessMm;
+const setConfiguredPlateMm = (mm, source) => {
+  const value = normalizePlateThickness(mm);
+  if (value === null) throw new Error(`Plate thickness must be between ${PROBE_PUCK_MIN_MM} and ${PROBE_PUCK_MAX_MM} mm`);
+  const changed = !plateThicknessMatches(value, plateConfig.plateThicknessMm);
+  if (changed || !plateConfig.confirmed) {
+    const written = writePlateConfig(PLATE_CONFIG_PATH, { plateThicknessMm: value, source: source || "Operator-entered Z-probe plate thickness" });
+    plateConfig = { plateThicknessMm: written.plateThicknessMm, confirmed: true, updatedAt: written.updatedAt, source: written.source };
+  }
+  // A different plate means every stored Z reference came from the wrong number.
+  // Drop any surface proof rather than carrying its approval into a new frame.
+  if (changed) clearSurfaceProof(`plate thickness changed to ${value.toFixed(2)} mm`);
+  return plateConfig.plateThicknessMm;
+};
+// The surface-contact proof is deliberately IN-MEMORY ONLY and never persisted.
+// It is a statement about the machine's present physical state, so a daemon
+// restart, a reconnect, or a power cycle must invalidate it by construction
+// rather than by remembering to delete a file. Fail-closed is the default: this
+// starts null, and null blocks Start.
+let surfaceProof = null, surfaceProofClearedReason = "";
+const clearSurfaceProof = (reason) => {
+  if (surfaceProof) recordEvent?.("surface_proof.cleared", { reason: String(reason || "unspecified") });
+  surfaceProof = null;
+  surfaceProofClearedReason = String(reason || "");
+};
 let controller, lastControllerStatus, lastWorkOffset, incident, moving = false, keepaliveBusy = false;
 let frameIncident;
 let frameRecovery = { active: false, message: "" };
@@ -58,6 +99,9 @@ const assertSetupFrame = () => { if (!frameRecovery.active) assertFrameValid(fra
 const motionGuard = async () => { assertSetupFrame(); return { state: "controller_and_software_guards", frameValid: !frameIncident?.latched }; };
 const latchFrameIncident = (reason, duringMotion = hazardousOperationActive?.() === true) => {
   const message = String(reason || "CONTROLLER_CONNECTION_LOST");
+  // Losing the frame means the physical relationship the proof asserted is no
+  // longer established. Never let a proof survive a frame incident.
+  clearSurfaceProof(`frame invalidated: ${message}`);
   // Repeated failed reconnects must not replace the original incident evidence.
   if (!frameIncident?.latched) frameIncident = writeFrameIncident(FRAME_INCIDENT_PATH, { reason: message, occurredAt: new Date().toISOString(), duringMotion, jobId: job.jobId || "" });
   frameRecovery = { active: false, message: "Connection interrupted. Reconnect to verify saved coordinates; the cut will not resume." };
@@ -82,6 +126,20 @@ const programGuard = async ({ before, analysis, programContext }) => {
   if (!setup.xyReady) throw new Error("Set X/Y zero before starting");
   if (!setup.bedProbeReady || !setup.stockProbeReady || !setup.probeReady) throw new Error("Probe the bed and stock before starting");
   if (!setup.probeLocked) throw new Error("Lock the probe calibration before starting");
+  // The controller reporting work Z zero is NOT evidence that the bit is at the
+  // surface; it only means the arithmetic that produced that zero was consistent.
+  // Require an independent, plate-free measurement taken immediately beforehand.
+  // Fails closed: no proof, expired proof, or proof bound to a different plate or
+  // Z reference all stop the start here, in the daemon, regardless of the UI.
+  if (!plateConfig.confirmed) {
+    throw new Error(`The Z-probe plate thickness has never been confirmed (using the ${configuredPlateMm().toFixed(2)} mm default). Measure your plate, save it, re-probe, and verify surface contact before cutting.`);
+  }
+  assertSurfaceProofReady(surfaceProof, {
+    setup,
+    plateThicknessMm: configuredPlateMm(),
+    material: programContext?.material,
+    metalMode: programContext?.metalMode === true,
+  });
   const allowedProgramDepthMm = approvedProgramDepth(setup, programContext);
   validateProgramEnvelope(analysis, { widthMm: 360, heightMm: 360, maxDepthMm: allowedProgramDepthMm, maxSafeZMm: 6 });
   validateProgramStockEnvelope(analysis, { widthMm: programContext?.stockWidthMm, heightMm: programContext?.stockHeightMm, reserveMm: programContext?.stockReserveMm });
@@ -152,8 +210,10 @@ controller.on("probeProgress", (value) => {
     updatedAt: new Date().toISOString(),
   });
 });
-const clearSetup = () => Object.assign(setup, { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
-const clearProbeSetup = (status = "unlocked_reprobe_required") => Object.assign(setup, { bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: status, probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, zOriginMPos: null, updatedAt: new Date().toISOString() });
+const clearSetup = () => (clearSurfaceProof("setup cleared"), Object.assign(setup, { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: new Date().toISOString() }));
+// Any probe-setup clear invalidates the surface proof: the Z reference it
+// corroborated no longer exists.
+const clearProbeSetup = (status = "unlocked_reprobe_required") => (clearSurfaceProof(`probe setup cleared (${status})`), Object.assign(setup, { bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: status, probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, zOriginMPos: null, updatedAt: new Date().toISOString() }));
 const rebuildWorkspaceFromSetup = () => {
   if (!setup.xyReady || !setup.probeReady || !Number.isFinite(setup.xyOriginMPos?.X) || !Number.isFinite(setup.xyOriginMPos?.Y) || !Number.isFinite(setup.zOriginMPos) || !Number.isFinite(setup.maxCutDepthMm)) { workspace.clear(); return null; }
   let saved; try { saved = readProgram(PROGRAM_STATE_PATH); } catch {}
@@ -198,8 +258,14 @@ const restoreLockedProbe = (status, workOffset, options) => {
   const raw = readProbeLock(PROBE_STATE_PATH);
   if (!raw) return null;
   try {
-    if (Math.abs(Number(raw.probeThickness) - PROBE_PUCK_THICKNESS_MM) > 0.05) {
-      throw new Error(`saved probe puck is ${Number(raw.probeThickness).toFixed(1)} mm; this machine requires ${PROBE_PUCK_THICKNESS_MM.toFixed(1)} mm`);
+    // REJECT, never migrate. A calibration captured with a different plate has a
+    // wrong absolute Z zero by exactly that difference, and the error is invisible
+    // in its own recorded stock thickness because it cancels in bed-minus-stock.
+    // Rescaling it would be guessing; the only safe answer is a fresh probe.
+    // The comparison target comes from the independent plate-config file, never
+    // from this record, so a stale 20 mm lock cannot validate itself.
+    if (!plateThicknessMatches(raw.probeThickness, configuredPlateMm())) {
+      throw new Error(`saved calibration used a ${Number(raw.probeThickness).toFixed(2)} mm probe plate but ${configuredPlateMm().toFixed(2)} mm is configured; its Z zero is wrong by ${Math.abs(Number(raw.probeThickness) - configuredPlateMm()).toFixed(2)} mm. Re-probe the bed and stock; this calibration cannot be converted.`);
     }
     return applyProbeLock(setup, raw, status, 0.05, workOffset, options);
   }
@@ -340,10 +406,32 @@ const autoVerifyStoppedFrame = () => {
     logConnectionEvent(incident, `[cnc] ${incident}`);
   });
 };
+// Surfaced so the operator can SEE the plate figure and the absolute references it
+// produced. A 6 mm plate error was invisible for days precisely because the UI only
+// ever showed derived numbers, which all agreed with each other.
+const plateSnapshot = () => ({
+  thicknessMm: configuredPlateMm(),
+  confirmed: plateConfig.confirmed === true,
+  minMm: PROBE_PUCK_MIN_MM,
+  maxMm: PROBE_PUCK_MAX_MM,
+  updatedAt: plateConfig.updatedAt || null,
+  source: plateConfig.source || "",
+});
+const surfaceProofSnapshot = () => {
+  const status = surfaceProofStatus(surfaceProof, { setup, plateThicknessMm: configuredPlateMm() });
+  return {
+    // `ready` here is the non-metal answer. Metal additionally requires a measured
+    // touch, which the daemon enforces at Start and the UI mirrors by method.
+    ready: status.ready,
+    reason: status.reason || (surfaceProof ? "" : surfaceProofClearedReason),
+    toleranceMm: SURFACE_PROOF_TOLERANCE_MM,
+    proof: surfaceProof ? { ...surfaceProof } : null,
+  };
+};
 const health = () => {
   autoVerifyStoppedFrame();
   if (!controller.connected && !hazardousOperationActive() && !frameIncident?.latched) void recoverIdleConnection();
-  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
+  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
 };
 const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (new Set(["Door:0", "Hold:0"]).has(status.state)) throw new Error(`Controller positioning is paused in ${status.state}. The external router may be removed; use Enable positioning first.`); if (status.state !== "Idle") throw new Error(`Controller must report Idle before positioning, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`); return status; };
@@ -408,13 +496,18 @@ const restoreProbeAfterXyOnlyReset = async (payload) => {
   const ageMs = Date.now() - Date.parse(prior.at);
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > 4 * 60 * 60 * 1000) throw new Error("The saved stock probe is too old to restore safely");
   await motionGuard();
+  // The restored reference is only as good as the plate used for the original probe.
+  // Refuse to resurrect a measurement taken with a different plate than the one now set.
+  const priorPuckMm = normalizePuckThickness(prior.probeThickness);
+  if (priorPuckMm === null) throw new Error("The saved stock probe did not record a usable plate thickness; re-probe instead of restoring");
+  if (!plateThicknessMatches(priorPuckMm, configuredPlateMm())) throw new Error(`The saved stock probe used a ${priorPuckMm.toFixed(2)} mm plate but ${configuredPlateMm().toFixed(2)} mm is configured; re-probe instead of restoring`);
   const status = await assertIdle(), workOffset = parseWorkOffset(await controller.query("$#")), stockSurfaceMPos = Number(workOffset.Z);
   if (!Number.isFinite(stockSurfaceMPos)) throw new Error("Current controller Z origin is unavailable");
   lastWorkOffset = workOffset;
   Object.assign(setup, {
     bedProbeReady: true, stockProbeReady: true, probeReady: true, probeLocked: true,
     probeLockStatus: "restored_after_xy_only_reset", probeLockedAt: new Date().toISOString(),
-    probeThickness: PROBE_PUCK_THICKNESS_MM,
+    probeThickness: priorPuckMm,
     bedSurfaceMPos: stockSurfaceMPos - prior.stockThicknessMm,
     stockSurfaceMPos,
     stockThicknessMm: prior.stockThicknessMm,
@@ -479,6 +572,9 @@ const setStockZZero = async (payload) => {
   setup.probeLockStatus = "locked_touch_off";
   setup.probeLockedAt = new Date().toISOString();
   setup.updatedAt = setup.probeLockedAt;
+  // This redefines absolute zero from an eyeballed position, so it replaces the
+  // very reference any earlier surface proof corroborated.
+  clearSurfaceProof("stock Z zero redefined by hand");
   persistLockedProbe(before);
   persistLockedXy(before);
   rebuildWorkspaceFromSetup();
@@ -508,12 +604,19 @@ const probeSurface = async (kind, payload) => {
     applyMaterialProfile(setup, materialProfile);
     workspace.clear();
   }
+  // Never probe against an absent or out-of-range plate value. This number sets
+  // absolute Z zero one-for-one, so a silent default here is a silent depth error.
+  const puckMm = normalizePuckThickness(payload.thicknessMm);
+  if (puckMm === null) throw new Error(`Probe plate thickness must be supplied and between ${PROBE_PUCK_MIN_MM} and ${PROBE_PUCK_MAX_MM} mm`);
+  setConfiguredPlateMm(puckMm, "Supplied with a Project probe command");
+  // Re-probing redefines the surface, so no earlier proof can speak for it.
+  clearSurfaceProof(`${kind} probe started`);
   moving = true; incident = undefined;
-  recordEvent("probe.started", { kind, maxSearchMm: payload.maxSearchMm, materialReady: setup.materialReady });
+  recordEvent("probe.started", { kind, maxSearchMm: payload.maxSearchMm, probeThickness: puckMm, materialReady: setup.materialReady });
   try {
     await motionGuard();
     const result = await controller.probeZ({
-      thicknessMm: payload.thicknessMm,
+      thicknessMm: puckMm,
       maxSearchMm: payload.maxSearchMm,
     });
     const thickness = Number(result.thicknessMm);
@@ -549,6 +652,84 @@ const probeSurface = async (kind, payload) => {
     recordEvent("probe.completed", { kind, firstProbe: result.firstProbe, finalProbe: result.finalProbe, actualWorkOffset: result.actualWorkOffset, after: result.after, searchedMm: result.searchedMm, probeThickness: setup.probeThickness, bedSurfaceMPos: setup.bedSurfaceMPos, stockSurfaceMPos: setup.stockSurfaceMPos, stockThicknessMm: setup.stockThicknessMm, safetyFloorMm: setup.safetyFloorMm, maxCutDepthMm: setup.maxCutDepthMm, zOriginMPos: setup.zOriginMPos, lockStatus: setup.probeLockStatus });
     return { ...result, setup: { ...setup } };
   } catch (error) { incident = error?.message || "PROBE_FAILED"; setup.probePhase = error?.code === "PROBE_SEARCH_EXHAUSTED" ? "returned_no_contact" : "error"; setup.updatedAt = new Date().toISOString(); recordEvent("probe.failed", { kind, code: error?.code, message: incident, travelledMm: setup.probeTravelledMm, limitMm: setup.probeSearchLimitMm }); throw error; } finally { moving = false; }
+};
+// Persist the operator's measured plate thickness without touching the machine.
+// Changing it invalidates any surface proof, and a stored calibration that used a
+// different plate is rejected on its next restore attempt.
+const setPlateThickness = async (payload = {}) => {
+  const thicknessMm = setConfiguredPlateMm(payload.thicknessMm, "Operator-entered via Project");
+  recordEvent("plate.configured", { thicknessMm, confirmed: true });
+  return { ok: true, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), setup: { ...setup } };
+};
+// Independent surface-contact verification. See cnc-surface-proof.mjs for why a
+// second, plate-free measurement is the only thing that can catch a wrong plate:
+// every other number in the setup is derived from the same arithmetic, so they
+// all agree with each other even when they are all wrong.
+const verifySurfaceContact = async (payload = {}) => {
+  assertSetupFrame();
+  if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
+  if (!setup.stockProbeReady || !Number.isFinite(Number(setup.stockSurfaceMPos)) || !Number.isFinite(Number(setup.zOriginMPos))) {
+    throw new Error("Probe the stock before verifying surface contact; there is no stored reference to corroborate");
+  }
+  const method = payload.method === SURFACE_PROOF_ATTESTED ? SURFACE_PROOF_ATTESTED : SURFACE_PROOF_CONDUCTIVE;
+  // Replace any previous proof up front, so a failed attempt can never leave an
+  // older passing proof in place.
+  clearSurfaceProof("new surface verification started");
+
+  if (method === SURFACE_PROOF_ATTESTED) {
+    if (payload.confirm !== true) throw new Error("Operator attestation requires explicit confirmation that the bit is touching the surface at work Z zero");
+    surfaceProof = buildSurfaceProof({ method, plateThicknessMm: configuredPlateMm(), setup, operatorConfirmed: true });
+    recordEvent("surface_proof.recorded", { method, verified: surfaceProof.verified, plateThicknessMm: surfaceProof.plateThicknessMm });
+    return { ok: true, surfaceProof: { ...surfaceProof }, setup: { ...setup } };
+  }
+
+  // The bit must start ABOVE the stored surface so the touch travels downward onto
+  // the stock. Probing up into the work is never acceptable.
+  const before = await assertIdle(), startPosition = coordinates(before);
+  const clearanceMm = startPosition.Z - Number(setup.stockSurfaceMPos);
+  if (!(clearanceMm > 0.2)) {
+    throw new Error(`The bit is only ${clearanceMm.toFixed(3)} mm above the stored stock surface. Raise Z a few mm over bare stock, then verify.`);
+  }
+  // Keep the search tight: this is a confirmation touch from a known height, not a
+  // hunt. A large budget would let a wrong reference drive the cutter deep.
+  const requested = Number(payload.maxSearchMm);
+  const maxSearchMm = Math.max(5, Math.min(25, Number.isFinite(requested) && requested > 0 ? requested : Math.max(5, clearanceMm + 3)));
+
+  moving = true; incident = undefined;
+  recordEvent("surface_proof.started", { method, startZ: startPosition.Z, storedSurfaceMPos: setup.stockSurfaceMPos, maxSearchMm, plateThicknessMm: configuredPlateMm() });
+  try {
+    await motionGuard();
+    // thicknessMm 0 and establishZero false: no plate under the bit and no G10.
+    // The latched PRB Z IS the true surface, with no plate term anywhere in it.
+    const result = await controller.probeZ({ thicknessMm: 0, maxSearchMm, establishZero: false });
+    if (!result.frameReadback?.verified) throw new Error("Surface verification could not confirm the controller work frame");
+    // Prove the measurement had no side effect on the work frame.
+    if (!Number.isFinite(Number(result.actualWorkOffset?.Z)) || Math.abs(Number(result.actualWorkOffset.Z) - Number(setup.zOriginMPos)) > 0.02) {
+      throw new Error(`Surface verification changed the Z work origin (${result.actualWorkOffset?.Z} vs ${setup.zOriginMPos}); refusing to trust it`);
+    }
+    const measuredSurfaceMPosZ = Number(result.finalProbe.position.Z);
+    surfaceProof = buildSurfaceProof({
+      method,
+      measuredSurfaceMPosZ,
+      plateThicknessMm: configuredPlateMm(),
+      setup,
+      evidence: { firstContactZ: Number(result.firstProbe?.position?.Z), secondContactZ: measuredSurfaceMPosZ, searchedMm: Number(result.searchedMm) },
+    });
+    lastControllerStatus = result.after;
+    captureInterruptedPosition(result.after, "verify_surface", { moved: true });
+    recordEvent("surface_proof.recorded", { method, verified: surfaceProof.verified, deltaMm: surfaceProof.deltaMm, measuredSurfaceMPosZ, expectedSurfaceMPosZ: surfaceProof.expectedSurfaceMPosZ, plateThicknessMm: surfaceProof.plateThicknessMm });
+    if (!surfaceProof.verified) {
+      // Do not throw: the operator needs the number. Start stays blocked because
+      // the stored proof is not verified.
+      incident = `Surface contact disagreed with the stored zero by ${Number(surfaceProof.deltaMm).toFixed(3)} mm`;
+    }
+    return { ok: true, surfaceProof: { ...surfaceProof }, setup: { ...setup }, status: result.after };
+  } catch (error) {
+    clearSurfaceProof(`verification failed: ${error?.message || "unknown"}`);
+    incident = error?.message || "SURFACE_VERIFICATION_FAILED";
+    recordEvent("surface_proof.failed", { method, message: incident, code: error?.code });
+    throw error;
+  } finally { moving = false; }
 };
 const lockProbeCalibration = async () => {
   assertSetupFrame();
@@ -586,7 +767,7 @@ const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockRe
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { version: 1, jobId: savedProgram.jobId, programCapturedAt: savedProgram.capturedAt, state: "running", lastCompletedLine: 0, totalLines: savedProgram.analysis.executableLines, message: "Preflight checks", updatedAt: new Date().toISOString() });
   moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
   recordEvent("program.started", { jobId, executableLines: savedProgram.analysis.executableLines, manualRouter: manualRouter === true });
-  try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, expectedOrigin: { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos }, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); persistRunProgress({ state: "done", lastCompletedLine: activeRunCheckpoint.totalLines, message: "Carve complete" }); recordEvent("program.completed", { jobId, totalLines: activeRunCheckpoint.totalLines }); return result; }
+  try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); assertPlungeFeedWithinLimit(conditionedGcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, expectedOrigin: { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos }, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); persistRunProgress({ state: "done", lastCompletedLine: activeRunCheckpoint.totalLines, message: "Carve complete" }); recordEvent("program.completed", { jobId, totalLines: activeRunCheckpoint.totalLines }); return result; }
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); persistRunProgress({ state: "interrupted", message: incident }); recordEvent("program.interrupted", { jobId, message: incident, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine }); throw error; } finally { moving = false; }
 };
 const resumeSavedProgram = async (payload) => {
@@ -711,6 +892,8 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && req.url === "/probe/bed") return json(res, 200, await probeSurface("bed", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/stock") return json(res, 200, await probeSurface("stock", await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/tool") return json(res, 200, await probeSurface("tool", await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/probe/verify-surface") return json(res, 200, await verifySurfaceContact(await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/probe/plate") return json(res, 200, await setPlateThickness(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/lock") return json(res, 200, await lockProbeCalibration());
     if (req.method === "POST" && req.url === "/probe/unlock") return json(res, 200, await unlockProbeCalibration(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/recover") return json(res, 200, await controller.recoverProbeContact(await bodyJson(req)));

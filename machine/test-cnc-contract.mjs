@@ -51,7 +51,13 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /resume_saved/);
   assert.match(html, /Restart stage from beginning/);
   assert.match(html, /RESTART FROM LINE 1/);
-  assert.match(html, /Fixed 20 millimeter Genmitsu probe puck/);
+  // The puck field must be operator-editable and must show the absolute reference,
+  // because a wrong puck is invisible in the derived stock thickness.
+  assert.match(html, /Measured Z-probe puck thickness in millimetres/);
+  assert.match(html, /id="cncProbeThickness"[^>]*value="14\.19"/);
+  assert.doesNotMatch(html, /id="cncProbeThickness"[^>]*readonly/);
+  assert.match(html, /id="cncAbsoluteReference"/);
+  assert.match(html, /Absolute reference · stock top at machine Z/);
   assert.doesNotMatch(html, /value="12\.1"/);
   assert.match(html, /var motionBlocked=baseBlocked\|\|!controller\.idle/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
@@ -467,8 +473,13 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /const runControls=\["pause","resume","stop"\]/);
   assert.match(api, /Explicit saved-carve resume confirmation is required/);
   assert.match(api, /cmd\.allowReposition=true/);
-  assert.match(api, /st\.config\.probeThickness=20/);
-  assert.match(api, /cmd\.probeThickness=20/);
+  // The puck is operator-measured. Assert the server preserves the operator's value
+  // and refuses to probe without one, rather than stamping a hard-coded thickness.
+  assert.match(api, /PROBE_PUCK_DEFAULT_MM=14\.19/);
+  assert.match(api, /st\.config\.probeThickness=puck/);
+  assert.match(api, /cmd\.probeThickness=Number\(st\.config\.probeThickness\)/);
+  assert.match(api, /Measure and save the Z-probe plate thickness before probing/);
+  assert.doesNotMatch(api, /probeThickness=20\b/);
   assert.match(api, /Pause requires a running carve/);
   assert.match(api, /Resume requires a paused carve/);
   assert.match(api, /Stop requires an active carve/);
@@ -615,8 +626,69 @@ test("daemon persists per-line recovery checkpoints and validates position befor
   assert.match(controller, /Held program buffer was not cleared; refusing to resume axis motion/);
   assert.match(daemon, /persistRunProgress\(\{ state: "interrupted", message: "Stopped by Project" \}\)/);
   assert.match(daemon, /DISCARD_BUFFERED_PROGRAM_AFTER_PROJECT_STOP/);
-  assert.match(daemon, /PROBE_PUCK_THICKNESS_MM = 20/);
-  assert.match(daemon, /saved probe puck is/);
+  // The daemon must reject an absent or out-of-range plate rather than defaulting.
+  assert.match(daemon, /Probe plate thickness must be supplied and between/);
+  // No silent fallback thickness anywhere in the probe path, in any layer.
+  assert.doesNotMatch(controller, /thicknessMm = 12\.1/);
+  assert.doesNotMatch(controller, /thicknessMm = 20/);
+  assert.doesNotMatch(daemon, /PROBE_PUCK_THICKNESS_MM = 20/);
+});
+
+test("plate thickness is operator-configured, independent of calibration, and stale calibration is rejected not migrated", () => {
+  // THE DEFECT THIS LOCKS OUT: seeding the configured plate FROM the saved
+  // calibration makes the stale-calibration check self-validating, so a stale 20 mm
+  // lock would approve itself. The configured value must come from its own file.
+  assert.match(daemon, /configuredPlateThickness\(PLATE_CONFIG_PATH\)/);
+  assert.doesNotMatch(daemon, /readProbeLock\(PROBE_STATE_PATH\)\?\.probeThickness/);
+  assert.match(daemon, /cnc-plate-config\.json/);
+  // Rejection must be explicit about being unconvertible, never a rescale.
+  assert.match(daemon, /this calibration cannot be converted/);
+  assert.match(daemon, /plateThicknessMatches\(raw\.probeThickness, configuredPlateMm\(\)\)/);
+  // The restore-after-XY path must apply the same rule.
+  assert.match(daemon, /plateThicknessMatches\(priorPuckMm, configuredPlateMm\(\)\)/);
+  // Single source of range truth, shared with the plate-config module.
+  assert.match(daemon, /PROBE_PUCK_MIN_MM = PLATE_THICKNESS_MIN_MM/);
+  // The plate value and the absolute references it produced must be visible.
+  assert.match(daemon, /const plateSnapshot = \(\)/);
+  assert.match(html, /id="cncAbsoluteReference"/);
+  assert.match(html, /Absolute reference · stock top at machine Z/);
+  // The UI field is editable, defaults to 14.19, and is not frozen read-only.
+  assert.match(html, /id="cncProbeThickness"[^>]*value="14\.19"/);
+  assert.doesNotMatch(html, /id="cncProbeThickness"[^>]*readonly/);
+  assert.doesNotMatch(html, /value="12\.1"/);
+});
+
+test("surface-contact proof gates Start at browser, API and daemon, and metal demands a measured touch", () => {
+  // Daemon is authoritative: the gate sits inside programGuard, which every start
+  // path goes through, and it throws rather than warning.
+  assert.match(daemon, /assertSurfaceProofReady\(surfaceProof, \{/);
+  assert.match(daemon, /const verifySurfaceContact = async/);
+  // The verification touch must not establish zero, and must prove it changed nothing.
+  assert.match(daemon, /thicknessMm: 0, maxSearchMm, establishZero: false/);
+  assert.match(daemon, /Surface verification changed the Z work origin/);
+  assert.match(controller, /establishZero = true/);
+  assert.match(controller, /if \(establishZero\) \{\s*const workZAtStop/);
+  // An unconfirmed default plate can never authorise a cut.
+  assert.match(daemon, /has never been confirmed/);
+  // Proof must be dropped on everything that can move the Z reference.
+  for (const trigger of [/clearSurfaceProof\(`frame invalidated/, /clearSurfaceProof\(`\$\{kind\} probe started/, /clearSurfaceProof\("stock Z zero redefined by hand"\)/, /clearSurfaceProof\(`plate thickness changed/, /clearSurfaceProof\(`probe setup cleared/]) {
+    assert.match(daemon, trigger);
+  }
+  // It is never persisted: a restart or power cycle must invalidate it by construction.
+  assert.doesNotMatch(daemon, /writeFileSync\([^)]*surfaceProof/);
+  // Transport: the cloud agent routes it and gives it the long probe timeout.
+  assert.match(agent, /verify_surface: "\/probe\/verify-surface"/);
+  assert.match(agent, /"\/probe\/verify-surface"\]\)\.has\(path\)/);
+  assert.match(agent, /command\.action === "verify_surface" \? \{ method: command\.method/);
+  // Vercel blocks Start without a ready proof and fails closed on a missing snapshot.
+  assert.match(api, /verify_surface/);
+  assert.match(api, /has not reported a surface-contact proof/);
+  assert.match(api, /Surface-contact proof is required before Start/);
+  assert.match(api, /Metal Start requires a measured surface-contact touch/);
+  // Browser mirrors it as a readiness gate so Start is visibly disabled.
+  assert.match(html, /\['Surface contact proof',proofOk\]/);
+  assert.match(html, /id="cncVerifySurfaceBtn"/);
+  assert.match(html, /conductive-stock-touch/);
 });
 
 test("connection loss fails closed without GRBL soft reset or automatic motion recovery", () => {

@@ -490,11 +490,23 @@ export class GrblTcpController extends EventEmitter {
     });
   }
 
-  probeZ({ thicknessMm = 12.1, maxSearchMm = 70, searchSegmentMm = 5, fastFeed = 100, slowTravelMm = 2, slowFeed = 10, retractMm = 3 } = {}) {
+  // No default plate thickness. This value sets absolute Z zero one-for-one, so a
+  // caller that forgets it must fail loudly rather than probe against a guess.
+  //
+  // establishZero=false runs the IDENTICAL guarded two-touch sequence but emits no
+  // G10, so it measures the surface without redefining it. That is how the
+  // independent surface-contact proof is taken: one safety path, no side effect on
+  // the work frame. The verification touch contacts conductive stock directly with
+  // no plate under the bit, so thicknessMm is 0 and no plate figure enters it.
+  probeZ({ thicknessMm, maxSearchMm = 70, searchSegmentMm = 5, fastFeed = 100, slowTravelMm = 2, slowFeed = 10, retractMm = 3, establishZero = true } = {}) {
     return this.#enqueue(() => this.#withFrameVerificationUnlocked(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for probing");
       const thickness = Number(thicknessMm), searchLimit = Math.abs(Number(maxSearchMm)), searchSegment = Math.abs(Number(searchSegmentMm)), fast = Number(fastFeed), slowTravel = Math.abs(Number(slowTravelMm)), slow = Number(slowFeed), retract = Number(retractMm);
-      if (!Number.isFinite(thickness) || thickness < 1 || thickness > 30) throw new Error("Probe thickness must be 1-30 mm");
+      if (establishZero) {
+        if (!Number.isFinite(thickness) || thickness < 1 || thickness > 30) throw new Error("Probe thickness must be 1-30 mm");
+      } else if (!Number.isFinite(thickness) || thickness < 0 || thickness > 30) {
+        throw new Error("Verification plate thickness must be 0-30 mm");
+      }
       if (!Number.isFinite(searchLimit) || searchLimit < 5 || searchLimit > 73) throw new Error("Probe search budget must be 5-73 mm");
       if (!Number.isFinite(searchSegment) || searchSegment < 1 || searchSegment > 10) throw new Error("Probe search segment must be 1-10 mm");
       if (!Number.isFinite(slowTravel) || slowTravel < 0.5 || slowTravel > 5) throw new Error("Slow probe travel must be 0.5-5 mm");
@@ -591,8 +603,10 @@ export class GrblTcpController extends EventEmitter {
         if (Math.abs(finalProbe.position.Z - firstProbe.position.Z) > 0.05) throw new Error("Probe touches disagree by more than 0.05 mm");
         // PRB is latched at trigger; stopped MPos may include deceleration travel.
         // Establish zero from the trigger point, not the later stopped endpoint.
-        const workZAtStop = thickness + coordinates(finalContact).Z - finalProbe.position.Z;
-        await this.#lineCommandUnlocked(`G10 L20 P1 Z${workZAtStop.toFixed(3)}`, false);
+        if (establishZero) {
+          const workZAtStop = thickness + coordinates(finalContact).Z - finalProbe.position.Z;
+          await this.#lineCommandUnlocked(`G10 L20 P1 Z${workZAtStop.toFixed(3)}`, false);
+        }
         this.emit("probeProgress", { phase: "final_retract", travelledMm: searchedMm, limitMm: searchLimit });
         let finalRetract;
         try { finalRetract = await this.#probeRetractUnlocked(retract, fast); }
@@ -607,11 +621,15 @@ export class GrblTcpController extends EventEmitter {
         const finalParameters = await this.#lineCommandUnlocked("$#", false);
         const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
         const actualWorkOffset = parseWorkOffset(finalParameters);
-        const expectedProbeOrigin = { ...probeOriginBefore, Z: finalProbe.position.Z - thickness };
+        // When only measuring, the work frame must come back UNCHANGED. Asserting the
+        // original origin here is what proves the verification touch had no side effect.
+        const expectedProbeOrigin = establishZero
+          ? { ...probeOriginBefore, Z: finalProbe.position.Z - thickness }
+          : { ...probeOriginBefore };
         const frameReadback = inspectEffectiveCutFrame({ modalLines: finalModes, parameterLines: finalParameters, status: after, expectedOrigin: expectedProbeOrigin });
         this.emit("probeProgress", { phase: "complete", travelledMm: searchedMm, limitMm: searchLimit });
         await this.motionGuard();
-        return { actualWorkOffset, frameReadback, thicknessMm: thickness, before, search, searchedMm, fastReply, firstContact, firstProbe, firstRetract, slowReply, finalContact, finalProbe, finalRetract, after, hardLimitsRestored: hardLimitsWereEnabled };
+        return { actualWorkOffset, frameReadback, thicknessMm: thickness, establishedZero: establishZero === true, before, search, searchedMm, fastReply, firstContact, firstProbe, firstRetract, slowReply, finalContact, finalProbe, finalRetract, after, hardLimitsRestored: hardLimitsWereEnabled };
       } catch (error) {
         await this.#lineCommandUnlocked("G90", false).catch(() => {});
         if (hardLimitsWereEnabled && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});

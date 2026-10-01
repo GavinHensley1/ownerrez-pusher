@@ -286,7 +286,9 @@ test("adaptive probe reaches contact beyond the former 20 mm limit without ALARM
 test("adaptive probe exhausts its physical budget cleanly without alarming or latching a fault", async () => {
   const mock = await makeMock({ probeContactAtMm: Infinity, probeAssertsZ: false });
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {} });
-  await assert.rejects(() => c.probeZ({ maxSearchMm: 25, searchSegmentMm: 5 }), /physical 25\.0 mm search budget/);
+  // Thickness must be passed explicitly: probeZ deliberately has no default,
+  // because a silent default there is a silent absolute-Z error.
+  await assert.rejects(() => c.probeZ({ thicknessMm: 14.19, maxSearchMm: 25, searchSegmentMm: 5 }), /physical 25\.0 mm search budget/);
   const returned = parseStatus(await c.status());
   assert.equal(returned.state, "Idle");
   assert.equal(returned.MPos, "0.000,0.000,0.000");
@@ -298,7 +300,7 @@ test("adaptive probe exhausts its physical budget cleanly without alarming or la
 test("failed slow confirmation returns to starting height without latching a controller fault", async () => {
   const mock = await makeMock({ probeContactAtMm: 1, probeAssertsZ: false, failSlowProbe: true });
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {} });
-  await assert.rejects(() => c.probeZ({ maxSearchMm: 25 }), /returned to its starting height/);
+  await assert.rejects(() => c.probeZ({ thicknessMm: 14.19, maxSearchMm: 25 }), /returned to its starting height/);
   const returned = parseStatus(await c.status());
   assert.equal(returned.state, "Idle");
   assert.equal(returned.MPos, "0.000,0.000,0.000");

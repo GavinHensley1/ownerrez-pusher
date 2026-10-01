@@ -8,16 +8,56 @@ export function cleanProgramLine(raw) {
     .toUpperCase();
 }
 
-export function limitVerticalPlungeFeed(source, maxFeedMmMin = 60) {
+const AXIS_WORD = (axis) => new RegExp(`\\b${axis}${NUMBER}`);
+const FEED_WORD = new RegExp(`\\bF(${NUMBER})`);
+// A vertical plunge is a feed move that changes Z with no X/Y component.
+// The axis test MUST use the full number grammar: `\bZ[-+]?\d` silently misses the
+// perfectly legal leading-dot forms `Z-.5` / `Z.5`, which would let an unlimited
+// plunge straight through the limiter.
+const isVerticalPlunge = (line) => /^G0*1\b/.test(line) && AXIS_WORD("Z").test(line) && !AXIS_WORD("X").test(line) && !AXIS_WORD("Y").test(line);
+
+const assertPlungeLimit = (maxFeedMmMin) => {
   const limit = Number(maxFeedMmMin);
   if (!Number.isFinite(limit) || limit < 20 || limit > 300) throw new Error("Plunge feed limit must be 20-300 mm/min");
+  return limit;
+};
+
+export function limitVerticalPlungeFeed(source, maxFeedMmMin = 60) {
+  const limit = assertPlungeLimit(maxFeedMmMin);
   return String(source || "").split(/\r?\n/).map((raw) => {
     const line = cleanProgramLine(raw);
-    if (!/^G0*1\b/.test(line) || !/\bZ[-+]?\d/.test(line) || /\b[XY][-+]?\d/.test(line)) return raw;
-    const feed = line.match(/\bF([-+]?(?:\d+(?:\.\d*)?|\.\d+))/);
+    if (!isVerticalPlunge(line)) return raw;
+    const feed = line.match(FEED_WORD);
     if (!feed || Number(feed[1]) <= limit) return raw;
-    return raw.replace(/\bF([-+]?(?:\d+(?:\.\d*)?|\.\d+))/i, `F${limit}`);
+    return raw.replace(new RegExp(`\\bF(${NUMBER})`, "i"), `F${limit}`);
   }).join("\n");
+}
+
+// Feed is MODAL in G-code: a plunge with no F word inherits the last commanded feed,
+// which limitVerticalPlungeFeed cannot see on that line and therefore cannot clamp.
+// Rewriting such a line would also change the modal feed for every later move, so
+// this fails CLOSED instead: it refuses the program and names the offending line.
+// Verified against all five certified Rambo programs - their worst inherited plunge
+// feed is 30 mm/min, so this rejects bad programs without blocking the real ones.
+export function assertPlungeFeedWithinLimit(source, maxFeedMmMin = 60) {
+  const limit = assertPlungeLimit(maxFeedMmMin);
+  const lines = String(source || "").split(/\r?\n/);
+  let modalFeed = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = cleanProgramLine(lines[index]);
+    if (!line) continue;
+    const feed = line.match(FEED_WORD);
+    if (feed) modalFeed = Number(feed[1]);
+    if (!isVerticalPlunge(line)) continue;
+    const effective = feed ? Number(feed[1]) : modalFeed;
+    if (effective === null || !Number.isFinite(effective)) {
+      throw new Error(`Line ${index + 1} plunges in Z with no feed rate established: ${line}`);
+    }
+    if (effective > limit + 1e-9) {
+      throw new Error(`Line ${index + 1} would plunge at ${effective} mm/min, above the ${limit} mm/min vertical limit${feed ? "" : " inherited from an earlier modal F"}: ${line}`);
+    }
+  }
+  return { ok: true, limitMmPerMin: limit };
 }
 
 // The generated Finish stage intentionally uses hundreds of thousands of

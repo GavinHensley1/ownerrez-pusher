@@ -52,7 +52,13 @@ async function fixture(t, initialPosition, initialState = "Idle", { latched = tr
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const env = { ...process.env, CNC_HOST: "127.0.0.1", CNC_PORT: String(server.address().port), CNC_DAEMON_SOCKET: socketPath, CNC_LOCAL_UI_PORT: "0" };
-  for (const key of ["PROBE_STATE", "MATERIAL_STATE", "XY_STATE", "PROGRAM_STATE", "RUN_STATE", "EVENT_JOURNAL", "FRAME_INCIDENT"]) env[`CNC_${key}`] = join(dir, key + ".json");
+  // PLATE_CONFIG must be included, otherwise the daemon under test reads the real
+  // machine's plate file and these coordinate-recovery tests stop being isolated.
+  for (const key of ["PROBE_STATE", "MATERIAL_STATE", "XY_STATE", "PROGRAM_STATE", "RUN_STATE", "EVENT_JOURNAL", "FRAME_INCIDENT", "PLATE_CONFIG"]) env[`CNC_${key}`] = join(dir, key + ".json");
+  // These tests exercise coordinate continuity, not plate thickness, so the
+  // configured plate deliberately matches the fixture's. Plate MISMATCH rejection is
+  // covered separately in test-cnc-daemon-surface-proof.mjs.
+  writeFileSync(env.CNC_PLATE_CONFIG, JSON.stringify({ version: 1, plateThicknessMm: probe.probeThickness, updatedAt: new Date().toISOString(), source: "test fixture" }));
   if(streaming)writeFileSync(env.CNC_PROGRAM_STATE,JSON.stringify({version:1,jobId:"fake",context:{stockWidthMm:300,stockHeightMm:200,stockReserveMm:5,manualRouter:true},gcode:"G21\nG90\nG0 Z5\nG1 X85 Y139 Z-0.1 F50\nG0 Z5\nM30"}));
   writeFileSync(env.CNC_XY_STATE, JSON.stringify(xy)); writeFileSync(env.CNC_PROBE_STATE, JSON.stringify(probe));
   if (latched) writeFrameIncident(env.CNC_FRAME_INCIDENT, { reason: "Wi-Fi timeout", duringMotion: true });
@@ -158,7 +164,10 @@ test("visible disconnected-state recovery button dispatches read-only reconnect,
   vm.runInContext(extract("cncControllerState") + "\n" + extract("cncRenderPositioning"), context);
   context.cncRenderPositioning({ connected: false, frameValid: false }, true);
   assert.equal(nodes.cncControllerRecoverBtn.disabled, false);
-  assert.match(nodes.cncPositioningDetail.textContent, /Saved zeros and probes are retained/);
+  // Commit 4fea1eb reworded this to separate "no connection" from "coordinates
+  // locked"; the assertion still checks the operator-meaningful claim, that saved
+  // zeros and probes are not what is blocking manual movement.
+  assert.match(nodes.cncPositioningDetail.textContent, /Saved zeros and probes are not what is blocking it/);
   nodes.cncControllerRecoverBtn.onclick(); assert.equal(calls[0][0], "reconnect_verify");
   context.cncRenderPositioning({ connected: true, frameValid: false, frameRecovery: { active: true, message: "Saved X/Y verified; touch off Z" }, lastControllerStatus: { state: "Idle", FS: "0,0" } }, false);
   assert.match(nodes.cncPositioningTitle.textContent, /Manual positioning ready/);
@@ -208,6 +217,11 @@ test("startup exposes manual positioning after a recorded stop without requiring
 
 for(const stoppedState of ["Idle","Hold:0"])test(`actual streamed-program Stop unwinds and handles ${stoppedState} without resuming`,async t=>{
  const f=await fixture(t,"10,90,5","Idle",{streaming:true,stoppedState});
+ // Start now requires an independent surface-contact proof. This fixture is a
+ // non-metal stage, so satisfy it through the real attested path rather than
+ // bypassing the gate: this test is about Stop unwinding, not about the gate.
+ const attest=await f.request("/probe/verify-surface",{method:"operator-attested-feeler",confirm:true});
+ assert.equal(attest.status,200,JSON.stringify(attest));
  const run=f.request("/job/start",{jobId:"fake",stockWidthMm:300,stockHeightMm:200,stockReserveMm:5,manualRouter:true,gcode:"G21\nG90\nG0 Z5\nG1 X85 Y139 Z-0.1 F50\nG0 Z5\nM30"});
  const deadline=Date.now()+3000;while(!f.wire.some(c=>/^G1\b/.test(c))&&Date.now()<deadline)await new Promise(r=>setTimeout(r,10));
  assert(f.wire.some(c=>/^G1\b/.test(c)),JSON.stringify(await Promise.race([run,Promise.resolve(f.wire)])));
