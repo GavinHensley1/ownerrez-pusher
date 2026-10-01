@@ -2619,7 +2619,24 @@ async function cncMachineAction(action,extra,button){ return cncQueueMachineActi
 async function cncResume(button){var job=cncCurrentJob(),h=(CNC.agent&&CNC.agent.health)||{},state=String(job&&job.agentState||''),point=h.resume||{};if(state==='paused')return cncMachineAction('resume',{},button);if(String(point.state||'')!=='interrupted'||!(Number(point.lastCompletedLine)>0)){alert('No interrupted carve checkpoint is available.');return;}
   // Honour the daemon's verdict here too. Fail closed on a missing field so this
   // can never offer a resume the daemon would refuse.
-  if(point.resumable!==true){alert(String(point.blockedReason||'This interrupted checkpoint cannot be resumed.')+'\n\nSet up X/Y and Z again and restart the stage from line 1.');return;}var moved=Number(point.postStopMoveCount)||0,moveNote=moved?('\n\nProject recorded '+moved+' positioning/probe update'+(moved===1?'':'s')+' after Stop. Resume will first move Z vertically to safe clearance, reposition in X/Y, and replay only the interrupted detail segment.'):'\n\nProject will first move Z vertically to safe clearance, reposition in X/Y if needed, and replay only the interrupted detail segment.';if(!confirm('Resume the saved carve after line '+Number(point.lastCompletedLine).toLocaleString()+'?'+moveNote+'\n\nIt will not restart from line 1. Keep the external router ON and the path clear.'))return;return cncMachineAction('resume_saved',{confirm:true,allowReposition:true},button);}
+  if(point.resumable!==true){alert(String(point.blockedReason||'This interrupted checkpoint cannot be resumed.')+'\n\nSet up X/Y and Z again and restart the stage from line 1.');return;}var moved=Number(point.postStopMoveCount)||0,moveNote=moved?('\n\nProject recorded '+moved+' positioning/probe update'+(moved===1?'':'s')+' after Stop. Resume will first move Z vertically to safe clearance, reposition in X/Y, and replay only the interrupted detail segment.'):'\n\nProject will first move Z vertically to safe clearance and replay only the interrupted detail segment.';if(!confirm('Resume the saved carve after line '+Number(point.lastCompletedLine).toLocaleString()+'?'+moveNote+'\n\nIt will not restart from line 1. Keep the external router ON and the path clear.'))return;
+  // allowReposition WAS HARD-CODED TRUE here and in api/app.js. It selects the
+  // daemon's reposition-and-replay path, which rebuilds the program from a safe
+  // retract instead of requiring the controller's live position to match the
+  // traced program position. Always sending true meant the stricter
+  // position-matching path was never used for an interrupted checkpoint, and the
+  // least-verified recovery ran by default while LOOKING like an operator choice.
+  //
+  // Now it is only requested when the machine actually moved after the Stop --
+  // the one situation where position matching legitimately cannot succeed -- and
+  // it takes its own explicit acknowledgement. With nothing moved, send false so
+  // the daemon verifies the real position instead of repositioning on trust.
+  var allowReposition=false;
+  if(moved){
+    if(!confirm('The machine was moved after the Stop, so its position no longer matches the program.\n\nAllow Project to reposition to the last safe retract and replay from there?\n\nChoose Cancel to restart the stage from line 1 instead.'))return;
+    allowReposition=true;
+  }
+  return cncMachineAction('resume_saved',{confirm:true,allowReposition:allowReposition},button);}
 async function cncRecoverController(button){var invalid=(((CNC.agent||{}).health)||{}).frameValid===false;var text=invalid?'Unlock the stopped controller alarm?\n\nSwitch the external router OFF and clear the obstruction. Project sends only the alarm unlock, verifies Idle and compares saved coordinates. It will not release a held program, reset coordinates or move an axis.':'Enable manual positioning?\n\nGRBL is paused with commanded feed and spindle already at zero. Project will verify the stopped state and saved origins. No axis move is requested.';if(!confirm(text))return;return cncMachineAction('recover_controller',{confirm:true},button);}
 async function cncRecoverRearYLimit(button){if(!confirm('Release the rear Y limit?\n\nProject will move only Y inward by exactly 5 mm at 100 mm/min, verify the rear switch clears, preserve the saved X/Y zero, and restore hard-limit protection. X and Z will not move. Keep hands clear.'))return;return cncMachineAction('recover_rear_y_limit',{confirm:true},button);}
 async function cncRestoreSavedXy(button){var h=(CNC.agent&&CNC.agent.health)||{},r=h.xyRecovery||{},p=r.savedWorkPosition||{};if(!r.available){alert('Exact saved X/Y recovery is not available.');return;}if(!confirm('Restore the original stock X/Y after this power cycle?\n\nSaved pre-shutdown work position: X '+Number(p.X).toFixed(3)+' mm, Y '+Number(p.Y).toFixed(3)+' mm.\n\nThis changes only the coordinate frame and does not move an axis. Continue only if the gantry was NOT pushed or moved while controller power was off.'))return;return cncMachineAction('restore_xy',{confirmGantryUnmoved:true},button);}

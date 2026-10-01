@@ -484,7 +484,12 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /do not press again/);
   assert.match(api, /const runControls=\["pause","resume","stop"\]/);
   assert.match(api, /Explicit saved-carve resume confirmation is required/);
-  assert.match(api, /cmd\.allowReposition=true/);
+  // allowReposition must be the operator's answer, not a constant. Hard-coding it
+  // true meant the daemon always took the reposition-and-replay path and never the
+  // stricter live-position match, so the loosest recovery ran by default while
+  // looking like a choice.
+  assert.match(api, /cmd\.allowReposition=b\.allowReposition===true/);
+  assert.doesNotMatch(api, /cmd\.allowReposition=true/);
   // The puck is operator-measured. Assert the server preserves the operator's value
   // and refuses to probe without one, rather than stamping a hard-coded thickness.
   // The default/min/max are NOT literals in the API any more: they come from the
@@ -635,7 +640,11 @@ test("daemon persists per-line recovery checkpoints and validates position befor
   assert.match(daemon, /buildCheckpointReplayResume/);
   assert.match(daemon, /payload\.allowReposition === true/);
   assert.match(daemon, /captureInterruptedPosition/);
-  assert.match(html, /allowReposition:true/);
+  assert.match(html, /allowReposition:allowReposition/);
+  assert.doesNotMatch(html, /allowReposition:true/);
+  // Only requested when the machine actually moved after the Stop, and only with
+  // its own explicit acknowledgement.
+  assert.match(html, /if\(moved\)\{[\s\S]{0,400}allowReposition=true;/);
   assert.match(daemon, /payload\.dryRun === true/);
   assert.match(controller, /if \(this\.abortRequested\) throw new Error\("PROGRAM_ABORTED"\);\s*if \(guardError\)/);
   assert.match(controller, /this\.pauseRequested = false;\s*await this\.#emergencyStop\(reason\)/);

@@ -15,12 +15,39 @@ test("finds the exact modal work position at an acknowledged line", () => {
   assert.deepEqual(programPositionAtLine(PROGRAM, 7, { spindleMode: "manual" }).position, { X: 5, Y: 10, Z: -1.5 });
 });
 
-test("manual-router resume retracts and continues at the next row boundary", () => {
-  const resumed = buildResumeProgram(PROGRAM, 7, { spindleMode: "manual" });
+test("manual-router resume REFUSES to continue past an unfinished cutting move", () => {
+  // THIS TEST PREVIOUSLY ASSERTED THE DEFECT. It expected resumeAtLine 9,
+  // skippedUnfinishedLines 1, and explicitly asserted that `G1 X0 Z0` was ABSENT
+  // from the resumed program -- it pinned the behaviour of silently dropping a
+  // cutting move. That move is the row's exit ramp: it starts at Z-1.5 and feeds
+  // out to Z0 while X travels 5 -> 0, so skipping it leaves the material between
+  // X5 and X0 uncut to a depth of up to 1.5 mm, after which the job reported
+  // "Carve complete" at 100%. Refusing is correct; the operator restarts the
+  // stage rather than shipping a part with a gap in it.
+  assert.throws(() => buildResumeProgram(PROGRAM, 7, { spindleMode: "manual" }), /abandon 1 cutting move between line 8 and the next safe retract at line 9/);
+});
+
+test("manual-router resume continues at the next row boundary when nothing is abandoned", () => {
+  // Stopping ON the row's last cutting move leaves only the retract ahead.
+  const resumed = buildResumeProgram(PROGRAM, 8, { spindleMode: "manual" });
   assert.equal(resumed.resumeAtLine, 9);
-  assert.equal(resumed.skippedUnfinishedLines, 1);
+  assert.equal(resumed.skippedUnfinishedLines, 0);
   assert.match(resumed.gcode, /G21\nG90\nG17\nG0 Z3\.6\nG0 X0 Y8/);
-  assert.doesNotMatch(resumed.gcode, /G1 X0 Z0/);
+});
+
+test("an above-surface feed connector is not counted as abandoned material", () => {
+  // The generator deliberately emits positive-Z feed moves that cross the work
+  // without touching it. Treating those as cutting moves would refuse good
+  // resumes, so "cutting" is decided from traced Z, not from axis words.
+  const withConnector = [
+    "G21", "G90", "G17", "G0 Z3.6", "G0 X10 Y10", "G1 Z-1.5 F60", "G1 X5 F900",
+    "G1 Z0.5 F900", "G1 X0 Y4 F900", "G0 Z3.6", "G0 X0 Y8", "G1 Z-1.5 F60", "G1 X10 F900", "G0 Z3.6", "M2",
+  ].join("\n");
+  // Stop after line 8, which has already lifted to +0.5. Line 9 then travels at
+  // +0.5, entirely above the surface, so nothing is abandoned by skipping it.
+  const resumed = buildResumeProgram(withConnector, 8, { spindleMode: "manual" });
+  assert.equal(resumed.resumeAtLine, 10);
+  assert.equal(resumed.skippedUnfinishedLines, 1);
 });
 
 test("buffered stop rewinds to the current row after stopping mid-motion", () => {

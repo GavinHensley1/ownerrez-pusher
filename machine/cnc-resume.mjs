@@ -1,6 +1,53 @@
 import { analyzeProgram } from "./cnc-program.mjs";
 
 const NUMBER = "[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)";
+// Same boundary rule as cnc-program.mjs: \b does not match between a digit and a
+// letter, so `\bZ` misses the Z in "G0Z5", and a TRAILING `\b` after the number
+// misses the trailing-dot form "Z5.". An address letter in G-code is never
+// preceded by another letter, and the number ends where it ends.
+const ADDRESS_START = "(?<![A-Z])";
+const axisWord = (axis) => new RegExp(`${ADDRESS_START}${axis}(${NUMBER})`);
+const RAPID = /^G0*0(?![\d.])/;
+const FEED_MOVE = /^G0*[123](?![\d.])/;
+
+// A rapid whose Z is at or above the work surface: a genuine safe retract.
+const safeRetractZ = (line) => {
+  if (!RAPID.test(line)) return null;
+  const z = line.match(axisWord("Z"));
+  return z && Number(z[1]) >= 0 ? Number(z[1]) : null;
+};
+
+// A resume that BEGINS on a combined rapid moves X, Y and Z simultaneously. If
+// the cutter is still down in the stock at the stop point, that drags it
+// sideways through the material while it lifts. Emit a pure vertical lift first;
+// the original combined move then runs as the horizontal reposition at a safe
+// height that it was always meant to be.
+const liftBeforeCombinedRapid = (line) => {
+  const z = safeRetractZ(line);
+  if (z === null) return [];
+  if (!axisWord("X").test(line) && !axisWord("Y").test(line)) return [];
+  return ["; Project: vertical lift first, so the combined rapid below cannot drag X/Y through stock", `G0 Z${z}`];
+};
+
+// Cutting moves that a forward-scanning resume would skip over. Dropping these
+// silently leaves uncut material and then reports the carve complete.
+//
+// "Cutting" must be decided from TRACED Z, not from the line text. Z is modal,
+// so a move's depth is usually not written on its own line, and this project's
+// generator deliberately emits positive-Z feed connectors that cross the work
+// without touching it ("PROTECTED-SURFACE CONNECTOR"). Counting those as
+// abandoned cutting moves would refuse perfectly good resumes. A move removes
+// material only if either of its endpoints sits below the work surface.
+const skippedCuttingMoves = (lines, from, to) => {
+  let position = { X: 0, Y: 0, Z: 0 }, count = 0;
+  for (let index = 0; index < to; index += 1) {
+    const line = lines[index];
+    const next = positionAfter(position, line);
+    if (index >= from && FEED_MOVE.test(line) && Math.min(position.Z, next.Z) < 0) count += 1;
+    position = next;
+  }
+  return count;
+};
 
 export function programPositionAtLine(source, completedLine, { spindleMode = "controller" } = {}) {
   const analysis = analyzeProgram(source, { spindleMode });
@@ -10,7 +57,7 @@ export function programPositionAtLine(source, completedLine, { spindleMode = "co
   for (let index = 0; index < line; index += 1) {
     const command = analysis.lines[index];
     for (const axis of ["X", "Y", "Z"]) {
-      const match = command.match(new RegExp(`\\b${axis}(${NUMBER})\\b`));
+      const match = command.match(axisWord(axis));
       if (match) position[axis] = Number(match[1]);
     }
   }
@@ -23,12 +70,18 @@ export function buildResumeProgram(source, completedLine, { spindleMode = "contr
   const firstUnfinishedIndex = Number(completedLine);
   let retractIndex = -1;
   for (let index = firstUnfinishedIndex; index < analysis.lines.length; index += 1) {
-    const line = analysis.lines[index];
-    if (!/^G0*0\b/.test(line)) continue;
-    const z = line.match(new RegExp(`\\bZ(${NUMBER})\\b`));
-    if (z && Number(z[1]) >= 0) { retractIndex = index; break; }
+    if (safeRetractZ(analysis.lines[index]) !== null) { retractIndex = index; break; }
   }
   if (retractIndex < 0) throw new Error("No safe retract remains after the completed line");
+  // THIS SCAN RUNS FORWARD, so everything between the stop point and that retract
+  // is ABANDONED. Previously those lines were dropped silently and the job then
+  // ran to "Carve complete" at 100% with a hole in the toolpath. Skipping pure
+  // rapids is harmless; skipping cutting moves means uncut material, and a resume
+  // is not allowed to quietly decide to leave some of the part uncarved.
+  const abandoned = skippedCuttingMoves(analysis.lines, firstUnfinishedIndex, retractIndex);
+  if (abandoned > 0) {
+    throw new Error(`Resuming here would abandon ${abandoned} cutting move${abandoned === 1 ? "" : "s"} between line ${firstUnfinishedIndex + 1} and the next safe retract at line ${retractIndex + 1}, leaving that material uncut while reporting the carve complete. Restart the stage from line 1 instead.`);
+  }
   const remaining = analysis.lines.slice(retractIndex);
   const gcode = [
     "; Project guarded resume of a manual-router stage",
@@ -37,6 +90,7 @@ export function buildResumeProgram(source, completedLine, { spindleMode = "contr
     "G21",
     "G90",
     "G17",
+    ...liftBeforeCombinedRapid(remaining[0]),
     ...remaining,
   ].join("\n");
   return {
@@ -55,10 +109,7 @@ export function buildCheckpointReplayResume(source, completedLine, { spindleMode
   const completed = Number(completedLine);
   let rewindIndex = -1;
   for (let index = Math.min(completed - 1, analysis.lines.length - 1); index >= 0; index -= 1) {
-    const command = analysis.lines[index];
-    if (!/^G0*0\b/.test(command)) continue;
-    const z = command.match(new RegExp(`\\bZ(${NUMBER})\\b`));
-    if (z && Number(z[1]) >= 0) { rewindIndex = index; break; }
+    if (safeRetractZ(analysis.lines[index]) !== null) { rewindIndex = index; break; }
   }
   if (rewindIndex < 0) throw new Error("No safe retract boundary exists before the saved checkpoint");
   const replayedLines = completed - rewindIndex;
@@ -71,6 +122,7 @@ export function buildCheckpointReplayResume(source, completedLine, { spindleMode
     "G21",
     "G90",
     "G17",
+    ...liftBeforeCombinedRapid(remaining[0]),
     ...remaining,
   ].join("\n");
   return {
@@ -87,7 +139,7 @@ export function buildCheckpointReplayResume(source, completedLine, { spindleMode
 const positionAfter = (position, command) => {
   const next = { ...position };
   for (const axis of ["X", "Y", "Z"]) {
-    const match = command.match(new RegExp(`\\b${axis}(${NUMBER})\\b`));
+    const match = command.match(axisWord(axis));
     if (match) next[axis] = Number(match[1]);
   }
   return next;
@@ -141,7 +193,7 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
   for (let index = 0; index < lastCandidate; index += 1) {
     const command = analysis.lines[index];
     const next = positionAfter(position, command);
-    if (index >= firstCandidate && /^G0*[01]\b/.test(command)) {
+    if (index >= firstCandidate && /^G0*[01](?![\d.])/.test(command)) {
       const match = distanceToSegment(currentPosition, position, next);
       if (match.progress >= -0.001 && match.progress <= 1.001 && match.distance <= toleranceMm) {
         segments.push({ index, command, start: { ...position }, end: { ...next }, ...match });
@@ -155,7 +207,7 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
     for (let index = 0; index < lastCandidate; index += 1) {
       const command = analysis.lines[index];
       const next = positionAfter(position, command);
-      if (index >= firstCandidate && /^G0*1\b/.test(command)) {
+      if (index >= firstCandidate && FEED_MOVE.test(command)) {
         const match = distanceToXySegment(currentPosition, position, next);
         if (match.progress >= -0.001 && match.progress <= 1.001 && match.distance <= toleranceMm) {
           segments.push({ index, command, start: { ...position }, end: { ...next }, ...match });
@@ -171,10 +223,7 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
 
   let rewindIndex = -1;
   for (let index = interrupted.index; index >= 0; index -= 1) {
-    const command = analysis.lines[index];
-    if (!/^G0*0\b/.test(command)) continue;
-    const z = command.match(new RegExp(`\\bZ(${NUMBER})\\b`));
-    if (z && Number(z[1]) >= 0) { rewindIndex = index; break; }
+    if (safeRetractZ(analysis.lines[index]) !== null) { rewindIndex = index; break; }
   }
   if (rewindIndex < 0) throw new Error("No safe retract boundary exists before the interrupted motion");
   const remaining = analysis.lines.slice(rewindIndex);
@@ -186,6 +235,7 @@ export function buildBufferedStopResume(source, acknowledgedLine, currentPositio
     "G21",
     "G90",
     "G17",
+    ...liftBeforeCombinedRapid(remaining[0]),
     ...remaining,
   ].join("\n");
   return {

@@ -3014,7 +3014,11 @@ if(action==="email_recipients"){
                 cmd.confirm=b.confirm===true;
               }
               if(act==="restore_probe")cmd.confirm=b.confirm===true;
-              if(act==="resume_saved"){cmd.confirm=b.confirm===true;cmd.allowReposition=true;}
+              // allowReposition selects the daemon's reposition-and-replay path,
+              // which skips the live position match. It was hard-coded true here,
+              // so the stricter path was never taken and the loosest recovery ran
+              // by default. Pass the operator's actual answer through instead.
+              if(act==="resume_saved"){cmd.confirm=b.confirm===true;cmd.allowReposition=b.allowReposition===true;}
               if(act==="restore_xy"){
                 if(!health.xyRecovery||health.xyRecovery.available!==true) return res.status(409).json({error:"Exact saved X/Y recovery is not available in the current controller state",cnc:st});
                 if(b.confirmGantryUnmoved!==true) return res.status(400).json({error:"Confirm the gantry was not moved while controller power was off",cnc:st});
