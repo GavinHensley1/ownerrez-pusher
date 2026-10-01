@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
 import { approvedProgramDepth, assertPlungeFeedWithinLimit, limitVerticalPlungeFeed, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
-import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
+import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, readProbeLockInvalidation, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 import { applyMaterialProfile, materialProfileFromSetup, readMaterialProfile, removeMaterialProfile, writeMaterialProfile } from "./cnc-material-state.mjs";
 import { applyXyLock, planXyPowerCycleRecovery, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 import { readProgram, saveProgram } from "./cnc-program-state.mjs";
@@ -88,7 +88,21 @@ let connectionCheckActive = false;
 const RECONNECT_BACKOFF_MS = 10_000;
 const workspace = new VirtualWorkspace();
 const setup = { xyReady: false, xyLockStatus: "unlocked", xyLockedAt: null, bedProbeReady: false, stockProbeReady: false, probeReady: false, probeLocked: false, probeLockStatus: "unlocked", probeLockedAt: null, probeThickness: null, probePhase: "idle", probeTravelledMm: 0, probeSearchLimitMm: null, bedSurfaceMPos: null, stockSurfaceMPos: null, stockThicknessMm: null, safetyFloorMm: null, maxCutDepthMm: null, materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null, xyOriginMPos: null, zOriginMPos: null, updatedAt: null };
-try { const material = readMaterialProfile(MATERIAL_STATE_PATH); if (material) applyMaterialProfile(setup, material); } catch (error) { process.stderr.write(`[cnc] ignored invalid material profile: ${error.message}\n`); }
+// A material profile derived from an invalidated calibration is wrong by the
+// same amount. Reject it at boot too, so a restart cannot resurrect the stale
+// measurements and report materialReady on a Z reference we already rejected.
+const materialProfileIsStale = (material, invalidation) => {
+  const invalidatedAt = Date.parse(invalidation?.invalidatedAt || "");
+  if (!Number.isFinite(invalidatedAt)) return false;
+  const capturedAt = Date.parse(material?.capturedAt || "");
+  return !Number.isFinite(capturedAt) || capturedAt <= invalidatedAt;
+};
+try {
+  const material = readMaterialProfile(MATERIAL_STATE_PATH);
+  if (material && materialProfileIsStale(material, readProbeLockInvalidation(PROBE_STATE_PATH))) {
+    process.stderr.write(`[cnc] rejected material profile captured ${material.capturedAt}: its Z calibration was invalidated\n`);
+  } else if (material) applyMaterialProfile(setup, material);
+} catch (error) { process.stderr.write(`[cnc] ignored invalid material profile: ${error.message}\n`); }
 const job = { state: "idle", jobId: null, progress: 0, message: "", updatedAt: null };
 let activeRunCheckpoint;
 try { activeRunCheckpoint = readRunCheckpoint(RUN_STATE_PATH); } catch { activeRunCheckpoint = undefined; }
@@ -315,17 +329,42 @@ const finishFrameRecovery = () => {
   incident = undefined;
   recordEvent("controller.frame_verified", { xyLockStatus: setup.xyLockStatus, probeLockStatus: setup.probeLockStatus });
 };
+// Reading saved records must NEVER be able to strand the operator. A corrupt or
+// unreadable lock means "you have no saved coordinates, set them again" — it is
+// a reason to enter manual setup, not a reason to abort recovery. Before this
+// was fault-isolated, one unreadable calibration threw here and left the frame
+// incident latched with frameRecovery.active false, which blocks jog and probe,
+// hides X/Y and probe recovery, and makes Start permanently unreachable, because
+// clearing the latch itself requires a probe that the latch forbids.
 const restoreVerifiedCalibration = (status, workOffset) => {
-  const xyLock = readXyLock(XY_STATE_PATH), probeLock = readProbeLock(PROBE_STATE_PATH);
+  let xyLock = null, probeLock = null;
+  const unreadable = [];
+  try { xyLock = readXyLock(XY_STATE_PATH); } catch (error) { unreadable.push(`saved X/Y origin (${error.message})`); }
+  try { probeLock = readProbeLock(PROBE_STATE_PATH); } catch (error) { unreadable.push(`saved Z calibration (${error.message})`); }
   const checked = inspectSavedFrame({ status, workOffset, xyLock, probeLock });
   if ((xyLock && !checked.xy) || (probeLock && !checked.z)) latchFrameIncident("SAVED_COORDINATE_CONTINUITY_UNVERIFIED", false);
   clearSetup();
-  const material = readMaterialProfile(MATERIAL_STATE_PATH); if (material) applyMaterialProfile(setup, material);
+  // A material profile is only as good as the Z reference that produced it. If
+  // the calibration was invalidated, any profile captured at or before that
+  // moment carries the same error and must not report materialReady.
+  const invalidation = readProbeLockInvalidation(PROBE_STATE_PATH);
+  try {
+    const material = readMaterialProfile(MATERIAL_STATE_PATH);
+    if (material && materialProfileIsStale(material, invalidation)) {
+      recordEvent("material.profile_rejected_stale", { capturedAt: material.capturedAt, invalidatedAt: invalidation.invalidatedAt });
+    } else if (material) {
+      applyMaterialProfile(setup, material);
+    }
+  } catch (error) { unreadable.push(`saved material profile (${error.message})`); }
   lastWorkOffset = workOffset;
-  if (checked.xy) restoreLockedXy(status, workOffset);
-  if (checked.z) restoreLockedProbe(status, workOffset, { independentlyVerifiedZ: true });
-  frameRecovery = { active: true, message: checked.message };
-  rebuildWorkspaceFromSetup();
+  if (checked.xy) { try { restoreLockedXy(status, workOffset); } catch (error) { unreadable.push(`X/Y restore (${error.message})`); } }
+  if (checked.z) { try { restoreLockedProbe(status, workOffset, { independentlyVerifiedZ: true }); } catch (error) { unreadable.push(`Z restore (${error.message})`); } }
+  const notes = [checked.message];
+  if (invalidation && !probeLock) notes.push(`Saved Z calibration is invalidated and will not be reused: ${invalidation.reason}`);
+  if (unreadable.length) notes.push(`Could not reuse ${unreadable.join("; ")}. Set the affected coordinates again; nothing was moved.`);
+  // Unconditional: manual setup is always reachable after a verified read.
+  frameRecovery = { active: true, message: notes.join(" ") };
+  try { rebuildWorkspaceFromSetup(); } catch (error) { frameRecovery.message += ` Workspace bounds need a fresh probe (${error.message}).`; }
   finishFrameRecovery();
   return checked;
 };

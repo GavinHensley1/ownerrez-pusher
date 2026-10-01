@@ -27,7 +27,7 @@ const request = (socketPath, path, payload) => new Promise((resolve, reject) => 
   });
   req.on("error", reject); req.end(data);
 });
-async function fixture(t, initialPosition, initialState = "Idle", { latched = true, streaming = false, stoppedState = "Idle" } = {}) {
+async function fixture(t, initialPosition, initialState = "Idle", { latched = true, streaming = false, stoppedState = "Idle", probeRecord = probe, materialRecord = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "cnc-reconnect-test-")), socketPath = join(dir, "cnc.sock"), wire = [];
   let position = initialPosition, state = initialState, jogPolls = 0, g54 = [-75, -49, -45];
   const server = net.createServer(socket => {
@@ -60,7 +60,8 @@ async function fixture(t, initialPosition, initialState = "Idle", { latched = tr
   // covered separately in test-cnc-daemon-surface-proof.mjs.
   writeFileSync(env.CNC_PLATE_CONFIG, JSON.stringify({ version: 1, plateThicknessMm: probe.probeThickness, updatedAt: new Date().toISOString(), source: "test fixture" }));
   if(streaming)writeFileSync(env.CNC_PROGRAM_STATE,JSON.stringify({version:1,jobId:"fake",context:{stockWidthMm:300,stockHeightMm:200,stockReserveMm:5,manualRouter:true},gcode:"G21\nG90\nG0 Z5\nG1 X85 Y139 Z-0.1 F50\nG0 Z5\nM30"}));
-  writeFileSync(env.CNC_XY_STATE, JSON.stringify(xy)); writeFileSync(env.CNC_PROBE_STATE, JSON.stringify(probe));
+  writeFileSync(env.CNC_XY_STATE, JSON.stringify(xy)); writeFileSync(env.CNC_PROBE_STATE, JSON.stringify(probeRecord));
+  if (materialRecord) writeFileSync(env.CNC_MATERIAL_STATE, JSON.stringify(materialRecord));
   if (latched) writeFrameIncident(env.CNC_FRAME_INCIDENT, { reason: "Wi-Fi timeout", duringMotion: true });
   const child = spawn(process.execPath, [new URL("./cnc-daemon.mjs", import.meta.url).pathname], { env, stdio: ["ignore", "ignore", "pipe"] });
   let errors = ""; child.stderr.on("data", chunk => errors += chunk);
@@ -72,6 +73,60 @@ async function fixture(t, initialPosition, initialState = "Idle", { latched = tr
   do { startup=(await request(socketPath,"/health")).body; if(!startup.moving)break;await new Promise(r=>setTimeout(r,20)); } while(Date.now()<readyDeadline);
   return { request: (path, payload) => request(socketPath, path, payload), wire, env, getPosition: () => position };
 }
+
+// Reproduces the 2026-10-01 dead end exactly: a latched frame incident plus a
+// deliberately invalidated Z calibration. readProbeLock used to THROW on that
+// record, which aborted recovery before frameRecovery.active was set, so jog and
+// probe stayed blocked, X/Y recovery was hidden, and the only way to clear the
+// latch (probe, then lock) was itself forbidden by the latch. Start was
+// unreachable with no operator action that could fix it.
+const invalidatedProbe = {
+  version: 1, locked: false, invalidated: true,
+  invalidatedAt: "2026-10-01T12:31:00.000Z",
+  invalidatedReason: "Captured with probeThickness=20mm against a ~14.19mm plate",
+  probeThickness: null, bedSurfaceMPos: null, stockSurfaceMPos: null,
+  stockThicknessMm: null, safetyFloorMm: 0.8, maxCutDepthMm: null, zOriginMPos: null, lastKnownMPos: null,
+};
+
+test("an invalidated Z calibration still lands in a usable setup state instead of a dead end", async t => {
+  const f = await fixture(t, "10,90,5", "Idle", { probeRecord: invalidatedProbe });
+  assert.equal((await f.request("/controller/reconnect-verify", {})).status, 200);
+  const h = (await f.request("/health")).body;
+  // The latch legitimately stands (Z is unverified) but recovery must be OPEN.
+  assert.equal(h.frameValid, false);
+  assert.equal(h.frameRecovery.active, true, `recovery must be reachable: ${JSON.stringify(h.frameRecovery)}`);
+  assert.equal(h.setup.probeLocked, false);
+  assert.match(h.frameRecovery.message, /invalidated/i);
+  // No STOPPED_FRAME_CHECK_FAILED / "not a supported locked calibration" throw.
+  assert.doesNotMatch(String(h.incident || ""), /not a supported locked calibration/);
+  // The operator can actually move, which is what the dead end prevented.
+  const jog = await f.request("/jog/z", { distanceMm: 1, feedMmPerMin: 100, manualPositioning: true });
+  assert.equal(jog.status, 200, JSON.stringify(jog));
+  // Cutting still refuses: degrade to setup, never to an unguarded Start.
+  for (const path of ["/job/start", "/job/resume", "/job/resume-saved"]) assert.equal((await f.request(path, {})).status, 500, path);
+});
+
+test("a material profile captured before its calibration was invalidated is rejected, not reported ready", async t => {
+  const f = await fixture(t, "10,90,5", "Idle", {
+    probeRecord: invalidatedProbe,
+    // Exactly the live file: measured 2026-09-30, i.e. BEFORE the invalidation.
+    materialRecord: { version: 1, stockThicknessMm: 3.855, safetyFloorMm: 0.8, maxCutDepthMm: 3.055, capturedAt: "2026-09-30T19:07:23.768Z", source: "Project measured bed and stock" },
+  });
+  assert.equal((await f.request("/controller/reconnect-verify", {})).status, 200);
+  const h = (await f.request("/health")).body;
+  assert.equal(h.setup.materialReady, false, "a profile from an invalidated Z reference must not claim ready");
+  assert.equal(h.setup.savedStockThicknessMm, null);
+  assert.equal(h.setup.maxCutDepthMm, null);
+});
+
+test("a corrupt calibration that still claims locked:true is surfaced but never strands the operator", async t => {
+  const f = await fixture(t, "10,90,5", "Idle", { probeRecord: { ...probe, maxCutDepthMm: 999 } });
+  assert.equal((await f.request("/controller/reconnect-verify", {})).status, 200);
+  const h = (await f.request("/health")).body;
+  assert.equal(h.frameRecovery.active, true);
+  assert.match(h.frameRecovery.message, /Could not reuse/);
+  assert.equal(h.setup.probeLocked, false);
+});
 
 test("visible reconnect restores unchanged saved coordinates with read-only commands and never resumes a program", async t => {
   const f = await fixture(t, "10,90,5");

@@ -125,9 +125,40 @@ export function applyProbeLock(setup, raw, status, toleranceMm = 0.05, workOffse
   return lock;
 }
 
+// "There is no usable calibration" is a NORMAL, EXPECTED state: the record was
+// never locked, or it was deliberately invalidated (as on 2026-10-01 after the
+// 20 mm-puck root cause). That is not a corrupt file and must never throw,
+// because connection recovery reads this on every reconnect and a throw there
+// aborted recovery before it could enable setup — leaving a latched frame
+// incident with no jog, no probe and no reachable Start.
+//
+// A record that still CLAIMS locked:true but fails validation is genuine
+// corruption and keeps throwing so it is surfaced rather than silently ignored.
+export function probeLockIsUsable(raw) {
+  return !!raw && typeof raw === "object" && raw.version === 1 && raw.locked === true && raw.invalidated !== true;
+}
+
 export function readProbeLock(path) {
   if (!existsSync(path)) return null;
-  return validateProbeLock(JSON.parse(readFileSync(path, "utf8")));
+  const raw = JSON.parse(readFileSync(path, "utf8"));
+  if (!probeLockIsUsable(raw)) return null;
+  return validateProbeLock(raw);
+}
+
+// When a calibration is invalidated, every measurement DERIVED from it (stock
+// thickness, protected floor, maximum cut depth) is wrong by the same amount and
+// must not keep asserting readiness on its own. Callers compare their record's
+// capture time against this to decide whether it predates the invalidation.
+export function readProbeLockInvalidation(path) {
+  if (!existsSync(path)) return null;
+  let raw;
+  try { raw = JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+  if (!raw || typeof raw !== "object" || probeLockIsUsable(raw)) return null;
+  const at = Date.parse(raw.invalidatedAt || raw.lockedAt || raw.capturedAt || "");
+  return {
+    invalidatedAt: Number.isFinite(at) ? new Date(at).toISOString() : null,
+    reason: String(raw.invalidatedReason || raw.source || "Saved calibration is not locked").slice(0, 500),
+  };
 }
 
 export function writeProbeLock(path, raw) {

@@ -84,9 +84,19 @@ export function applyXyLock(setup, raw, status, toleranceMm = 0.05, workOffset) 
   return lock;
 }
 
+// Same rule as the probe calibration: an unlocked or deliberately invalidated
+// origin means "no saved origin, set one", which is an expected state and must
+// not throw inside connection recovery. Only a record claiming locked:true that
+// fails validation is treated as corruption.
+export function xyLockIsUsable(raw) {
+  return !!raw && typeof raw === "object" && raw.version === 1 && raw.locked === true && raw.invalidated !== true;
+}
+
 export function readXyLock(path) {
   if (!existsSync(path)) return null;
-  return validateXyLock(JSON.parse(readFileSync(path, "utf8")));
+  const raw = JSON.parse(readFileSync(path, "utf8"));
+  if (!xyLockIsUsable(raw)) return null;
+  return validateXyLock(raw);
 }
 
 export function writeXyLock(path, raw) {
