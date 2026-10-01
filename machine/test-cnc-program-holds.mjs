@@ -163,3 +163,71 @@ test("the Vercel API keeps the 409 and evaluates the hold against the bridge sna
   const listHold = api.indexOf("entry.cutAuditHold=programAuditHold(entry,holdHealth)");
   assert.ok(agentAssigned > -1 && listHold > agentAssigned, "list hold must be computed after the bridge snapshot loads");
 });
+
+// THE DISTINCTION THE FILE DOCUMENTS AT LENGTH BUT NOTHING ASSERTED.
+// Every test above checks the hold's reason STRING. None checked
+// requiresFreshSetup, so inverting that single boolean kept the whole suite
+// green while sending the operator back to re-probe the bed and stock when all
+// he actually needed was one click on Verify surface contact. That is precisely
+// how a correct gate turns into the dead end this file warns about.
+test("a proof-only hold asks for ONE action; a wrong Z reference demands a fresh setup", () => {
+  const detail = (machine) => holds.programAuditHoldDetail(WOOD, machine);
+
+  // Reference is sound, only the physical proof is outstanding -> one action.
+  for (const proofState of [
+    { ready: false, reason: "Plate is still under the bit." },
+    { ready: true, proof: { method: "conductive-stock-touch", plateThicknessMm: 20 } }, // proof predates the plate correction
+  ]) {
+    const verdict = detail(proven({ surfaceProof: proofState }));
+    assert.notEqual(verdict.reason, "", `${JSON.stringify(proofState)} must hold`);
+    assert.equal(verdict.requiresFreshSetup, false, `${JSON.stringify(proofState)} must NOT demand a re-probe`);
+  }
+
+  // The Z reference itself is wrong or unknown -> nothing is recoverable without
+  // probing the bed and stock again.
+  for (const over of [
+    { plate: { thicknessMm: PLATE_MM, confirmed: false } },
+    { plate: { confirmed: true } },                                        // unreadable thickness
+    { setup: { probeLocked: false, probeThickness: PLATE_MM } },
+    { setup: { probeLocked: true, probeThickness: 20 } },                  // the 2026-09-30 condition
+    { surfaceProof: null },                                                // bridge reported nothing
+  ]) {
+    const verdict = detail(proven(over));
+    assert.notEqual(verdict.reason, "", `${JSON.stringify(over)} must hold`);
+    assert.equal(verdict.requiresFreshSetup, true, `${JSON.stringify(over)} must demand a fresh setup`);
+  }
+
+  // A released cut is never a fresh-setup condition.
+  assert.deepEqual(detail(proven()), { reason: "", requiresFreshSetup: false });
+});
+
+// GAVIN'S ACTUAL NEXT RUN, end to end: the WOOD buckle, zeroed by touching the
+// bare bit to the wood so the puck cannot set the wedding piece's surface zero.
+// setStockZZero requires a locked calibration (for stock thickness) and then
+// redefines absolute Z from the bare-bit position, and it deliberately CLEARS
+// the surface proof because it replaced the reference that proof corroborated.
+// The sequence must therefore end released, and must never report that the
+// touch-off invalidated the setup.
+test("the wood bare-bit touch-off sequence is genuinely runnable", () => {
+  // 1. Probed and locked against the confirmed plate, proof in force.
+  assert.equal(holds.programAuditHold(WOOD, proven()), "");
+
+  // 2. Bare-bit touch-off. probeLocked and probeThickness survive; the proof is
+  //    cleared, so the daemon publishes a snapshot with ready:false (NOT null —
+  //    both daemon call sites pass surfaceProofSnapshot(), which always returns
+  //    an object; passing the raw cleared value would wrongly read as "the
+  //    bridge reported nothing" and demand a teardown).
+  const afterTouchOff = proven({
+    setup: { probeLocked: true, probeThickness: PLATE_MM, probeLockStatus: "locked_touch_off" },
+    surfaceProof: { ready: false, reason: "Surface-contact proof is missing.", proof: null },
+  });
+  const held = holds.programAuditHoldDetail(WOOD, afterTouchOff);
+  assert.match(held.reason, /proven independently of the plate/i);
+  assert.equal(held.requiresFreshSetup, false, "a touch-off must not send the operator back to re-probe");
+
+  // 3. Re-verify surface contact. Wood accepts the operator attestation; metal
+  //    at the same state still demands the measured conductive touch.
+  const attested = proven({ surfaceProof: { ready: true, proof: { method: "operator-attested-feeler", plateThicknessMm: PLATE_MM } } });
+  assert.equal(holds.programAuditHold(WOOD, attested), "", "wood must release on an attested proof");
+  assert.match(holds.programAuditHold(METAL, attested), /conductive/i, "metal must still demand the measured touch");
+});

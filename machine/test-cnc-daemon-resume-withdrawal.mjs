@@ -130,7 +130,7 @@ test("a latched frame incident withdraws the resume offer and demands a fresh se
   const { socketPath, health } = await bootWithState(t, {
     "program.json": savedProgram(),
     "run.json": interruptedCheckpoint(),
-    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured" },
+    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured", confirmedByOperator: true, measuredBy: "operator" },
     "probe.json": validLock(),
     // No xy.json on purpose. Clearing the cutting interlock requires verified X/Y
     // AND Z, so with X/Y unverified the latch stays up — which is the state this
@@ -158,7 +158,7 @@ test("the metal checkpoint from the incident is refused on its own, without rely
     // Exactly the stored program from the incident: certified metal rough.
     "program.json": savedProgram({ context: { material: "C752 nickel silver", camProvider: "kiri-moto", camCertification: "verified", camSourceHash: HELD_ROUGH_HASH, camStage: "rough", camTool: "Whiteside RU2100 · 1/4″ two-flute upcut" } }),
     "run.json": interruptedCheckpoint(),
-    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured" },
+    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured", confirmedByOperator: true, measuredBy: "operator" },
     "probe.json": validLock(),
     "xy.json": validXy(),
   });
@@ -183,7 +183,7 @@ test("an unproven surface contact cannot be resumed even when it is not metal", 
   const { socketPath, health } = await bootWithState(t, {
     "program.json": savedProgram({ context: { camSourceHash: HELD_ROUGH_HASH } }),
     "run.json": interruptedCheckpoint(),
-    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured" },
+    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured", confirmedByOperator: true, measuredBy: "operator" },
     "probe.json": validLock(),
     "xy.json": validXy(),
   });
@@ -216,7 +216,7 @@ test("a checkpoint from a different program than the stored one is refused", asy
   const { health } = await bootWithState(t, {
     "program.json": savedProgram({ capturedAt: "2026-10-01T10:00:00.000Z" }),
     "run.json": interruptedCheckpoint(),
-    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured" },
+    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured", confirmedByOperator: true, measuredBy: "operator" },
     "probe.json": validLock(),
     "xy.json": validXy(),
   });
@@ -229,7 +229,7 @@ test("a calibration made with a different plate withdraws the offer", async (t) 
   const { health } = await bootWithState(t, {
     "program.json": savedProgram(),
     "run.json": interruptedCheckpoint(),
-    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured" },
+    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured", confirmedByOperator: true, measuredBy: "operator" },
     // The stale 20 mm lock from the incident. It is continuous with the controller,
     // so only the plate mismatch can reject it.
     "probe.json": { ...validLock(), probeThickness: 20, source: "stale 20 mm plate calibration" },
@@ -246,7 +246,7 @@ test("the gate is not permanently closed: a clean non-metal checkpoint stays res
   const { socketPath, health } = await bootWithState(t, {
     "program.json": savedProgram(),
     "run.json": interruptedCheckpoint(),
-    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured" },
+    "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured", confirmedByOperator: true, measuredBy: "operator" },
     "probe.json": validLock(),
     "xy.json": validXy(),
   });
@@ -270,7 +270,7 @@ test("a running or completed checkpoint is not a resume offer", async (t) => {
     const { health } = await bootWithState(t, {
       "program.json": savedProgram(),
       "run.json": interruptedCheckpoint({ state }),
-      "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured" },
+      "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured", confirmedByOperator: true, measuredBy: "operator" },
       "probe.json": validLock(),
       "xy.json": validXy(),
     });

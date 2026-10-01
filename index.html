@@ -1782,7 +1782,15 @@ function cncRenderPositioning(health,baseBlocked){
   if(!box||!title||!detail||!button)return info;
   if(health&&health.frameValid===false&&(health.frameRecovery||{}).active&&info.idle){box.dataset.state='ready';title.textContent='Manual positioning ready';detail.textContent='You can move the tool and set zero. Saved records are retained; only starting or resuming G-code requires a verified cutting setup.';button.textContent='Manual controls available';button.disabled=true;button.onclick=null;return info;}
   if(health&&health.frameValid===false&&(health.frameRecovery||{}).active&&info.state==='Alarm'){box.dataset.state='paused';title.textContent=info.rearYLimit?'Rear Y limit reached · cut stopped':'Controller alarm · cut stopped';detail.textContent='Saved coordinates are retained. Clear the physical obstruction before recovery. This will not resume a cut.';button.textContent=info.rearYLimit?'Release rear Y limit':'Unlock stopped alarm';button.disabled=!!baseBlocked||(!info.rearYLimit&&!!info.pins);button.onclick=function(){if(info.rearYLimit)cncRecoverRearYLimit(button);else cncRecoverController(button);};return info;}
-  if(health&&(health.frameValid===false||!health.connected)){var recovery=health.frameRecovery||{};box.dataset.state='paused';title.textContent=recovery.active?'Setup controls available · cutting remains blocked':'Controller offline · reconnecting';detail.textContent=!health.connected?'Manual movement needs a live controller connection. Saved zeros and probes are not what is blocking it.':recovery.message||'Saved zeros and probes are retained. Reconnect checks the controller without resetting coordinates, moving an axis, or resuming a cut. Recalibrate only axes that cannot be verified.';button.textContent='Retry connection';button.disabled=CNC_COMMAND_IN_FLIGHT||!CNC.agent||!!health.moving;button.onclick=function(){cncMachineAction('reconnect_verify',{},button);};}
+  if(health&&(health.frameValid===false||!health.connected)){var recovery=health.frameRecovery||{};box.dataset.state='paused';title.textContent=recovery.active?'Setup controls available · cutting remains blocked':'Controller offline · reconnecting';detail.textContent=!health.connected?'Manual movement needs a live controller connection. Saved zeros and probes are not what is blocking it.':recovery.message||'Saved zeros and probes are retained. Reconnect checks the controller without resetting coordinates, moving an axis, or resuming a cut. Recalibrate only axes that cannot be verified.';button.textContent='Retry connection';
+    // Retry is the ONLY control on this panel, so whatever disables it is a dead
+    // end. A stuck motion flag used to do exactly that: the bridge reported
+    // moving:true with an idle job and an Idle controller at FS:0,0, and this
+    // button went grey with no other way forward. When the controller is not
+    // connected, `moving` cannot describe real motion, so it must not gate the
+    // reconnect. A genuinely running or paused job still does.
+    var runningJob=['running','paused'].indexOf(String((health.job||{}).state||''))!==-1;
+    button.disabled=CNC_COMMAND_IN_FLIGHT||!CNC.agent||runningJob||(!!health.moving&&health.connected!==false);button.onclick=function(){cncMachineAction('reconnect_verify',{},button);};}
   else if(info.idle){box.dataset.state='ready';title.textContent='Positioning enabled ✓';detail.textContent='GRBL is Idle with commanded feed and spindle at zero. Manual movement and zero-setting are available. Cutting readiness is checked separately.';button.textContent='Enabled';button.disabled=true;}
   else if(info.rearYLimit){box.dataset.state='paused';title.textContent='Rear Y limit reached';detail.textContent='Project can move only Y inward by 5 mm, verify the rear switch clears, preserve the saved X/Y zero, and restore hard-limit protection.';button.textContent='Release rear Y limit';button.disabled=!!baseBlocked;button.onclick=function(){cncRecoverRearYLimit(button);};}
   else if(info.recoverable){box.dataset.state='paused';title.textContent='Positioning paused · '+info.state;detail.textContent='The controller is paused. Recovery checks for retained cutting motion before enabling manual controls; it must not resume an interrupted cut.';button.textContent='Enable positioning';button.disabled=!!baseBlocked;button.onclick=function(){cncRecoverController(button);};}
@@ -2640,7 +2648,15 @@ function cncRenderSurfaceProof(h,su,motionBlocked,metalJob,proofOk){
   // Attestation cannot authorise metal, so do not offer it there at all.
   if(attestBtn){attestBtn.style.display=metalJob?'none':'';attestBtn.disabled=!canVerify;}
   if(!out)return;
-  var plateNote=plate.confirmed===true?('Plate in use: '+Number(plate.thicknessMm).toFixed(2)+' mm (confirmed).'):('Plate thickness is still the unconfirmed '+Number(plate.thicknessMm||0).toFixed(2)+' mm default — confirm it, re-probe, then verify.');
+  // Name the number AND where it came from. A 6 mm plate error stayed invisible
+  // for days partly because the UI never showed the plate in use, and on
+  // 2026-10-01 the stored value was 12.1 mm attributed to "operator" when nobody
+  // had measured it. "Unconfirmed" must not be allowed to read as "default":
+  // an unconfirmed value can be any number that happened to get written.
+  var plateMm=Number(plate.thicknessMm||0).toFixed(2);
+  var plateNote=plate.confirmed===true
+    ?('Plate in use: '+plateMm+' mm, confirmed'+(plate.measuredBy?(' by '+plate.measuredBy):'')+'.')
+    :('Plate thickness '+plateMm+' mm is NOT confirmed'+(plate.measuredBy&&plate.measuredBy!=='unattributed'?(' (recorded as '+plate.measuredBy+')'):'')+'. '+String(plate.source||'')+' Measure your plate, save it, re-probe, then verify surface contact.');
   if(proof&&proof.method==='conductive-stock-touch'&&Number.isFinite(Number(proof.deltaMm))){
     var d=Number(proof.deltaMm);
     out.innerHTML=(proofOk?'<span style="color:#7ee0ac">✓ ':'<span style="color:#ff9a9a">× ')

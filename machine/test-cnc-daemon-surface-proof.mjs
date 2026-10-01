@@ -130,8 +130,23 @@ test("the configured plate thickness is honoured end to end and never silently d
 
   health = (await unixRequest(socketPath, "/health")).value;
   assert.equal(health.plate.thicknessMm, PLATE_MM);
+  // A thickness supplied ALONGSIDE a probe command is stored and used, but it is
+  // not a confirmation. On 2026-10-01 that side path had written 12.1 mm -- the
+  // retired third silent default -- and recorded it as operator-measured, which
+  // would have released a cut against a plate nobody ever measured.
+  assert.equal(health.plate.confirmed, false);
+  assert.equal(health.plate.measuredBy, "unattributed");
+  assert.match(health.plate.source, /never confirmed by an operator/i);
+
+  // Only the dedicated set-plate action confirms it, and it must not change the value.
+  const confirmed = await unixRequest(socketPath, "/probe/plate", { thicknessMm: PLATE_MM });
+  assert.equal(confirmed.status, 200, stderr);
+  health = (await unixRequest(socketPath, "/health")).value;
   assert.equal(health.plate.confirmed, true);
+  assert.equal(health.plate.thicknessMm, PLATE_MM);
+  assert.equal(health.plate.measuredBy, "operator");
   assert.equal(JSON.parse(readFileSync(join(dir, "plate.json"), "utf8")).plateThicknessMm, PLATE_MM);
+  assert.equal(JSON.parse(readFileSync(join(dir, "plate.json"), "utf8")).confirmedByOperator, true);
   // Persisted calibration records the plate it was made with, so it can be judged later.
   assert.equal(JSON.parse(readFileSync(join(dir, "probe.json"), "utf8")).probeThickness, PLATE_MM);
 });
@@ -228,7 +243,7 @@ test("a calibration captured with a different plate is REJECTED, not migrated, a
     lockedAt: new Date().toISOString(), source: "Project guarded front-left X/Y origin",
   }));
   // The configured plate is the corrected 14.19 mm.
-  writeFileSync(join(dir, "plate.json"), JSON.stringify({ version: 1, plateThicknessMm: PLATE_MM, updatedAt: new Date().toISOString(), source: "operator measured" }));
+  writeFileSync(join(dir, "plate.json"), JSON.stringify({ version: 1, plateThicknessMm: PLATE_MM, updatedAt: new Date().toISOString(), source: "operator measured", confirmedByOperator: true, measuredBy: "operator" }));
 
   const child = startDaemon(dir, grbl, socketPath);
   let stderr = ""; child.stderr.on("data", (chunk) => { stderr += chunk; });

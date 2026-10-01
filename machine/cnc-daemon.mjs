@@ -53,13 +53,25 @@ const PROBE_PUCK_MIN_MM = PLATE_THICKNESS_MIN_MM, PROBE_PUCK_MAX_MM = PLATE_THIC
 const normalizePuckThickness = normalizePlateThickness;
 let plateConfig = configuredPlateThickness(PLATE_CONFIG_PATH);
 const configuredPlateMm = () => plateConfig.plateThicknessMm;
-const setConfiguredPlateMm = (mm, source) => {
+// `confirmedByOperator` is the flag that releases a cut, so it is a parameter
+// here rather than an assumption. Only the dedicated set-plate endpoint passes
+// true. A thickness that merely accompanies a probe command is stored and used,
+// but does NOT become a confirmation -- on 2026-10-01 that path had written 12.1
+// mm (the retired third silent default) and had it recorded as operator-measured.
+const setConfiguredPlateMm = (mm, source, { confirmedByOperator = false, measuredBy = "unattributed" } = {}) => {
   const value = normalizePlateThickness(mm);
   if (value === null) throw new Error(`Plate thickness must be between ${PROBE_PUCK_MIN_MM} and ${PROBE_PUCK_MAX_MM} mm`);
   const changed = !plateThicknessMatches(value, plateConfig.plateThicknessMm);
+  // Also rewrite when this call would ADD a confirmation to a value that was
+  // stored unconfirmed, otherwise an operator re-entering the same number could
+  // never promote it.
   if (changed || !plateConfig.confirmed) {
-    const written = writePlateConfig(PLATE_CONFIG_PATH, { plateThicknessMm: value, source: source || "Operator-entered Z-probe plate thickness" });
-    plateConfig = { plateThicknessMm: written.plateThicknessMm, confirmed: true, updatedAt: written.updatedAt, source: written.source };
+    writePlateConfig(PLATE_CONFIG_PATH, { plateThicknessMm: value, source: source || "Z-probe plate thickness of unrecorded origin", confirmedByOperator, measuredBy });
+    // Re-resolve through the SAME reader the daemon uses at startup, rather than
+    // assembling the live config here. One code path decides what a stored record
+    // means -- including the explanatory source text for an unconfirmed value --
+    // so a freshly written plate and a restarted daemon can never disagree.
+    plateConfig = configuredPlateThickness(PLATE_CONFIG_PATH);
   }
   // A different plate means every stored Z reference came from the wrong number.
   // Drop any surface proof rather than carrying its approval into a new frame.
@@ -78,6 +90,47 @@ const clearSurfaceProof = (reason) => {
   surfaceProofClearedReason = String(reason || "");
 };
 let controller, lastControllerStatus, lastWorkOffset, incident, moving = false, keepaliveBusy = false;
+// WHY `moving` NEEDS A WATCHDOG:
+// Every operation raises the flag inside a try with a `finally` that lowers it,
+// so it cannot leak through a normal failure. It CAN still latch if an awaited
+// controller call never settles -- a GRBL Wi-Fi socket that accepts the TCP
+// connection and then answers nothing is the observed case. And a latched
+// `moving` is not a cosmetic flag: hazardousOperationActive() consults it, so it
+// suppresses auto-reconnect, and index.html disables the "Retry connection"
+// control on health.moving. That is precisely the dead end found on the live
+// daemon on 2026-10-01, which reported moving:true with job idle and the
+// controller Idle at FS:0,0 -- no motion anywhere, and no way to recover.
+//
+// The bound is deliberately conservative: a real program may legitimately run
+// for 20 h, so time alone never clears the flag. It is cleared only when the
+// machine demonstrably is not moving -- no running/paused job AND the controller
+// last reported Idle with zero feed and spindle and no active input pin -- and
+// only after a grace period far longer than any single command timeout.
+const STALE_MOTION_GRACE_MS = 120_000;
+let movingSince = 0, movingReason = "";
+const setMoving = (active, reason = "") => {
+  moving = active === true;
+  movingSince = moving ? Date.now() : 0;
+  movingReason = moving ? String(reason || "") : "";
+};
+// Returns a reason string when the flag is provably stale, otherwise "".
+const staleMotionReason = () => {
+  if (!moving || !movingSince) return "";
+  if (["running", "paused"].includes(job.state)) return "";
+  if (Date.now() - movingSince < STALE_MOTION_GRACE_MS) return "";
+  const status = lastControllerStatus;
+  if (!status || status.state !== "Idle" || String(status.FS || "") !== "0,0" || status.Pn) return "";
+  return `${movingReason || "operation"} left the motion flag set for ${Math.round((Date.now() - movingSince) / 1000)}s while the controller reported Idle at FS:0,0 with no active job`;
+};
+// Called from health(), which the UI polls, so recovery becomes reachable again
+// without an operator having to restart the bridge.
+const clearStaleMotionFlag = () => {
+  const reason = staleMotionReason();
+  if (!reason) return false;
+  recordEvent("controller.stale_motion_flag_cleared", { reason, movingReason, movingSinceMs: Date.now() - movingSince });
+  setMoving(false);
+  return true;
+};
 let frameIncident;
 let frameRecovery = { active: false, message: "" };
 try { frameIncident = readFrameIncident(FRAME_INCIDENT_PATH); } catch (error) { frameIncident = writeFrameIncident(FRAME_INCIDENT_PATH, { reason: `INVALID_FRAME_INCIDENT_STATE:${error.message}`, duringMotion: false }); }
@@ -372,7 +425,7 @@ const reconnectAndVerifyFrame = async () => {
   if (hazardousOperationActive()) throw new Error("Stop the active operation before reconnecting");
   if (reconnectPromise) throw new Error("A connection check is already in progress");
   connectionCheckActive = true;
-  moving = true; // serialize connection verification against setup and Start
+  setMoving(true, "reconnect and verify frame"); // serialize connection verification against setup and Start
   try {
   frameRecovery = { active: false, message: "Reading controller state and saved calibration" };
   await controller.resetConnection(); // TCP only: not a GRBL reset, unlock or cycle start.
@@ -389,7 +442,7 @@ const reconnectAndVerifyFrame = async () => {
   restoreVerifiedCalibration(after, workOffset);
   recordEvent("controller.reconnected_read_only", { xyVerified: setup.xyReady, zVerified: setup.probeLocked, status: after.raw });
   return { ok: true, status: after, setup: { ...setup }, frameRecovery };
-  } finally { connectionCheckActive = false; moving = false; }
+  } finally { connectionCheckActive = false; setMoving(false); }
 };
 const recoverIdleConnection = async () => {
   if (frameIncident?.latched) return;
@@ -398,7 +451,7 @@ const recoverIdleConnection = async () => {
   if (Date.now() < nextReconnectAt) return;
   nextReconnectAt = Date.now() + RECONNECT_BACKOFF_MS;
   reconnectPromise = (async () => {
-    moving = true;
+    setMoving(true, "idle connection recovery");
     await controller.resetConnection();
     const startupStatus = await readStatus();
     await restoreHardLimitsOnStartup(startupStatus);
@@ -419,7 +472,7 @@ const recoverIdleConnection = async () => {
     incident = undefined;
   })().catch((error) => {
     incident = `CONNECT_FAILED:${error?.message || "unknown"}`;
-  }).finally(() => { moving = false; reconnectPromise = undefined; });
+  }).finally(() => { setMoving(false); reconnectPromise = undefined; });
   return reconnectPromise;
 };
 const xyRecoverySnapshot = () => {
@@ -451,6 +504,9 @@ const autoVerifyStoppedFrame = () => {
 const plateSnapshot = () => ({
   thicknessMm: configuredPlateMm(),
   confirmed: plateConfig.confirmed === true,
+  // Published so the UI can show WHERE the number came from. A 6 mm error stayed
+  // invisible for days partly because the interface never showed the plate used.
+  measuredBy: plateConfig.measuredBy || "unattributed",
   minMm: PROBE_PUCK_MIN_MM,
   maxMm: PROBE_PUCK_MAX_MM,
   updatedAt: plateConfig.updatedAt || null,
@@ -531,6 +587,11 @@ const resumeSnapshot = () => {
   return { ...base, resumable: true };
 };
 const health = () => {
+  // Order matters: release a provably stale motion flag BEFORE the auto-reconnect
+  // test below, because hazardousOperationActive() consults `moving`, so a latched
+  // flag would otherwise suppress reconnection forever. The UI polls /health, so
+  // doing it here makes recovery reachable without restarting the bridge.
+  clearStaleMotionFlag();
   autoVerifyStoppedFrame();
   if (!controller.connected && !hazardousOperationActive() && !frameIncident?.latched) void recoverIdleConnection();
   return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: resumeSnapshot() };
@@ -541,7 +602,7 @@ const assertIdle = async () => { const status = await readStatus(); if (new Set(
 const jog = async (axis, payload) => {
   assertSetupFrame();
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
-  moving = true; incident = undefined;
+  setMoving(true, "jog"); incident = undefined;
   try {
     await motionGuard();
     const distance = Number(payload.distanceMm);
@@ -564,14 +625,14 @@ const jog = async (axis, payload) => {
     captureInterruptedPosition(result.after, `jog_${axis.toLowerCase()}`, { moved: true });
     return result;
   }
-  catch (error) { incident = error?.message || "JOG_FAILED"; throw error; } finally { moving = false; }
+  catch (error) { incident = error?.message || "JOG_FAILED"; throw error; } finally { setMoving(false); }
 };
 const spindleTest = async () => {
   assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
-  moving = true; incident = undefined;
+  setMoving(true, "spindle test"); incident = undefined;
   try { await motionGuard(); const result = await controller.spindleTest(1000, 2000); lastControllerStatus = result.after; return result; }
-  catch (error) { incident = error?.message || "SPINDLE_TEST_FAILED"; throw error; } finally { moving = false; }
+  catch (error) { incident = error?.message || "SPINDLE_TEST_FAILED"; throw error; } finally { setMoving(false); }
 };
 const setXyZero = async (payload) => {
   assertSetupFrame();
@@ -710,10 +771,12 @@ const probeSurface = async (kind, payload) => {
   // absolute Z zero one-for-one, so a silent default here is a silent depth error.
   const puckMm = normalizePuckThickness(payload.thicknessMm);
   if (puckMm === null) throw new Error(`Probe plate thickness must be supplied and between ${PROBE_PUCK_MIN_MM} and ${PROBE_PUCK_MAX_MM} mm`);
+  // Carried along with the probe request, so it is stored and used but is NOT a
+  // confirmation. Confirming here is how 12.1 mm became "operator-measured".
   setConfiguredPlateMm(puckMm, "Supplied with a Project probe command");
   // Re-probing redefines the surface, so no earlier proof can speak for it.
   clearSurfaceProof(`${kind} probe started`);
-  moving = true; incident = undefined;
+  setMoving(true, "probe"); incident = undefined;
   recordEvent("probe.started", { kind, maxSearchMm: payload.maxSearchMm, probeThickness: puckMm, materialReady: setup.materialReady });
   try {
     await motionGuard();
@@ -753,14 +816,16 @@ const probeSurface = async (kind, payload) => {
     captureInterruptedPosition(result.after, `probe_${kind}`, { moved: true });
     recordEvent("probe.completed", { kind, firstProbe: result.firstProbe, finalProbe: result.finalProbe, actualWorkOffset: result.actualWorkOffset, after: result.after, searchedMm: result.searchedMm, probeThickness: setup.probeThickness, bedSurfaceMPos: setup.bedSurfaceMPos, stockSurfaceMPos: setup.stockSurfaceMPos, stockThicknessMm: setup.stockThicknessMm, safetyFloorMm: setup.safetyFloorMm, maxCutDepthMm: setup.maxCutDepthMm, zOriginMPos: setup.zOriginMPos, lockStatus: setup.probeLockStatus });
     return { ...result, setup: { ...setup } };
-  } catch (error) { incident = error?.message || "PROBE_FAILED"; setup.probePhase = error?.code === "PROBE_SEARCH_EXHAUSTED" ? "returned_no_contact" : "error"; setup.updatedAt = new Date().toISOString(); recordEvent("probe.failed", { kind, code: error?.code, message: incident, travelledMm: setup.probeTravelledMm, limitMm: setup.probeSearchLimitMm }); throw error; } finally { moving = false; }
+  } catch (error) { incident = error?.message || "PROBE_FAILED"; setup.probePhase = error?.code === "PROBE_SEARCH_EXHAUSTED" ? "returned_no_contact" : "error"; setup.updatedAt = new Date().toISOString(); recordEvent("probe.failed", { kind, code: error?.code, message: incident, travelledMm: setup.probeTravelledMm, limitMm: setup.probeSearchLimitMm }); throw error; } finally { setMoving(false); }
 };
 // Persist the operator's measured plate thickness without touching the machine.
 // Changing it invalidates any surface proof, and a stored calibration that used a
 // different plate is rejected on its next restore attempt.
 const setPlateThickness = async (payload = {}) => {
-  const thicknessMm = setConfiguredPlateMm(payload.thicknessMm, "Operator-entered via Project");
-  recordEvent("plate.configured", { thicknessMm, confirmed: true });
+  // The ONE path that may confirm a plate. It is a deliberate operator action in
+  // the UI, so it is also the only place the value may be attributed to them.
+  const thicknessMm = setConfiguredPlateMm(payload.thicknessMm, "Operator-measured and entered via Project", { confirmedByOperator: true, measuredBy: "operator" });
+  recordEvent("plate.configured", { thicknessMm, confirmed: true, confirmedByOperator: true });
   return { ok: true, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), setup: { ...setup } };
 };
 // Independent surface-contact verification. See cnc-surface-proof.mjs for why a
@@ -797,7 +862,7 @@ const verifySurfaceContact = async (payload = {}) => {
   const requested = Number(payload.maxSearchMm);
   const maxSearchMm = Math.max(5, Math.min(25, Number.isFinite(requested) && requested > 0 ? requested : Math.max(5, clearanceMm + 3)));
 
-  moving = true; incident = undefined;
+  setMoving(true, "surface-contact verification"); incident = undefined;
   recordEvent("surface_proof.started", { method, startZ: startPosition.Z, storedSurfaceMPos: setup.stockSurfaceMPos, maxSearchMm, plateThicknessMm: configuredPlateMm() });
   try {
     await motionGuard();
@@ -831,7 +896,7 @@ const verifySurfaceContact = async (payload = {}) => {
     incident = error?.message || "SURFACE_VERIFICATION_FAILED";
     recordEvent("surface_proof.failed", { method, message: incident, code: error?.code });
     throw error;
-  } finally { moving = false; }
+  } finally { setMoving(false); }
 };
 const lockProbeCalibration = async () => {
   assertSetupFrame();
@@ -875,10 +940,10 @@ const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockRe
   if (/C752 nickel silver/i.test(String(material || "")) && createHash("sha256").update(String(gcode || "")).digest("hex") !== String(camSourceHash || "")) throw new Error("Metal G-code no longer matches its certified Kiri:Moto source hash");
   const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true, operation: String(operation || ""), material: String(material || ""), camProvider: String(camProvider || ""), camCertification: String(camCertification || ""), camSourceHash: String(camSourceHash || ""), camAuditHash: String(camAuditHash || ""), camStage: String(camStage || ""), camTool: String(camTool || ""), allowSacrificialCutThrough: allowSacrificialCutThrough === true, sacrificialBackingConfirmed: sacrificialBackingConfirmed === true, profileDepthMm: profileDepthMm !== null && profileDepthMm !== undefined && Number.isFinite(Number(profileDepthMm)) ? Number(profileDepthMm) : null } });
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { version: 1, jobId: savedProgram.jobId, programCapturedAt: savedProgram.capturedAt, state: "running", lastCompletedLine: 0, totalLines: savedProgram.analysis.executableLines, message: "Preflight checks", updatedAt: new Date().toISOString() });
-  moving = true; incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
+  setMoving(true, "program run"); incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
   recordEvent("program.started", { jobId, executableLines: savedProgram.analysis.executableLines, manualRouter: manualRouter === true });
   try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); assertPlungeFeedWithinLimit(conditionedGcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, expectedOrigin: { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos }, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); persistRunProgress({ state: "done", lastCompletedLine: activeRunCheckpoint.totalLines, message: "Carve complete" }); recordEvent("program.completed", { jobId, totalLines: activeRunCheckpoint.totalLines }); return result; }
-  catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); persistRunProgress({ state: "interrupted", message: incident }); recordEvent("program.interrupted", { jobId, message: incident, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine }); throw error; } finally { moving = false; }
+  catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); persistRunProgress({ state: "interrupted", message: incident }); recordEvent("program.interrupted", { jobId, message: incident, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine }); throw error; } finally { setMoving(false); }
 };
 const resumeSavedProgram = async (payload) => {
   assertFrameValid(frameIncident);
@@ -954,9 +1019,9 @@ const recoverStoppedController = async (payload) => {
   if (frameIncident?.latched) {
     const before = await readStatus();
     if (before.state !== "Alarm" || before.Pn) throw new Error("Only an alarm with cleared inputs may be unlocked here; a held program must be discarded by an explicit controller power cycle");
-    moving = true;
+    setMoving(true, "controller recovery");
     try { await controller.recoverStoppedController({ allowHeldResume: false }); }
-    finally { moving = false; }
+    finally { setMoving(false); }
     return reconnectAndVerifyFrame();
   }
   const recovered = await restoreStoppedControllerState({ discardBufferedProgram: activeRunCheckpoint?.state === "interrupted" });
@@ -967,7 +1032,7 @@ const recoverRearYLimit = async (payload) => {
   assertSetupFrame();
   if (payload.confirm !== true) throw new Error("Explicit rear-Y limit recovery confirmation is required");
   if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
-  moving = true; incident = undefined;
+  setMoving(true, "rear-limit recovery"); incident = undefined;
   try {
     const result = await controller.recoverRearYLimit({ retractMm: 5, feed: 100 });
     lastControllerStatus = result.after;
@@ -982,7 +1047,7 @@ const recoverRearYLimit = async (payload) => {
   } catch (error) {
     incident = error?.message || "REAR_Y_LIMIT_RECOVERY_FAILED";
     throw error;
-  } finally { moving = false; }
+  } finally { setMoving(false); }
 };
 const bodyJson = async (req, maxBytes = MAX_BODY_BYTES) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > maxBytes) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
 

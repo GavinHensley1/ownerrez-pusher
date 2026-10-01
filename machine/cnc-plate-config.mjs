@@ -47,9 +47,22 @@ export function validatePlateConfig(raw) {
   return {
     version: 1,
     plateThicknessMm,
-    measuredBy: String(raw.measuredBy || "operator").slice(0, 60),
+    // PROVENANCE IS NOT COSMETIC. "Confirmed" is what releases a cut, so it has
+    // to mean an operator deliberately measured this plate and typed this number
+    // -- not that some value happened to ride along with another command.
+    //
+    // Observed on 2026-10-01: the live record read 12.1 mm (the retired third
+    // silent default) with measuredBy "operator" and source "Supplied with a
+    // Project probe command". Nobody measured 12.1. It was stamped as
+    // operator-measured purely because that was the field's default, which is the
+    // same failure as freezing the unverified 20 mm as a verified constant.
+    //
+    // So measuredBy is no longer defaulted to "operator", and confirmation is a
+    // separate explicit flag that only the dedicated set-plate path may set.
+    measuredBy: String(raw.measuredBy || "unattributed").slice(0, 60),
+    confirmedByOperator: raw.confirmedByOperator === true,
     updatedAt: String(raw.updatedAt || new Date().toISOString()),
-    source: String(raw.source || "Operator-entered Z-probe plate thickness").slice(0, 160),
+    source: String(raw.source || "Z-probe plate thickness of unrecorded origin").slice(0, 160),
   };
 }
 
@@ -75,11 +88,26 @@ export function writePlateConfig(path, raw) {
 export function configuredPlateThickness(path) {
   try {
     const config = readPlateConfig(path);
-    if (config) return { plateThicknessMm: config.plateThicknessMm, confirmed: true, updatedAt: config.updatedAt, source: config.source };
+    if (config) {
+      // A stored value is USED as the configured thickness either way -- refusing
+      // to read it would only push the caller back onto a default. But it is
+      // reported as confirmed only when an operator explicitly confirmed it, so
+      // an incidentally-written number cannot release a cut.
+      return {
+        plateThicknessMm: config.plateThicknessMm,
+        confirmed: config.confirmedByOperator === true,
+        measuredBy: config.measuredBy,
+        updatedAt: config.updatedAt,
+        source: config.confirmedByOperator === true
+          ? config.source
+          : `${config.plateThicknessMm.toFixed(2)} mm is stored but was never confirmed by an operator (${config.source}). Measure the plate you are actually using and save it.`,
+      };
+    }
   } catch { /* fall through to the default below */ }
   return {
     plateThicknessMm: PLATE_THICKNESS_DEFAULT_MM,
     confirmed: false,
+    measuredBy: "unattributed",
     updatedAt: null,
     source: `Unconfirmed default ${PLATE_THICKNESS_DEFAULT_MM} mm; measure and save the plate you are actually using`,
   };

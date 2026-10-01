@@ -58,7 +58,7 @@ async function fixture(t, initialPosition, initialState = "Idle", { latched = tr
   // These tests exercise coordinate continuity, not plate thickness, so the
   // configured plate deliberately matches the fixture's. Plate MISMATCH rejection is
   // covered separately in test-cnc-daemon-surface-proof.mjs.
-  writeFileSync(env.CNC_PLATE_CONFIG, JSON.stringify({ version: 1, plateThicknessMm: probe.probeThickness, updatedAt: new Date().toISOString(), source: "test fixture" }));
+  writeFileSync(env.CNC_PLATE_CONFIG, JSON.stringify({ version: 1, plateThicknessMm: probe.probeThickness, updatedAt: new Date().toISOString(), source: "test fixture", confirmedByOperator: true, measuredBy: "operator" }));
   if(streaming)writeFileSync(env.CNC_PROGRAM_STATE,JSON.stringify({version:1,jobId:"fake",context:{stockWidthMm:300,stockHeightMm:200,stockReserveMm:5,manualRouter:true},gcode:"G21\nG90\nG0 Z5\nG1 X85 Y139 Z-0.1 F50\nG0 Z5\nM30"}));
   writeFileSync(env.CNC_XY_STATE, JSON.stringify(xy)); writeFileSync(env.CNC_PROBE_STATE, JSON.stringify(probeRecord));
   if (materialRecord) writeFileSync(env.CNC_MATERIAL_STATE, JSON.stringify(materialRecord));

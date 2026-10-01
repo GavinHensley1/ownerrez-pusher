@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -48,13 +48,51 @@ test("plate thickness comparison separates genuinely different operator entries"
 test("plate config round-trips and is stored private", () => {
   const dir = scratch(), path = join(dir, "plate.json");
   try {
-    const written = writePlateConfig(path, { plateThicknessMm: 14.19, source: "unit test" });
+    const written = writePlateConfig(path, { plateThicknessMm: 14.19, source: "unit test", confirmedByOperator: true, measuredBy: "operator" });
     assert.equal(written.plateThicknessMm, 14.19);
     assert.equal(readPlateConfig(path).plateThicknessMm, 14.19);
     const resolved = configuredPlateThickness(path);
     assert.equal(resolved.plateThicknessMm, 14.19);
     assert.equal(resolved.confirmed, true);
+    assert.equal(resolved.measuredBy, "operator");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a stored thickness nobody confirmed is USED but never reported as confirmed", () => {
+  // THE 2026-10-01 STATE: ~/.openclaw/state/cnc-plate-config.json held 12.1 mm --
+  // the retired third silent default -- with measuredBy "operator" and source
+  // "Supplied with a Project probe command". Nobody measured 12.1. It was
+  // attributed to the operator purely because that was the field's default, and
+  // `confirmed` was true merely because the file existed. Since `confirmed` is
+  // what releases a cut, that is the same defect as freezing the unverified
+  // 20 mm figure as a verified constant.
+  const dir = scratch(), path = join(dir, "plate.json");
+  try {
+    const written = writePlateConfig(path, { plateThicknessMm: 12.1, source: "Supplied with a Project probe command" });
+    assert.equal(written.confirmedByOperator, false);
+    // Not silently attributed to a human who never touched it.
+    assert.equal(written.measuredBy, "unattributed");
+    const resolved = configuredPlateThickness(path);
+    // Still the value in force: refusing to read it would only fall back to a
+    // default, which is no safer.
+    assert.equal(resolved.plateThicknessMm, 12.1);
+    // But it cannot release a cut, and it says why.
+    assert.equal(resolved.confirmed, false);
+    assert.match(resolved.source, /never confirmed by an operator/i);
+    assert.match(resolved.source, /12\.10 mm is stored/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("only the explicit set-plate path may confirm, never the probe side path", () => {
+  const daemon = readFileSync(new URL("./cnc-daemon.mjs", import.meta.url), "utf8");
+  const setPlate = daemon.slice(daemon.indexOf("const setPlateThickness"), daemon.indexOf("const verifySurfaceContact"));
+  assert.match(setPlate, /confirmedByOperator: true, measuredBy: "operator"/);
+  // The thickness carried along with a probe request is stored and used but
+  // confers no confirmation, so it must not pass the confirming options at all.
+  const probeCall = daemon.slice(daemon.indexOf('setConfiguredPlateMm(puckMm, "Supplied with a Project probe command")'), daemon.indexOf('setConfiguredPlateMm(puckMm, "Supplied with a Project probe command")') + 120);
+  assert.match(probeCall, /setConfiguredPlateMm\(puckMm, "Supplied with a Project probe command"\);/);
+  const confirmingWrites = daemon.match(/setConfiguredPlateMm\([^;]*confirmedByOperator: true/g) || [];
+  assert.equal(confirmingWrites.length, 1, `exactly one call site may confirm a plate, found ${confirmingWrites.length}`);
 });
 
 test("plate config refuses to persist an invalid thickness", () => {
