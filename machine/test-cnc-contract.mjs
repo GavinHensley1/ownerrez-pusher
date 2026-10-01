@@ -478,7 +478,11 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /cmd\.allowReposition=true/);
   // The puck is operator-measured. Assert the server preserves the operator's value
   // and refuses to probe without one, rather than stamping a hard-coded thickness.
-  assert.match(api, /PROBE_PUCK_DEFAULT_MM=14\.19/);
+  // The default/min/max are NOT literals in the API any more: they come from the
+  // one plate contract the ESM machine layer shares, so the number that defines
+  // absolute Z zero cannot drift between the two module systems.
+  assert.match(api, /PLATE_THICKNESS_DEFAULT_MM: PROBE_PUCK_DEFAULT_MM[\s\S]{0,240}require\("\.\/cnc-plate-contract\.cjs"\)/);
+  assert.doesNotMatch(api, /PROBE_PUCK_DEFAULT_MM\s*=\s*14\.19/);
   assert.match(api, /st\.config\.probeThickness=puck/);
   assert.match(api, /cmd\.probeThickness=Number\(st\.config\.probeThickness\)/);
   assert.match(api, /Measure and save the Z-probe plate thickness before probing/);

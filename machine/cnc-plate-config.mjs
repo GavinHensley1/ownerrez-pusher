@@ -23,29 +23,20 @@
 // confirmed by the operator, never a verified machine constant.
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+// The thickness range, the default and the match tolerance are defined ONCE, in
+// api/cnc-plate-contract.cjs, because the CommonJS Vercel API enforces the same
+// contract and cannot import ESM. Re-exported here so every existing ESM
+// importer of this module keeps working against the one set of numbers.
+import plateContract from "../api/cnc-plate-contract.cjs";
 
-export const PLATE_THICKNESS_DEFAULT_MM = 14.19;
-export const PLATE_THICKNESS_MIN_MM = 5;
-export const PLATE_THICKNESS_MAX_MM = 30;
-
-// Operators type this to 2 decimals, so any two genuinely different entries
-// differ by at least 0.01 mm. 0.005 separates "the same value" from "a different
-// value" without ever accepting a real difference. A 0.19 mm difference (14.00
-// vs 14.19) matters on a pass that only skims 0.06 mm, so it must not be
-// tolerated the way a loose 0.05 mm window would.
-export const PLATE_THICKNESS_MATCH_TOLERANCE_MM = 0.005;
-
-export function normalizePlateThickness(value) {
-  const mm = Number(value);
-  if (!Number.isFinite(mm) || mm < PLATE_THICKNESS_MIN_MM || mm > PLATE_THICKNESS_MAX_MM) return null;
-  return mm;
-}
-
-export function plateThicknessMatches(a, b, toleranceMm = PLATE_THICKNESS_MATCH_TOLERANCE_MM) {
-  const left = Number(a), right = Number(b);
-  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
-  return Math.abs(left - right) <= toleranceMm;
-}
+export const {
+  PLATE_THICKNESS_DEFAULT_MM,
+  PLATE_THICKNESS_MIN_MM,
+  PLATE_THICKNESS_MAX_MM,
+  PLATE_THICKNESS_MATCH_TOLERANCE_MM,
+  normalizePlateThickness,
+  plateThicknessMatches,
+} = plateContract;
 
 export function validatePlateConfig(raw) {
   if (!raw || typeof raw !== "object" || raw.version !== 1) throw new Error("Plate configuration is not a supported record");

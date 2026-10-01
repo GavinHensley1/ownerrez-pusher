@@ -15,7 +15,9 @@ const { programAuditHold } = require("./cnc-program-holds.cjs");
 // variants and documents unit-to-unit variation, so this is a default, not a fact.
 // An error here moves absolute Z zero one-for-one and is invisible in the derived
 // stock thickness, because the same error cancels in bed-minus-stock.
-const PROBE_PUCK_DEFAULT_MM=14.19, PROBE_PUCK_MIN_MM=5, PROBE_PUCK_MAX_MM=30;
+// NOT literals: these come from the one plate contract the ESM machine layer also
+// uses, so the API and the daemon cannot drift on the number that sets Z zero.
+const { PLATE_THICKNESS_DEFAULT_MM: PROBE_PUCK_DEFAULT_MM, PLATE_THICKNESS_MIN_MM: PROBE_PUCK_MIN_MM, PLATE_THICKNESS_MAX_MM: PROBE_PUCK_MAX_MM } = require("./cnc-plate-contract.cjs");
 const FLOOR=99, CEIL=300, OV_MIN=50, OV_MAX=1000, ENDPOINT="https://api.ownerrez.com/v2/spotrates";
 const UNITS=[
   {orp:486910,name:"Bear Claw",offset:0},{orp:486911,name:"Flyin' Horse",offset:5},
@@ -2679,7 +2681,6 @@ if(action==="email_recipients"){
       if(!st||typeof st!=="object") st={jobs:[],config:{}};
       if(!Array.isArray(st.jobs)) st.jobs=[];
       if(!st.config||typeof st.config!=="object") st.config={};
-      for(const entry of st.jobs) if(entry) entry.cutAuditHold=programAuditHold(entry);
       // Probe puck height is operator-measured, not fixed. SainSmart ships 14 /
       // 14.19 / 20.17 mm variants and says thickness varies between units. Assuming
       // 20 mm against the ~14.19 mm puck cut a buckle ~6 mm too deep on 2026-09-30,
@@ -2688,6 +2689,14 @@ if(action==="email_recipients"){
       if(!(Number(st.config.probeThickness)>=5&&Number(st.config.probeThickness)<=30)) st.config.probeThickness=PROBE_PUCK_DEFAULT_MM;
       let cncAgent=null; try{ if(redis){ const raw=await redis.get("parkside:cnc:agent"); cncAgent=(raw&&typeof raw==="object")?raw:(raw?JSON.parse(raw):null); } }catch(e){}
       st.agent=cncAgent||null;
+      // The cut hold is conditional on the Z reference actually being proven, so it
+      // has to be computed AFTER the bridge snapshot is loaded, not before it. A
+      // missing snapshot yields a hold, so an unreachable bridge reads as "not
+      // proven" rather than as consent.
+      {
+        const holdHealth=(st.agent&&st.agent.health)||null;
+        for(const entry of st.jobs) if(entry) entry.cutAuditHold=programAuditHold(entry,holdHealth);
+      }
       const now=new Date().toISOString();
       if(req.method==="POST"){
         let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
@@ -2912,7 +2921,11 @@ if(action==="email_recipients"){
               if(act==="zero_z"&&(!setup.probeLocked||!setup.stockProbeReady)) return res.status(409).json({error:"Lock a measured stock calibration before setting physical stock Z zero",cnc:st});
               if(act==="zero_z"&&b.confirm!==true) return res.status(400).json({error:"Explicit stock Z-zero confirmation is required",cnc:st});
               if(act==="start"){
-                const auditHold=programAuditHold(job);if(auditHold)return res.status(409).json({error:auditHold,cnc:st});
+                // Conditional cut hold, evaluated against the live bridge snapshot:
+                // plate confirmed, Z locked, calibration captured at the configured
+                // plate, surface contact proven at that same plate, and a measured
+                // conductive touch for metal. Still a 409, still fails closed.
+                const auditHold=programAuditHold(job,health);if(auditHold)return res.status(409).json({error:auditHold,cnc:st});
                 if(!job.hasGcode) return res.status(409).json({error:"Generate the design before Start",cnc:st});
                 if(metalJob&&(job.camProvider!=="kiri-moto"||job.camCertification!=="verified"||!/^[a-f0-9]{64}$/.test(String(job.camSourceHash||""))||!/^[a-f0-9]{64}$/.test(String(job.camAuditHash||"")))) return res.status(409).json({error:"Metal Start is blocked. Import an animated and certified Kiri:Moto operation first.",cnc:st});
                 if(metalJob){let imported=[];try{imported=JSON.parse(job.gcodeStages||"[]");}catch(e){}const required=["rough","cleanup","finish","profile","release"],missing=required.filter(stage=>!imported.includes(stage));if(missing.length)return res.status(409).json({error:"Metal Start is blocked until all five certified Kiri:Moto stages are imported. Missing: "+missing.join(", "),cnc:st});}

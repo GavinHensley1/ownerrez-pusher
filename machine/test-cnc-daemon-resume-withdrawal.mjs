@@ -172,7 +172,14 @@ test("the metal checkpoint from the incident is refused on its own, without rely
   assert.match(attempt.value.error, /metal|audit/i);
 });
 
-test("an audit-held program cannot be resumed even when it is not metal", async (t) => {
+test("an unproven surface contact cannot be resumed even when it is not metal", async (t) => {
+  // This test used to assert that one of the five certified Rambo-buckle hashes
+  // sat on an unconditional blocklist. That premise is retired: all 834,070
+  // lines were independently audited and the programs were never the fault, so
+  // being on a hash list is no longer a reason to hold. What IS still a reason is
+  // an unproven Z reference. The surface-contact proof is deliberately in-memory,
+  // so a daemon restart clears it, and a freshly booted daemon must not offer a
+  // resume even for a non-metal checkpoint whose plate and calibration agree.
   const { socketPath, health } = await bootWithState(t, {
     "program.json": savedProgram({ context: { camSourceHash: HELD_ROUGH_HASH } }),
     "run.json": interruptedCheckpoint(),
@@ -181,7 +188,10 @@ test("an audit-held program cannot be resumed even when it is not metal", async 
     "xy.json": validXy(),
   });
   assert.equal(health.resume.resumable, false);
-  assert.match(health.resume.blockedReason, /audit/i);
+  assert.match(health.resume.blockedReason, /surface contact is proven independently of the plate/i);
+  // Clearable by one operator action, so it must NOT demand a fresh setup. That
+  // distinction is what keeps a safe gate from becoming a dead end.
+  assert.equal(health.resume.requiresFreshSetup, false);
   assert.equal((await unixRequest(socketPath, "/job/resume-saved", { confirm: true })).status, 500);
 });
 
@@ -196,6 +206,9 @@ test("an unconfirmed plate withdraws the offer, because the depth error was a pl
   assert.equal(health.plate.confirmed, false);
   assert.equal(health.resume.resumable, false);
   assert.match(health.resume.blockedReason, /never been confirmed/i);
+  // An unknown Z reference is not clearable by a single action; it demands a
+  // re-probe, so this one DOES require a fresh setup.
+  assert.equal(health.resume.requiresFreshSetup, true);
   assert.equal((await unixRequest(socketPath, "/job/resume-saved", { confirm: true })).status, 500);
 });
 
@@ -230,7 +243,7 @@ test("a calibration made with a different plate withdraws the offer", async (t) 
 test("the gate is not permanently closed: a clean non-metal checkpoint stays resumable", async (t) => {
   // Without this, every test above would pass even if resumeSnapshot always
   // refused, which would hide a broken recovery path rather than a withdrawn one.
-  const { health } = await bootWithState(t, {
+  const { socketPath, health } = await bootWithState(t, {
     "program.json": savedProgram(),
     "run.json": interruptedCheckpoint(),
     "plate.json": { version: 1, plateThicknessMm: PLATE_MM, updatedAt: CAPTURED_AT, source: "operator measured" },
@@ -239,8 +252,17 @@ test("the gate is not permanently closed: a clean non-metal checkpoint stays res
   });
   assert.equal(health.plate.confirmed, true);
   assert.equal(health.setup.probeLocked, true, "the matching-plate calibration must restore");
-  assert.equal(health.resume.resumable, true, `resume should be available here, got: ${health.resume.blockedReason}`);
-  assert.equal(health.resume.blockedReason, "");
+
+  // On a cold boot the only outstanding condition is the surface-contact proof,
+  // which is in-memory and therefore absent. Clear it the way the operator does.
+  // Wood accepts an attestation, which needs no machine motion.
+  const proof = await unixRequest(socketPath, "/probe/verify-surface", { method: "operator-attested-feeler", confirm: true });
+  assert.equal(proof.status, 200, `attested surface proof should be accepted, got: ${JSON.stringify(proof.value)}`);
+
+  const after = (await unixRequest(socketPath, "/health")).value;
+  assert.equal(after.surfaceProof.ready, true);
+  assert.equal(after.resume.resumable, true, `resume should be available here, got: ${after.resume.blockedReason}`);
+  assert.equal(after.resume.blockedReason, "");
 });
 
 test("a running or completed checkpoint is not a resume offer", async (t) => {

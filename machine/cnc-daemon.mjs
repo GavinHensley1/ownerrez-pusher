@@ -504,8 +504,18 @@ const resumeSnapshot = () => {
   if (/C752 nickel silver/i.test(String(context.material || ""))) {
     return refuse("Resume is permanently disabled for metal. Restart the certified Kiri:Moto stage from line 1 after deliberate X/Y and Z recovery.", true);
   }
-  const hold = programHolds.programAuditHold({ camSourceHash: context.camSourceHash, certifiedLibraryId: context.certifiedLibraryId });
-  if (hold) return refuse(hold, true);
+  // The cut hold is conditional on the Z reference being proven, so it must be
+  // asked with this daemon's live plate/calibration/proof evidence. Passing no
+  // evidence would make it answer "held" unconditionally and fail closed, which
+  // is safe but uninformative; passing the real snapshot makes the reason true.
+  // Detail form, so a hold whose only outstanding item is the surface-contact
+  // proof does not tell the operator to tear down and re-probe. A wrong or
+  // unknown Z reference still demands a fresh setup.
+  const hold = programHolds.programAuditHoldDetail(
+    { camSourceHash: context.camSourceHash, certifiedLibraryId: context.certifiedLibraryId, material: context.material },
+    { plate: plateSnapshot(), setup, surfaceProof: surfaceProofSnapshot() },
+  );
+  if (hold.reason) return refuse(hold.reason, hold.requiresFreshSetup);
   if (!context.manualRouter) return refuse("Automatic resume is limited to manual-router stages.");
 
   // The depth error that caused the incident was a plate-thickness error, so a
@@ -850,7 +860,15 @@ const unlockProbeCalibration = async (payload) => {
 };
 const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", material = "", camProvider = "", camCertification = "", camSourceHash = "", camAuditHash = "", camStage = "", camTool = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
   const actualSourceHash = createHash("sha256").update(String(gcode || "")).digest("hex");
-  const auditHold = programHolds.programAuditHold({ camSourceHash }) || programHolds.programAuditHold({ camSourceHash: actualSourceHash });
+  // Independent third enforcement of the conditional cut hold, after the browser
+  // and the Vercel API. The hold no longer blocklists program hashes; it asserts
+  // unless this daemon's own plate configuration, locked calibration and
+  // surface-contact proof all agree on the Z reference. Evaluated against live
+  // local state so a stale or absent cloud snapshot cannot release it.
+  const auditHold = programHolds.programAuditHold(
+    { camSourceHash: String(camSourceHash || actualSourceHash), material },
+    { plate: plateSnapshot(), setup, surfaceProof: surfaceProofSnapshot() },
+  );
   if (auditHold) throw new Error(auditHold);
   assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
