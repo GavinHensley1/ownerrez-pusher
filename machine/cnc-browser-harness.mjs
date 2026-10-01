@@ -106,6 +106,21 @@ export function loadBrowserScript(indexPath) {
   const names = Object.keys(globals);
   const factory = new Function(...names, `${source}\n; return { cncRenderToolpath, cncToolFootprint, cncStageToolName, cncBitRadius, cncBitStepover, cncDepthBand,
     setJob(job) { CNC = { jobs: [job], config: {} }; CNC_CUR = job.id; },
+    // Exposes the REAL Start/Resume gate so the operator path can be walked
+    // offline instead of grepped. cncRenderAgent reads CNC.agent.health, so the
+    // simulated daemon payload is installed alongside the job.
+    renderAgent(job, health, config) {
+      CNC = { jobs: [job], config: config || {}, agent: { health: health } };
+      CNC_CUR = job.id;
+      CNC_COMMAND_IN_FLIGHT = false;
+      cncRenderAgent(job);
+      return {
+        start: document.getElementById('cncStartBtn'),
+        resume: document.getElementById('cncResumeBtn'),
+        readiness: document.getElementById('cncReadiness'),
+        auditHold: document.getElementById('cncCutAuditHold'),
+      };
+    },
   };`);
   const api = factory(...names.map((name) => globals[name]));
   return { ...api, canvases, elements, background: BACKGROUND };
