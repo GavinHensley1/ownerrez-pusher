@@ -8,9 +8,22 @@ test("all incident stage hashes stay stopped independently of stale certificatio
  assert(holds.programAuditHold({certifiedLibraryId:library.LIBRARY_ID}));
  assert.equal(holds.programAuditHold({camSourceHash:"a".repeat(64)}),"");
 });
-test("audit hold is limited to G-code Start and does not gate manual setup",()=>{
+test("audit hold gates G-code execution and the resume offer, but not manual setup",()=>{
  const daemon=readFileSync(new URL("./cnc-daemon.mjs",import.meta.url),"utf8");
- const start=daemon.indexOf("const startProgram =");const end=daemon.indexOf("const resumeSavedProgram =",start);
- assert.match(daemon.slice(start,end),/programHolds.programAuditHold/);
- assert.doesNotMatch(daemon.slice(0,start)+daemon.slice(end),/programHolds.programAuditHold/);
+ // Exactly two places may consult the hold: starting a program, and deciding
+ // whether a saved checkpoint may be OFFERED for resume. A held program must not
+ // be advertised as resumable either, or the UI presents a path straight back
+ // into the audited cut. Everything else -- jog, probe, zeroing, recovery --
+ // must stay ungated so manual setup keeps working during an audit.
+ const snapshot=daemon.indexOf("const resumeSnapshot =");
+ const snapshotEnd=daemon.indexOf("const health = ()",snapshot);
+ const start=daemon.indexOf("const startProgram =");
+ const startEnd=daemon.indexOf("const resumeSavedProgram =",start);
+ assert.ok(snapshot>-1&&snapshotEnd>snapshot,"resumeSnapshot must exist");
+ assert.ok(start>-1&&startEnd>start,"startProgram must exist");
+ assert.ok(snapshotEnd<start,"resumeSnapshot is expected before startProgram");
+ assert.match(daemon.slice(start,startEnd),/programHolds.programAuditHold/);
+ assert.match(daemon.slice(snapshot,snapshotEnd),/programHolds.programAuditHold/);
+ const elsewhere=daemon.slice(0,snapshot)+daemon.slice(snapshotEnd,start)+daemon.slice(startEnd);
+ assert.doesNotMatch(elsewhere,/programHolds.programAuditHold/);
 });

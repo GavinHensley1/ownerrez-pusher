@@ -439,7 +439,10 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(daemon, /Metal program is not a certified Kiri:Moto export/);
   assert.match(daemon, /\["rough", "cleanup", "finish", "profile", "release"\]/);
   assert.match(daemon, /Metal G-code no longer matches its certified Kiri:Moto source hash/);
-  assert.match(daemon, /Saved-program resume is disabled for metal/);
+  // The daemon now refuses metal resume from resumeSnapshot, which is also what
+  // /health publishes, so the button and the endpoint cannot disagree.
+  assert.match(daemon, /Resume is permanently disabled for metal/);
+  assert.match(daemon, /if \(!offer\.resumable\) throw new Error\(offer\.blockedReason\)/);
   assert.match(api, /job\.stageRequiresProbe=true;job\.stageActivatedAt=now;job\.resumeInvalidatedAt=now/);
   assert.match(api, /interrupted checkpoint belongs to an older generated program/);
   assert.match(html, /resumeInvalidatedAt>=resumeUpdatedAt/);

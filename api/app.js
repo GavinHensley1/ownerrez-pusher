@@ -2953,6 +2953,11 @@ if(action==="email_recipients"){
                 if(metalJob) return res.status(409).json({error:"Saved-program resume is disabled for metal. Re-establish X/Y and Z, then restart the certified Kiri:Moto operation from line 1.",cnc:st});
                 if(b.confirm!==true) return res.status(400).json({error:"Explicit saved-carve resume confirmation is required",cnc:st});
                 if(!health.resume||String(health.resume.state)!=="interrupted") return res.status(409).json({error:"No interrupted carve checkpoint is available",cnc:st});
+                // The daemon decides resumability (metal, audit hold, program identity,
+                // plate confirmation, plate/calibration agreement, latched frame) and
+                // publishes the verdict. Honour it here too, and fail closed if an older
+                // daemon omits the field rather than inferring consent from its absence.
+                if(health.resume.resumable!==true) return res.status(409).json({error:String(health.resume.blockedReason||"This interrupted checkpoint cannot be resumed. Set up X/Y and Z again and restart the stage from line 1."),cnc:st});
                 if(Date.parse(String(job.resumeInvalidatedAt||""))>=Date.parse(String(health.resume.updatedAt||""))) return res.status(409).json({error:"The interrupted checkpoint belongs to an older generated program. Start the newly generated stage from line 1 after a fresh tool touch-off; do not resume the old checkpoint.",cnc:st});
                 if(!health.connected||health.moving) return res.status(409).json({error:"Controller must be connected and stationary before saved-carve resume",cnc:st});
               }

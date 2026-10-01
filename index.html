@@ -592,6 +592,7 @@
       <div id="cncReadiness" style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:11px"></div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <p id="cncCutAuditHold" style="display:none;color:#ffcf79;font-size:12px" role="status"></p>
+        <p id="cncResumeWithdrawn" style="display:none;color:#ffcf79;font-size:12px" role="status"></p>
         <button id="cncStartBtn" class="cncCommandBtn" onclick="cncStart(this)" disabled style="font-size:16px;padding:12px 22px;font-weight:700">&#9654; Start carve</button>
         <button id="cncPauseBtn" class="cncCommandBtn" onclick="cncMachineAction('pause',{},this)">Pause</button>
         <button id="cncResumeBtn" class="cncCommandBtn" onclick="cncResume(this)">Resume</button>
@@ -1961,11 +1962,22 @@ function cncRenderAgent(job){
   var proofOk=!!(proofState&&proofState.ready===true&&(!metalJob||String((proofState.proof||{}).method||'')==='conductive-stock-touch'))&&!!(plateState&&plateState.confirmed===true);
   var checks=[['Bridge',!!CNC.agent],['Coordinate frame',h.frameValid!==false],['Controller ready',!!controller.idle&&h.frameValid!==false],['Machine boundaries',!!ws.calibrated],['Start position',!!frame.ok&&h.frameValid!==false],['Stock fit',!!fit.ok],['X/Y stock zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked],['Surface contact proof',proofOk]];
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
-  var ready=checks.every(function(c){return c[1];}),resumePoint=h.resume||{},resumeInvalidatedAt=Date.parse(String(job&&job.resumeInvalidatedAt||'')),resumeUpdatedAt=Date.parse(String(resumePoint.updatedAt||'')),hasSavedResume=String(resumePoint.state||'')==='interrupted'&&Number(resumePoint.lastCompletedLine)>0&&!(Number.isFinite(resumeInvalidatedAt)&&Number.isFinite(resumeUpdatedAt)&&resumeInvalidatedAt>=resumeUpdatedAt);
+  // RESUME IS OFFERED ONLY WHEN THE DAEMON SAYS IT IS RESUMABLE.
+  // The daemon owns this decision (metal, audit hold, program identity, plate
+  // confirmation, plate/calibration agreement, latched frame) and publishes
+  // resumable + blockedReason. Requiring resumable===true fails closed, so an
+  // older daemon that omits the field offers nothing rather than offering a
+  // path that would repeat the 2026-09-30 over-depth cut.
+  var ready=checks.every(function(c){return c[1];}),resumePoint=h.resume||{},resumeInvalidatedAt=Date.parse(String(job&&job.resumeInvalidatedAt||'')),resumeUpdatedAt=Date.parse(String(resumePoint.updatedAt||''));
+  var resumeStale=Number.isFinite(resumeInvalidatedAt)&&Number.isFinite(resumeUpdatedAt)&&resumeInvalidatedAt>=resumeUpdatedAt;
+  var hasSavedResume=resumePoint.resumable===true&&!resumeStale&&Number(resumePoint.lastCompletedLine)>0;
+  var resumeBlocked=String(resumePoint.state||'')==='interrupted'&&!hasSavedResume?String(resumePoint.blockedReason||(resumeStale?'The interrupted checkpoint belongs to an older generated program. Start the stage from line 1 after a fresh tool touch-off.':'This interrupted checkpoint cannot be resumed. Set up X/Y and Z again and restart the stage from line 1.')):'';
+  var resumeNote=document.getElementById('cncResumeWithdrawn');
+  if(resumeNote){resumeNote.textContent=resumeBlocked?('Resume withdrawn · '+resumeBlocked):'';resumeNote.style.display=resumeBlocked?'':'none';}
   var auditHold=String(job&&job.cutAuditHold||''),auditNote=document.getElementById('cncCutAuditHold');if(auditNote){auditNote.textContent=auditHold;auditNote.style.display=auditHold?'':'none';}
   var start=document.getElementById('cncStartBtn'); if(start){start.disabled=!(ready&&!auditHold&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&state!=='running'&&state!=='queued');start.textContent=hasSavedResume?'▶ Restart stage from beginning':'▶ Start carve';}
   var pause=document.getElementById('cncPauseBtn'); if(pause) pause.disabled=state!=='running';
-  var resume=document.getElementById('cncResumeBtn'); if(resume){resume.disabled=!!auditHold||h.frameValid===false||(state!=='paused'&&!(hasSavedResume&&controller.idle&&!h.moving));resume.textContent=hasSavedResume&&state!=='paused'?'Resume saved carve':'Resume';}
+  var resume=document.getElementById('cncResumeBtn'); if(resume){resume.disabled=!!auditHold||h.frameValid===false||(state!=='paused'&&!(hasSavedResume&&controller.idle&&!h.moving));resume.textContent=hasSavedResume&&state!=='paused'?'Resume saved carve':'Resume';resume.title=state!=='paused'&&resumeBlocked?resumeBlocked:'';}
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!h.moving&&!['queued','accepted','running','paused'].includes(state);
   var motionBlocked=baseBlocked||!controller.idle;
   var jogStep=cncSyncJogStep(h);document.querySelectorAll('.cncJogBtn').forEach(function(btn){var axis=String(btn.dataset.axis||''),dir=Number(btn.dataset.dir)||0,check=cncJogFrameCheck(h,axis,jogStep*dir);btn.disabled=motionBlocked||!check.ok;btn.title=check.reason||'';});
@@ -2062,10 +2074,52 @@ function cncRenderRelief(dataURL, sizeLabel){
   img.onerror=function(){ prev.innerHTML='<span class="muted">Could not render preview</span>'; };
   img.src=dataURL;
 }
+// Single source of truth for the depth ramp so the canvas raster and the
+// stroked stages cannot drift apart.
+var CNC_DEPTH_RGB=[[39,211,226],[242,182,50],[242,140,40],[239,64,92]],CNC_DEPTH_HEX=['#27d3e2','#f2b632','#f28c28','#ef405c'];
+function cncDepthBand(zz,deep){var d=Math.max(0,-zz),r=d/Math.max(.001,deep);if(d<.002)return 0;if(r<.4)return 1;if(r<.75)return 2;return 3;}
+// Which plan/certificate tool actually runs a stage. Mirrors cncRenderStages.
+function cncStageToolName(stage,job){
+  var tools={},certs={};try{tools=JSON.parse((job&&job.planTools)||'{}');certs=JSON.parse((job&&job.camCertificates)||'{}');}catch(e){}
+  if(certs[stage]&&certs[stage].tool)return String(certs[stage].tool);
+  if(stage==='detail')return String(tools.detailBit||'');
+  if(stage==='rough'||stage==='profile'||stage==='release')return String(tools.roughBit||'');
+  return String(tools.finishBit||'');
+}
+// WHY THIS EXISTS: the preview used to size each drawn cell from gap() — the
+// SMALLEST spacing between any two distinct coordinates anywhere in the program.
+// A single tight pair (one arc segment, one ramp entry) collapses that minimum
+// toward zero. Measured on the certified rough stage the minimum X and Y gap is
+// 0.001 mm, so cellW/cellH became max(1, 0.001*sc+1) = 1.0 px while the RU2100
+// that actually cuts it is 6.35 mm, about 28 px at preview scale. A stage that
+// physically clears solid material therefore rendered as 1 px dots separated by
+// black, which reads as "not cut" when the opposite is true.
+//
+// A round cutter removes material across its whole diameter, so the honest
+// figure is the tool's swept footprint: the toolpath dilated by the cutter
+// radius. Size it from the tool in machine units and scale by sc.
+//
+// Resolution order is most-specific-first, and an unresolved tool is reported
+// rather than guessed — the preview falls back to plain sample dots and says so,
+// because inventing a footprint is how an unverified number becomes "measured".
+function cncToolFootprint(text,stage,job){
+  var src=String(text||''),dia=NaN,step=NaN,from='';
+  var radial=src.match(/RADIAL ENGAGEMENT:\s*([\d.]+)\s*mm[^/]*\/\s*([\d.]+)\s*mm/i);
+  if(radial){step=parseFloat(radial[1]);dia=parseFloat(radial[2]);from='G-code RADIAL ENGAGEMENT header';}
+  if(!isFinite(dia)){var ball=src.match(/TOOL COMPENSATION:\s*ball\s+radius\s*([\d.]+)\s*mm/i);if(ball){dia=parseFloat(ball[1])*2;from='G-code TOOL COMPENSATION header';}}
+  if(!isFinite(step)){var head=src.match(/~\s*([\d.]+)\s*mm stepover/i);if(head)step=parseFloat(head[1]);}
+  var name=cncStageToolName(stage,job);
+  // The certified Kiri:Moto programs carry no comments at all, so for those the
+  // certificate tool name is the only available source.
+  if(!isFinite(dia)&&name){dia=cncBitRadius({bit:name})*2;from='certified tool '+name;}
+  if(!isFinite(step)&&name)step=cncBitStepover({bit:name});
+  if(!isFinite(dia)||!(dia>0))return {known:false,diameterMm:0,stepoverMm:isFinite(step)?step:0,tool:name,source:'tool diameter unavailable'};
+  return {known:true,diameterMm:dia,stepoverMm:isFinite(step)?step:0,tool:name,source:from};
+}
 function cncRenderToolpath(text,requestedStage){
   var prev=document.getElementById('cncGcodePrev'), meta=document.getElementById('cncGcodeMeta'); if(!prev) return;
   if(!text){ prev.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(meta) meta.textContent=''; return; }
-  var lines=text.split(/\r?\n/), x=0,y=0,z=0,g=0,haveX=false,haveY=false,segs=[], samples={}, minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9,minz=1e9,maxz=-1e9,nc=0,nr=0;
+  var lines=text.split(/\r?\n/), x=0,y=0,z=0,g=0,haveX=false,haveY=false,segs=[], samples={}, minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9,minz=1e9,maxz=-1e9,nc=0,nr=0,covered=-1;
   var hm=(text.match(/stage\s+(rough|cleanup|finish|detail|profile|release|all)/i)||[])[1],stage=String(requestedStage||hm||'all').toLowerCase();
   function upd(px,py){ if(px<minx)minx=px; if(px>maxx)maxx=px; if(py<miny)miny=py; if(py>maxy)maxy=py; }
   for(var i=0;i<lines.length;i++){
@@ -2078,25 +2132,50 @@ function cncRenderToolpath(text,requestedStage){
   if(!isFinite(minx)){ prev.innerHTML='<span class="muted">No X/Y moves found</span>'; if(meta) meta.textContent=''; return; }
   var pts=Object.keys(samples).map(function(k){return samples[k];}),w=(maxx-minx)||1,h=(maxy-miny)||1,W=520,H=Math.max(180,Math.round(W*h/w)),pad=12,sc=Math.min((W-2*pad)/w,(H-2*pad)/h),ox=pad-minx*sc,oy=pad-miny*sc;
   var c=document.createElement('canvas');c.width=W;c.height=H;var ctx=c.getContext('2d');ctx.fillStyle='#0b1220';ctx.fillRect(0,0,W,H);
-  var xs={},ys={};pts.forEach(function(p){xs[p[0].toFixed(3)]=p[0];ys[p[1].toFixed(3)]=p[1];});var xv=Object.keys(xs).map(function(k){return xs[k];}).sort(function(a,b){return a-b;}),yv=Object.keys(ys).map(function(k){return ys[k];}).sort(function(a,b){return a-b;});
-  function gap(a){var d=1e9;for(var q=1;q<a.length;q++){var v=a[q]-a[q-1];if(v>.0001&&v<d)d=v;}return isFinite(d)?d:1;}
-  var cellW=Math.max(1,gap(xv)*sc+1),cellH=Math.max(1,gap(yv)*sc+1),deep=Math.max(.001,-minz);
-  function depthColor(zz){var d=Math.max(0,-zz),r=d/deep;if(d<.002)return '#27d3e2';if(r<.4)return '#f2b632';if(r<.75)return '#f28c28';return '#ef405c';}
+  var deep=Math.max(.001,-minz),foot=cncToolFootprint(text,stage,cncCurrentJob());
+  function depthColor(zz){return CNC_DEPTH_HEX[cncDepthBand(zz,deep)];}
   if(stage==='profile'||stage==='release'||stage==='detail'){
     ctx.lineWidth=stage==='detail'?1.35:2;ctx.lineJoin='round';ctx.lineCap='round';var started=false,lastRapid=true;
     segs.forEach(function(s){if(!s[4]||s[5]>0){lastRapid=true;return;}ctx.strokeStyle=depthColor(s[5]);ctx.beginPath();ctx.moveTo(s[0]*sc+ox,H-(s[1]*sc+oy));ctx.lineTo(s[2]*sc+ox,H-(s[3]*sc+oy));ctx.stroke();lastRapid=false;started=true;});
     if(!started){ctx.fillStyle='#94a3b8';ctx.fillText('No profile cuts found',18,28);}
+  }else if(foot.known&&foot.diameterMm*sc>1.5){
+    // Dilate the sampled toolpath by the cutter radius. Collapse samples to
+    // canvas cells first (the certified rough stage is ~157k samples on ~40k
+    // distinct cells), keeping the DEEPEST Z per cell, then stamp one disc per
+    // cell. Deepest-wins on overlap, so paint order cannot mislabel depth the
+    // way sequential fillRect calls would.
+    var R=foot.diameterMm*sc/2,rad=Math.ceil(R),seedZ=new Float32Array(W*H),seen=new Uint8Array(W*H),q;
+    pts.forEach(function(p){var cx=Math.round(p[0]*sc+ox),cy=Math.round(H-(p[1]*sc+oy));if(cx<0||cy<0||cx>=W||cy>=H)return;var k=cy*W+cx;if(!seen[k]||p[2]<seedZ[k]){seen[k]=1;seedZ[k]=p[2];}});
+    var outZ=new Float32Array(W*H),hit=new Uint8Array(W*H),spans=[];
+    for(q=-rad;q<=rad;q++)spans.push([q,Math.floor(Math.sqrt(Math.max(0,R*R-q*q)))]);
+    for(var k0=0;k0<W*H;k0++){ if(!seen[k0]) continue; var cy0=(k0/W)|0,cx0=k0-cy0*W,zz=seedZ[k0];
+      for(var s=0;s<spans.length;s++){ var yy=cy0+spans[s][0]; if(yy<0||yy>=H) continue;
+        var x0=cx0-spans[s][1],x1=cx0+spans[s][1]; if(x0<0)x0=0; if(x1>W-1)x1=W-1; var row=yy*W;
+        for(var xx=x0;xx<=x1;xx++){ var j=row+xx; if(!hit[j]||zz<outZ[j]){hit[j]=1;outZ[j]=zz;} } } }
+    var im0=ctx.getImageData(0,0,W,H),d0=im0.data;covered=0;
+    for(q=0;q<W*H;q++){ if(!hit[q]) continue; covered++; var col=CNC_DEPTH_RGB[cncDepthBand(outZ[q],deep)];
+      d0[q*4]=col[0];d0[q*4+1]=col[1];d0[q*4+2]=col[2];d0[q*4+3]=255; }
+    ctx.putImageData(im0,0,0);
   }else{
-    pts.forEach(function(p){ctx.fillStyle=depthColor(p[2]);ctx.fillRect(p[0]*sc+ox-cellW/2,H-(p[1]*sc+oy)-cellH/2,cellW,cellH);});
+    // Tool diameter could not be resolved. Draw plain sample points and label
+    // them as such in the caption instead of inventing a footprint.
+    pts.forEach(function(p){ctx.fillStyle=depthColor(p[2]);ctx.fillRect(p[0]*sc+ox-1,H-(p[1]*sc+oy)-1,2,2);});
   }
   var title=stage==='rough'?'Roughing removes broad depth regions; the W01015 stages complete the relief.':stage==='cleanup'?'Cleanup progressively clears narrow valleys with the W01015 before the final contour pass.':stage==='finish'?'Finish shows the complete full-artwork relief cut in both X and Y by the W01015, including lettering, rope, scrolls, figures, fields, and corn texture.':stage==='detail'?'Detail shows the exact recessed contours for lettering, rope, scrolls, figures, fields, and corn texture.':stage==='profile'?'Profile cuts the complete outer silhouette while retaining a continuous 0.204 mm holding skin.':stage==='release'?'Release removes only the continuous holding skin after the buckle is independently secured.':'This is the commanded relief.';
-  prev.style.display='block';prev.innerHTML='';var im=document.createElement('img');im.src=c.toDataURL('image/png');im.alt=cncStageLabel(stage)+' G-code depth preview';im.style.cssText='display:block;margin:0 auto;max-width:100%;max-height:300px;object-fit:contain;border-radius:6px;image-rendering:auto';prev.appendChild(im);var note=document.createElement('div');note.className='muted';note.style.cssText='font-size:11px;margin-top:5px';note.textContent=title+' Colors are actual commanded depth: cyan surface, gold shallow, orange medium, red deepest.';prev.appendChild(note);
+  prev.style.display='block';prev.innerHTML='';var im=document.createElement('img');im.src=c.toDataURL('image/png');im.alt=cncStageLabel(stage)+' G-code depth preview';im.style.cssText='display:block;margin:0 auto;max-width:100%;max-height:300px;object-fit:contain;border-radius:6px;image-rendering:auto';prev.appendChild(im);var note=document.createElement('div');note.className='muted';note.style.cssText='font-size:11px;margin-top:5px';
+  // Black has to mean one thing. It is the absence of removal by THIS stage, and
+  // that has three legitimate causes, all of which the operator must be able to
+  // tell apart from "cut at the surface" (cyan).
+  var legend=foot.known&&foot.diameterMm*sc>1.5
+    ? ('Coloured area is the swept footprint of the '+foot.diameterMm.toFixed(2)+' mm cutter'+(foot.stepoverMm>0?(' at '+foot.stepoverMm.toFixed(2)+' mm stepover'):'')+', not sample points. Commanded depth: cyan is cut at the surface, gold shallow, orange medium, red deepest. BLACK MEANS THIS STAGE REMOVES NO MATERIAL THERE — the relief is already shallower than this stage cuts, or the move was a G0 rapid, which is never drawn. Black is not "cut at surface"; cyan is.')
+    : ('Tool diameter could not be resolved ('+foot.source+'), so this draws sample points rather than the swept cutter footprint and understates coverage. Commanded depth: cyan is cut at the surface, gold shallow, orange medium, red deepest. BLACK MEANS THIS STAGE REMOVES NO MATERIAL THERE, not "cut at surface".');
+  note.textContent=title+' '+legend;prev.appendChild(note);
   var mach=cncMach(),mapW=520,mapH=Math.max(150,Math.round(mapW*mach.Y/mach.X)),mp=18,ms=Math.min((mapW-2*mp)/mach.X,(mapH-2*mp)/mach.Y),stockW=mach.X*ms,stockH=mach.Y*ms;
   var pc=document.createElement('canvas');pc.width=mapW;pc.height=mapH;var pctx=pc.getContext('2d');pctx.fillStyle='#0b1220';pctx.fillRect(0,0,mapW,mapH);pctx.fillStyle='rgba(148,163,184,.08)';pctx.fillRect(mp,mapH-mp-stockH,stockW,stockH);pctx.strokeStyle='#94a3b8';pctx.lineWidth=1.5;pctx.strokeRect(mp,mapH-mp-stockH,stockW,stockH);
   if(mach.M>0){pctx.setLineDash([5,4]);pctx.strokeStyle='rgba(255,207,121,.65)';pctx.strokeRect(mp,mapH-mp-(mach.Y-mach.M)*ms,(mach.X-mach.M)*ms,(mach.Y-mach.M)*ms);pctx.setLineDash([]);}
   var bx=mp+minx*ms,by=mapH-mp-maxy*ms,bw=(maxx-minx)*ms,bh=(maxy-miny)*ms;pctx.fillStyle='rgba(39,211,226,.24)';pctx.fillRect(bx,by,bw,bh);pctx.strokeStyle='#27d3e2';pctx.lineWidth=2;pctx.strokeRect(bx,by,bw,bh);pctx.fillStyle='#fff';pctx.font='12px system-ui';pctx.fillText('X+',mapW-28,mapH-5);pctx.fillText('Y+',3,15);pctx.fillStyle='#27d3e2';pctx.beginPath();pctx.arc(mp+minx*ms,mapH-mp-miny*ms,4,0,Math.PI*2);pctx.fill();
   var ptitle=document.createElement('div');ptitle.style.cssText='font-size:11px;font-weight:700;margin-top:10px';ptitle.textContent='FULL-STOCK PLACEMENT · '+mach.X.toFixed(1)+' × '+mach.Y.toFixed(1)+' mm';prev.appendChild(ptitle);pc.style.cssText='width:100%;max-width:520px;height:auto;margin-top:5px;border-radius:6px';pc.setAttribute('aria-label','Full stock placement map showing the exact G-code bounds');prev.appendChild(pc);var pnote=document.createElement('div');pnote.className='muted';pnote.style.cssText='font-size:11px;margin-top:5px';pnote.textContent='Exact motion bounds: X '+minx.toFixed(3)+'–'+maxx.toFixed(3)+' mm; Y '+miny.toFixed(3)+'–'+maxy.toFixed(3)+' mm. Cyan rectangle is the carved area in the preserved stock frame; dot is its front-left corner.';prev.appendChild(pnote);
-  if(meta) meta.textContent=cncStageLabel(stage)+' · exact G-code depth · '+nc+' cut moves · '+w.toFixed(1)+'×'+h.toFixed(1)+' mm · '+(isFinite(minz)?Math.abs(minz).toFixed(3):'0')+' mm deepest';
+  if(meta) meta.textContent=cncStageLabel(stage)+' · exact G-code depth · '+nc+' cut moves · '+w.toFixed(1)+'×'+h.toFixed(1)+' mm · '+(isFinite(minz)?Math.abs(minz).toFixed(3):'0')+' mm deepest'+(covered>=0?(' · '+foot.diameterMm.toFixed(2)+' mm cutter clears '+(covered*100/(W*H)).toFixed(0)+'% of the preview frame'):'')+' · '+nr+' rapids not drawn';
 }
 function cncStageLabel(s){return s==='all'?'Relief':s==='cleanup'?'W01015 Cleanup':s.charAt(0).toUpperCase()+s.slice(1);}
 function cncRenderStages(job){var el=document.getElementById('cncGeneratedStages');if(!el)return;var stages=[],tools={},certs={};try{stages=JSON.parse(job&&job.gcodeStages||'[]');tools=JSON.parse(job&&job.planTools||'{}');certs=JSON.parse(job&&job.camCertificates||'{}');}catch(e){}if(!stages.length){el.innerHTML='';return;}el.innerHTML='<div class="muted" style="font-size:10.5px;margin-top:7px">'+(job.cutAuditHold?'KIRI:MOTO STAGES · CUTTING APPROVAL WITHDRAWN':'CERTIFIED KIRI:MOTO STAGES · MANUAL ROUTER')+'</div>'+stages.map(function(s,i){var active=job.activeStage===s,rough=(s==='rough'||s==='profile'||s==='release'),detail=s==='detail',tool=(certs[s]&&certs[s].tool)||(detail?tools.detailBit:(rough?tools.roughBit:tools.finishBit)),rpm=detail?tools.detailRpm:(rough?tools.roughRpm:tools.finishRpm),note=s==='rough'?'run first':(s==='cleanup'?'change to W01015 + touch off on stock':(s==='finish'?'reuse W01015; no new touch-off if unchanged':(detail?'change to V-bit + touch off on stock':(s==='profile'?'change to RU2100 + touch off on stock':'run last · reuse RU2100 · independently secure buckle to sacrificial backing')))),rpmNote=rpm?('set '+Math.round(rpm)+' RPM'+(Math.round(rpm)===18000?' / gear 4':'')):'use the certified Kiri:Moto spindle setting';return '<div class="cnc-stage"><b>'+cncStageLabel(s)+'</b><span>'+cncEsc(tool||'selected bit')+'</span><span class="muted">'+(job.cutAuditHold?'Under audit · review only · do not run':note+' · '+rpmNote+' · turn router on manually')+'</span><span style="margin-left:auto;display:flex;gap:6px;align-items:center"><button class="ghost" onclick="cncPreviewStage(\''+s+'\',this)">Preview</button>'+(active?'<span style="color:#7ee0ac">Loaded</span>':'<button class="ghost" onclick="cncActivateStage(\''+s+'\',this)">Load stage</button>')+'</span></div>';}).join('')+'<div class="cnc-plan-warning" style="margin-top:7px">Stages are sequential: Rough → Cleanup → Finish → Profile → Release. Project cannot start or stop the Genmitsu 710W AC router. Switch it off manually after completion or any Stop.</div>';}
@@ -2525,7 +2604,10 @@ async function cncStart(button){ var job=cncCurrentJob(); if(!job){ alert('Pick 
   return cncQueueMachineAction('start',{},button);
 }
 async function cncMachineAction(action,extra,button){ return cncQueueMachineAction(action,extra||{},button); }
-async function cncResume(button){var job=cncCurrentJob(),h=(CNC.agent&&CNC.agent.health)||{},state=String(job&&job.agentState||''),point=h.resume||{};if(state==='paused')return cncMachineAction('resume',{},button);if(String(point.state||'')!=='interrupted'||!(Number(point.lastCompletedLine)>0)){alert('No interrupted carve checkpoint is available.');return;}var moved=Number(point.postStopMoveCount)||0,moveNote=moved?('\n\nProject recorded '+moved+' positioning/probe update'+(moved===1?'':'s')+' after Stop. Resume will first move Z vertically to safe clearance, reposition in X/Y, and replay only the interrupted detail segment.'):'\n\nProject will first move Z vertically to safe clearance, reposition in X/Y if needed, and replay only the interrupted detail segment.';if(!confirm('Resume the saved carve after line '+Number(point.lastCompletedLine).toLocaleString()+'?'+moveNote+'\n\nIt will not restart from line 1. Keep the external router ON and the path clear.'))return;return cncMachineAction('resume_saved',{confirm:true,allowReposition:true},button);}
+async function cncResume(button){var job=cncCurrentJob(),h=(CNC.agent&&CNC.agent.health)||{},state=String(job&&job.agentState||''),point=h.resume||{};if(state==='paused')return cncMachineAction('resume',{},button);if(String(point.state||'')!=='interrupted'||!(Number(point.lastCompletedLine)>0)){alert('No interrupted carve checkpoint is available.');return;}
+  // Honour the daemon's verdict here too. Fail closed on a missing field so this
+  // can never offer a resume the daemon would refuse.
+  if(point.resumable!==true){alert(String(point.blockedReason||'This interrupted checkpoint cannot be resumed.')+'\n\nSet up X/Y and Z again and restart the stage from line 1.');return;}var moved=Number(point.postStopMoveCount)||0,moveNote=moved?('\n\nProject recorded '+moved+' positioning/probe update'+(moved===1?'':'s')+' after Stop. Resume will first move Z vertically to safe clearance, reposition in X/Y, and replay only the interrupted detail segment.'):'\n\nProject will first move Z vertically to safe clearance, reposition in X/Y if needed, and replay only the interrupted detail segment.';if(!confirm('Resume the saved carve after line '+Number(point.lastCompletedLine).toLocaleString()+'?'+moveNote+'\n\nIt will not restart from line 1. Keep the external router ON and the path clear.'))return;return cncMachineAction('resume_saved',{confirm:true,allowReposition:true},button);}
 async function cncRecoverController(button){var invalid=(((CNC.agent||{}).health)||{}).frameValid===false;var text=invalid?'Unlock the stopped controller alarm?\n\nSwitch the external router OFF and clear the obstruction. Project sends only the alarm unlock, verifies Idle and compares saved coordinates. It will not release a held program, reset coordinates or move an axis.':'Enable manual positioning?\n\nGRBL is paused with commanded feed and spindle already at zero. Project will verify the stopped state and saved origins. No axis move is requested.';if(!confirm(text))return;return cncMachineAction('recover_controller',{confirm:true},button);}
 async function cncRecoverRearYLimit(button){if(!confirm('Release the rear Y limit?\n\nProject will move only Y inward by exactly 5 mm at 100 mm/min, verify the rear switch clears, preserve the saved X/Y zero, and restore hard-limit protection. X and Z will not move. Keep hands clear.'))return;return cncMachineAction('recover_rear_y_limit',{confirm:true},button);}
 async function cncRestoreSavedXy(button){var h=(CNC.agent&&CNC.agent.health)||{},r=h.xyRecovery||{},p=r.savedWorkPosition||{};if(!r.available){alert('Exact saved X/Y recovery is not available.');return;}if(!confirm('Restore the original stock X/Y after this power cycle?\n\nSaved pre-shutdown work position: X '+Number(p.X).toFixed(3)+' mm, Y '+Number(p.Y).toFixed(3)+' mm.\n\nThis changes only the coordinate frame and does not move an axis. Continue only if the gantry was NOT pushed or moved while controller power was off.'))return;return cncMachineAction('restore_xy',{confirmGantryUnmoved:true},button);}

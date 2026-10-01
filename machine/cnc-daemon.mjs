@@ -428,10 +428,63 @@ const surfaceProofSnapshot = () => {
     proof: surfaceProof ? { ...surfaceProof } : null,
   };
 };
+// WHY RESUMABILITY IS DECIDED HERE AND NOT IN THE UI:
+// /health used to publish the raw checkpoint, so any client that saw
+// state === "interrupted" rendered a resume affordance. The checkpoint left by
+// the 2026-09-30 stop (job cnc_mun692ol2mq, line 1676 of 173218) belongs to the
+// certified metal rough stage that ran against a 20 mm plate figure against a
+// ~14.19 mm plate, so every commanded depth was about 5.8 mm too deep. Resuming
+// it would repeat the damage at the exact depth that caused it.
+//
+// resumeSavedProgram already refuses that program, but a button that always
+// fails is still wrong: it tells the operator a recovery path exists. Decide it
+// once, server-side, fail closed, and state the reason — the UI then has no
+// judgement left to get wrong.
+const resumeSnapshot = () => {
+  if (!activeRunCheckpoint) return null;
+  const base = { ...activeRunCheckpoint, resumable: false, blockedReason: "", requiresFreshSetup: false };
+  const refuse = (blockedReason, requiresFreshSetup = false) => ({ ...base, blockedReason, requiresFreshSetup });
+
+  // A latched frame incident means the machine coordinate frame the checkpoint
+  // was recorded in is no longer established. Nothing may be offered but setup.
+  if (frameIncident?.latched) {
+    return refuse(`The coordinate frame was invalidated by ${frameIncident.reason}. This checkpoint cannot be resumed; set up X/Y and Z again and restart the stage from line 1.`, true);
+  }
+  if (String(activeRunCheckpoint.state || "") !== "interrupted" || !(Number(activeRunCheckpoint.lastCompletedLine) > 0)) {
+    return refuse("No interrupted checkpoint is available to resume.");
+  }
+
+  let saved = null;
+  try { saved = readProgram(PROGRAM_STATE_PATH); } catch { /* treated as absent below */ }
+  if (!saved) return refuse("The program this checkpoint belongs to is no longer stored.", true);
+  if (saved.capturedAt !== activeRunCheckpoint.programCapturedAt) {
+    return refuse("This checkpoint belongs to a different program than the one now stored.", true);
+  }
+
+  const context = saved.context || {};
+  if (/C752 nickel silver/i.test(String(context.material || ""))) {
+    return refuse("Resume is permanently disabled for metal. Restart the certified Kiri:Moto stage from line 1 after deliberate X/Y and Z recovery.", true);
+  }
+  const hold = programHolds.programAuditHold({ camSourceHash: context.camSourceHash, certifiedLibraryId: context.certifiedLibraryId });
+  if (hold) return refuse(hold, true);
+  if (!context.manualRouter) return refuse("Automatic resume is limited to manual-router stages.");
+
+  // The depth error that caused the incident was a plate-thickness error, so a
+  // resume is only ever offered against a confirmed plate and a calibration
+  // captured with that same plate.
+  if (!plateConfig.confirmed) {
+    return refuse(`The Z-probe plate thickness has never been confirmed (using the ${configuredPlateMm().toFixed(2)} mm default). Measure and save your plate, then re-probe.`, true);
+  }
+  if (!setup.probeLocked) return refuse("No locked Z calibration is available. Re-probe and lock before any resume.", true);
+  if (!plateThicknessMatches(setup.probeThickness, configuredPlateMm())) {
+    return refuse(`The locked calibration used a ${Number(setup.probeThickness).toFixed(2)} mm plate but ${configuredPlateMm().toFixed(2)} mm is configured. Re-probe instead of resuming.`, true);
+  }
+  return { ...base, resumable: true };
+};
 const health = () => {
   autoVerifyStoppedFrame();
   if (!controller.connected && !hazardousOperationActive() && !frameIncident?.latched) void recoverIdleConnection();
-  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null };
+  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: resumeSnapshot() };
 };
 const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (new Set(["Door:0", "Hold:0"]).has(status.state)) throw new Error(`Controller positioning is paused in ${status.state}. The external router may be removed; use Enable positioning first.`); if (status.state !== "Idle") throw new Error(`Controller must report Idle before positioning, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`); return status; };
@@ -774,10 +827,15 @@ const resumeSavedProgram = async (payload) => {
   assertFrameValid(frameIncident);
   if (payload.confirm !== true) throw new Error("Explicit resume confirmation is required");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
+  // Enforce exactly what /health advertises, through the same function, so the
+  // button and the endpoint can never disagree about whether resume is allowed.
+  // resumeSnapshot covers metal, audit holds, manual-router, program identity,
+  // plate confirmation and plate/calibration agreement, and fails closed.
+  const offer = resumeSnapshot();
+  if (!offer) throw new Error("No interrupted carve checkpoint is available");
+  if (!offer.resumable) throw new Error(offer.blockedReason);
   const saved = readProgram(PROGRAM_STATE_PATH);
   if (!saved) throw new Error("No locally saved carve is available");
-  if (/C752 nickel silver/i.test(String(saved.context.material || ""))) throw new Error("Saved-program resume is disabled for metal; restart the certified Kiri:Moto operation from line 1 after deliberate X/Y and Z recovery");
-  if (!saved.context.manualRouter) throw new Error("Automatic resume is currently limited to manual-router stages");
   const completedLine = Number(payload.completedLine ?? (activeRunCheckpoint?.programCapturedAt === saved.capturedAt ? activeRunCheckpoint.lastCompletedLine : NaN));
   const traced = programPositionAtLine(saved.gcode, completedLine, { spindleMode: "manual" });
   const status = await assertIdle(), machine = coordinates(status);
@@ -830,7 +888,7 @@ const stopProgram = async () => {
   Object.assign(job, { state: "stopped", message: "Stopped", updatedAt: new Date().toISOString() });
   captureInterruptedPosition(lastControllerStatus, "project_stop", { initial: true });
   recordEvent("program.stopped", { jobId: job.jobId, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine });
-  return { ok: true, job: { ...job }, resume: activeRunCheckpoint ? { ...activeRunCheckpoint } : null, recovery };
+  return { ok: true, job: { ...job }, resume: resumeSnapshot(), recovery };
 };
 const recoverStoppedController = async (payload) => {
   assertSetupFrame();
