@@ -13,8 +13,7 @@ import { join } from "node:path";
 import { MACHINE } from "./machine-library.mjs";
 import { assertClearanceAboveStock } from "./program.mjs";
 import { compareSurfaces, sweepFinish } from "./fidelity.mjs";
-import { ReliefModel, offsetPolygon, pointInPolygon, polygonAreaMm2, polygonPerimeterMm } from "./relief-model.mjs";
-import { depthField, discDilate, discErode } from "./morphology.mjs";
+import { ReliefModel, offsetPolygon, pointInPolygon, polygonAreaMm2, polygonPerimeterMm, sweepProgram } from "./relief-model.mjs";
 import { generateFinish, generateProfile, generateRelease, generateRough } from "./stages.mjs";
 import { assertNoFullImmersionSlotting, findHoldingTabs, validateProgram } from "./validate.mjs";
 
@@ -62,14 +61,17 @@ export function generateJob(job = DEFAULT_JOB, modelDir) {
 
   const rough = generateRough(context);
 
-  // Surface the roughing pass leaves behind, fed into Finish so its layers are
-  // measured against real remaining material rather than against virgin stock.
-  const radiusCells = Math.round(rough.tool.diameterMm / 2 / relief.gridMm);
-  const eroded = discErode(depthField(relief), relief.cols, relief.rows, radiusCells);
-  const opened = discDilate(eroded, relief.cols, relief.rows, radiusCells);
-  const roughedSurface = new Float32Array(opened.length);
-  for (let i = 0; i < opened.length; i += 1) {
-    roughedSurface[i] = Math.min(relief.depthUm[i] / 1000, Math.max(0, opened[i] - job.stockToLeaveMm));
+  // Surface the roughing pass actually leaves behind, obtained by sweeping the
+  // program that was just emitted. Using the theoretical reachable surface
+  // instead would tell Finish that more had been removed than really was, and
+  // its first bulk layer would then exceed its own axial limit wherever Rough
+  // fell short of theory -- which on this relief is most of it.
+  const roughSwept = new ReliefModel(
+    sweepProgram(rough.code, rough.tool, relief.bounds, { gridMm: relief.gridMm, maxDepthMm: 1.0 }),
+  );
+  const roughedSurface = new Float32Array(relief.cols * relief.rows);
+  for (let i = 0; i < roughedSurface.length; i += 1) {
+    roughedSurface[i] = Math.min(relief.depthUm[i] / 1000, roughSwept.depthUm[i] / 1000);
   }
 
   const finish = generateFinish({ ...context, roughedSurface });

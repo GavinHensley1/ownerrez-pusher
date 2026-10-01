@@ -108,9 +108,6 @@ export function generateRough(context) {
       `a ${toolSpec.diameterMm} mm flat cutter can only reach ${maxCentre.toFixed(3)} mm into this relief, which leaves ${maxRough.toFixed(3)} mm after the ${stockToLeaveMm} mm finish allowance. Roughing would remove nothing.`,
     );
   }
-  const levels = Math.ceil(maxRough / axial);
-  const levelDepth = maxRough / levels;
-
   const builder = new ProgramBuilder({
     stage: "rough",
     plateThicknessMm: plate.thicknessMm,
@@ -120,40 +117,49 @@ export function generateRough(context) {
   });
   builder.comment(`ROUGH ${toolSpec.name}`);
   builder.comment(`manual router gear ${cut.gear} approx ${cut.rpmNominal} rpm - set it by hand`);
-  builder.comment(`${levels} levels x ${levelDepth.toFixed(3)} mm, ${stepover} mm stepover, leaving ${stockToLeaveMm} mm`);
+  builder.comment(`3D offset, <=${axial} mm per layer, ${stepover} mm stepover, leaving ${stockToLeaveMm} mm`);
+
+  // A terraced Z-level rough throws away everything shallower than one level,
+  // which on a relief this fine is nearly all of it: levelled roughing removed
+  // 1.5% of the relief where the tool can actually reach 25%. So follow the
+  // reachable surface itself, in layers bounded by the axial limit.
+  //
+  // The erosion is eroded once more by a cell so a nearest-cell lookup stays
+  // valid anywhere inside that cell; a cell of conservatism is immaterial
+  // against a 0.12 mm finish allowance.
+  const safeCentre = discErode(centreDepth, model.cols, model.rows, 1);
+  const target = new Float32Array(model.cols * model.rows);
+  for (let i = 0; i < target.length; i += 1) {
+    target[i] = inside[i] ? Math.max(0, safeCentre[i] - stockToLeaveMm) : 0;
+  }
 
   let cuttingLines = 0;
-  for (let level = 1; level <= levels; level += 1) {
-    const z = -level * levelDepth;
+  let layers = 0;
+  const surface = new Float32Array(model.cols * model.rows);
+  for (let layer = 1; ; layer += 1) {
+    let anyWork = false;
+    for (let i = 0; i < target.length; i += 1) {
+      if (target[i] - surface[i] > 1e-4) {
+        anyWork = true;
+        break;
+      }
+    }
+    if (!anyWork) break;
+    if (layer > 30) throw new UnmachinableStageError("rough", "layering did not converge");
+
     const mask = new Uint8Array(model.cols * model.rows);
     for (let i = 0; i < mask.length; i += 1) {
-      if (inside[i] && centreDepth[i] - stockToLeaveMm >= -z - 1e-9) mask[i] = 1;
+      if (target[i] - surface[i] > 1e-4) mask[i] = 1;
     }
-    const runs = rasterRuns(model, mask, stepover, model.bounds.minY, model.bounds.maxY);
-    for (const run of runs) {
-      const length = Math.abs(run.x1 - run.x0);
-      // A run shorter than the tool radius cannot be entered by ramping and is
-      // left for the finish tool, which reaches it anyway.
-      if (length < radius) continue;
-      const direction = Math.sign(run.x1 - run.x0) || 1;
-      const rampLength = Math.min(length, 6);
-      builder.retract();
-      builder.travelTo(run.x0, run.y);
-      builder.approach(0.2);
-      // rampTo zig-zags as many passes as the angle limit needs, so short runs
-      // are entered safely instead of being skipped.
-      builder.rampTo(
-        [
-          { x: run.x0, y: run.y },
-          { x: run.x0 + direction * rampLength, y: run.y },
-        ],
-        z,
-        entryFeed,
-        { maxAngleDeg: 12, maxDropPerPassMm: levelDepth },
-      );
-      builder.cutTo(run.x1, run.y, z, cut.feedMmPerMin);
-      cuttingLines += 3;
+    const limitAt = (x, y) => {
+      const cell = model.rowOf(y) * model.cols + model.colOf(x);
+      return -Math.min(target[cell] ?? 0, (surface[cell] ?? 0) + axial);
+    };
+    cuttingLines += emitRaster(builder, model, mask, limitAt, stepover, cut, entryFeed, 0.01);
+    for (let i = 0; i < surface.length; i += 1) {
+      if (mask[i]) surface[i] = Math.min(target[i], surface[i] + axial);
     }
+    layers = layer;
   }
 
   const code = builder.finish();
@@ -165,8 +171,8 @@ export function generateRough(context) {
     tool: toolSpec,
     code,
     cuts: [cut],
-    levels,
-    levelDepthMm: levelDepth,
+    levels: layers,
+    levelDepthMm: axial,
     stockToLeaveMm,
     metrics: { ...metrics, deliverableFeedMmPerMin: deliverable },
   };
