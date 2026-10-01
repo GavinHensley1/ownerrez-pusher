@@ -123,6 +123,14 @@ const PROBE_LOCK_TOLERANCE_MM = 0.05;
 // material profile -- had NO bound at all and would happily reuse a days-old
 // thickness.
 const SAVED_MEASUREMENT_MAX_AGE_MS = 4 * 60 * 60 * 1000;
+// How far a MANUAL stock Z zero may disagree with the measured bed before it is
+// refused. A hand touch-off on paper or feel is worth a few tenths, not
+// millimetres, and anything larger means the operator is not where they think
+// they are. Deliberately generous enough for a legitimate manual touch-off and
+// far tighter than the ~6 mm error that caused the 2026-09-30 damage. A manual
+// zero also clears the surface-contact proof, so Start still demands a fresh
+// plate-free measurement afterwards.
+const MANUAL_Z_ZERO_TOLERANCE_MM = 0.5;
 let movingSince = 0, movingReason = "";
 const setMoving = (active, reason = "") => {
   moving = active === true;
@@ -759,10 +767,36 @@ const setStockZZero = async (payload) => {
   if (!setup.probeLocked || !setup.stockProbeReady || !Number.isFinite(setup.stockThicknessMm)) throw new Error("Lock a measured stock calibration before setting physical stock Z zero");
   await motionGuard();
   const before = await assertIdle(), position = coordinates(before), stockThicknessMm = Number(setup.stockThicknessMm);
+
+  // BOUND THE NEW ZERO AGAINST SOMETHING THAT DID NOT MOVE.
+  // This redefines absolute Z0 from wherever the operator has jogged to, and it
+  // previously accepted ANY position: every derived number (bed surface,
+  // protected floor, maximum cut depth) was then rebuilt around it. The only
+  // check was `Math.abs(workOffset.Z - position.Z) > 0.05` AFTER calling
+  // setWorkOffset({z: 0}), which is tautological -- that call defines G54 Z as
+  // the current machine Z, so the two agree by construction and the comparison
+  // can only fail if the controller malfunctioned. It proved nothing about
+  // whether the position is anywhere near the real stock surface.
+  //
+  // The bed is a genuine independent measurement and it does not move when a bit
+  // is changed or the stock is re-seated. So the thickness implied by the new
+  // zero must agree with the measured stock thickness. That is a real invariant.
+  const priorBedMPos = Number(setup.bedSurfaceMPos);
+  if (!Number.isFinite(priorBedMPos)) throw new Error("No measured bed reference is available to bound a manual stock Z zero against; re-probe the bed and stock instead");
+  const impliedThicknessMm = position.Z - priorBedMPos;
+  if (impliedThicknessMm <= 0) {
+    throw new Error(`This position is ${Math.abs(impliedThicknessMm).toFixed(3)} mm at or below the measured bed at machine Z ${priorBedMPos.toFixed(3)}. It cannot be the top of the stock.`);
+  }
+  if (Math.abs(impliedThicknessMm - stockThicknessMm) > MANUAL_Z_ZERO_TOLERANCE_MM) {
+    throw new Error(`A stock top here implies a ${impliedThicknessMm.toFixed(3)} mm blank, but the measured thickness is ${stockThicknessMm.toFixed(3)} mm. That is a ${Math.abs(impliedThicknessMm - stockThicknessMm).toFixed(3)} mm disagreement against the measured bed, beyond the ${MANUAL_Z_ZERO_TOLERANCE_MM} mm manual allowance. Re-probe the bed and stock rather than redefining zero by hand.`);
+  }
+
   await controller.setWorkOffset({ z: 0 });
   const workOffset = parseWorkOffset(await controller.query("$#"));
   lastWorkOffset = workOffset;
-  if (Math.abs(workOffset.Z - position.Z) > 0.05) throw new Error(`Stock Z-zero verification failed: expected ${position.Z}, got ${workOffset.Z}`);
+  // Kept, but understood for what it is: proof the controller accepted the write,
+  // not proof the position is correct. The bound above is what does that.
+  if (Math.abs(workOffset.Z - position.Z) > PROBE_LOCK_TOLERANCE_MM) throw new Error(`The controller did not accept the stock Z zero: expected G54 Z ${position.Z}, got ${workOffset.Z}`);
   setup.stockSurfaceMPos = position.Z;
   setup.bedSurfaceMPos = position.Z - stockThicknessMm;
   setup.zOriginMPos = position.Z;

@@ -114,3 +114,45 @@ test("depth bands stay ordered so colour cannot mislabel depth", () => {
   assert.equal(harness.cncDepthBand(-0.5, 0.8), 2, "medium");
   assert.equal(harness.cncDepthBand(-0.8, 0.8), 3, "deepest");
 });
+
+// ENGAGEMENT, stated rather than implied.
+//
+// The primary reason Rough shows uncoloured regions is NOT a rendering fault: a
+// machinability audit measured it spending the overwhelming majority of its feed
+// time above Z0, cutting air, because stock-to-leave (~0.63 mm) nearly equals the
+// 0.79 mm relief depth. Without that number on screen the operator is left to
+// decide whether black means "not cut here" or "the preview is broken".
+test("the preview reports what share of each stage's feed time is actually in material", () => {
+  const { harness } = render("rough");
+  const meta = harness.elements.cncGcodeMeta.textContent;
+  const match = meta.match(/([\d.]+)% of feed time in material/);
+  assert.ok(match, `meta must state the engagement share, got: ${meta}`);
+  const inMaterial = Number(match[1]);
+  // Independently computed from the certified program: 11.3% in material,
+  // 88.7% above Z0, over a total feed time of 1.03 h, which reproduces the
+  // audit's 1.03 h exactly and corroborates its ~85% air figure. The audit and
+  // this differ slightly only in how a move exactly AT Z0 is counted; here a move
+  // must be strictly below the surface to count as cutting.
+  assert.ok(inMaterial > 5 && inMaterial < 20, `rough should be barely engaged, got ${inMaterial}%`);
+});
+
+test("a genuinely engaged stage reports a far higher share than rough", () => {
+  const roughMeta = render("rough").harness.elements.cncGcodeMeta.textContent;
+  const finishMeta = render("finish").harness.elements.cncGcodeMeta.textContent;
+  const share = (text) => Number((text.match(/([\d.]+)% of feed time in material/) || [])[1]);
+  const rough = share(roughMeta), finish = share(finishMeta);
+  assert.ok(Number.isFinite(rough) && Number.isFinite(finish), `both stages must report a share: ${rough} / ${finish}`);
+  // Finish is the stage doing the actual work -- the audit found it removing 90%
+  // of the relief. If these two ever report the same engagement, the measurement
+  // is not measuring anything.
+  assert.ok(finish > rough * 2, `finish (${finish}%) should be far more engaged than rough (${rough}%)`);
+});
+
+test("engagement is omitted rather than guessed when there is no feed rate", () => {
+  // No F word anywhere means no feed time can be computed. Saying nothing is
+  // correct; printing 0% or 100% would be inventing a number.
+  const harness = loadBrowserScript(new URL("index.html", root).pathname);
+  harness.setJob(job);
+  harness.cncRenderToolpath("G21\nG90\nG0 Z5\nG0 X0 Y0\nG1 Z-0.5\nG1 X10 Y0\nG0 Z5\n", "rough");
+  assert.doesNotMatch(harness.elements.cncGcodeMeta.textContent, /% of feed time in material/);
+});
