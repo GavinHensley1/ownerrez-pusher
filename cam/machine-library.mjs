@@ -35,10 +35,26 @@
 //
 // PHYSICAL FACT STILL WANTED: the printed per-detent RPM table on the router body
 // or in its paper manual. It would replace the modelled range with exact values.
+const STATED_RPM_MIN = 6500;
+const STATED_RPM_MAX = 30000;
 const GEAR_MODEL_A = [6500, 11200, 15900, 20600, 25300, 30000];
 const GEAR_MODEL_B = [6000, 10000, 14000, 18000, 22000, 26000];
 
+// THE ENDPOINTS ARE NOT MODELLED. On a six-detent dial whose range the
+// manufacturer states as 6,500-30,000 RPM, detent 1 IS 6,500 and detent 6 IS
+// 30,000. Model B reaches those endpoints by extrapolating backwards from two
+// mid-range values recorded in use, and it lands at 6,000 and 26,000 -- 6,000 is
+// below the speed the manufacturer says this router can produce, so it is an
+// artefact of the extrapolation, not a speed the machine has. Carrying it
+// forward would hand a cutter 500 RPM of headroom that does not exist, which on
+// the largest cutter is the difference between legal and illegal. Only the four
+// interior detents are genuinely uncertain.
 const GEARS = GEAR_MODEL_A.map((a, index) => {
+  const interior = index > 0 && index < GEAR_MODEL_A.length - 1;
+  if (!interior) {
+    const stated = index === 0 ? STATED_RPM_MIN : STATED_RPM_MAX;
+    return Object.freeze({ gear: index + 1, rpmMin: stated, rpmMax: stated, rpmNominal: stated, modelled: false });
+  }
   const b = GEAR_MODEL_B[index];
   return Object.freeze({
     gear: index + 1,
@@ -53,8 +69,8 @@ export const ROUTER = Object.freeze({
   id: "genmitsu-gm7100e-710w",
   name: "Genmitsu GM7100E · 710 W · 65 mm manual AC router",
   manualSpeedControl: true,
-  statedRpmMin: 6500,
-  statedRpmMax: 30000,
+  statedRpmMin: STATED_RPM_MIN,
+  statedRpmMax: STATED_RPM_MAX,
   gears: Object.freeze(GEARS),
 });
 

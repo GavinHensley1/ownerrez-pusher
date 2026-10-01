@@ -55,18 +55,117 @@ test("the rejected Profile condition itself is unmachinable: 6.35 mm slot at 0.0
         radialEngagementMm: 6.35,
         maxFeedMmPerMin: 45,
       }),
-    /retired|not rated/,
+    /full-immersion slot/,
   );
 });
 
-test("a 1/4 inch cutter cannot reach a legal surface speed in C752 on this router", () => {
+test("the RU2100 fails on surface speed, not on chip load, and the numbers say so", () => {
+  // Re-examined 2026-10-01 at the operator's request. The request was right
+  // about the diagnosis and wrong about the conclusion, and this test pins
+  // both halves so neither is rediscovered.
   const ru = TOOLS["whiteside-ru2100"];
   const limit = material("c752-nickel-silver").maxSurfaceSpeedMPerMin.carbide;
-  const slowest = slowestGearWithin(limit, ru.diameterMm);
-  // Gear 1 is borderline; anything above it is over the limit, which is the
-  // whole reason the rejected CAM had to collapse its feed.
+
+  // HALF ONE: chip load is entirely fixable. Trochoidal at 0.5 mm radial on the
+  // 6.35 mm cutter gives a healthy chip, nowhere near the 1.25 um/tooth that
+  // made the rejected Profile stage plough.
+  const thinning = chipThinningFactor(0.5, ru.diameterMm);
+  const feed = Math.round((0.03 / thinning) * ru.flutes * gear(1).rpmNominal);
+  const chipUm = (feed / (ru.flutes * gear(1).rpmMax)) * thinning * 1000;
+  assert.ok(chipUm > 25 && chipUm < 35, `expected a healthy chip, got ${chipUm.toFixed(1)} um/tooth`);
+  assert.ok(feed > 700, `expected a fast feed, got ${feed} mm/min`);
+
+  // HALF TWO: surface speed is not fixable, because the lever does not exist.
+  // 120 m/min on a 6.35 mm cutter needs 6,015 rpm. The router's slowest speed
+  // is its manufacturer-stated minimum of 6,500 rpm.
+  const maxLegalRpm = (limit * 1000) / (Math.PI * ru.diameterMm);
+  assert.ok(maxLegalRpm > 6000 && maxLegalRpm < 6100, `max legal rpm ${maxLegalRpm.toFixed(0)}`);
+  assert.ok(maxLegalRpm < ROUTER.statedRpmMin, "the router cannot turn slowly enough for this cutter");
+  assert.equal(slowestGearWithin(limit, ru.diameterMm), null);
+  const atGear1 = surfaceSpeedMPerMin(ru.diameterMm, gear(1).rpmMax);
+  assert.ok(atGear1 > limit, `gear 1 is ${atGear1.toFixed(1)} m/min against a ${limit} m/min ceiling`);
+  assert.ok(atGear1 / limit < 1.1, "and it is over by single-digit percent, not by a factor");
   assert.ok(surfaceSpeedMPerMin(ru.diameterMm, gear(4).rpmMax) > limit * 3);
-  assert.ok(!slowest || slowest.gear === 1);
+
+  // So even a perfectly specified trochoidal pass is refused, by surface speed.
+  assert.throws(
+    () =>
+      solveCut({
+        stage: "profile",
+        toolId: "whiteside-ru2100",
+        materialId: "c752-nickel-silver",
+        axialDepthMm: 1.0,
+        radialEngagementMm: 0.5,
+      }),
+    /over the 120 m\/min limit/,
+  );
+});
+
+test("the operator's no-small-bits-on-metal rule is enforced, per tool, with reasons", () => {
+  // The V-bit and the starter set are excluded by Gavin's standing rule; both
+  // are listed in the library rather than omitted, so the exclusion is a stated
+  // decision a test can check.
+  for (const id of ["vbit-30deg-0p1mm", "genmitsu-40pc-1p8-set"]) {
+    assert.equal(TOOLS[id].metal.permitted, false);
+    assert.match(TOOLS[id].metal.reason, /no small bits on metal/);
+    assert.throws(
+      () =>
+        solveCut({
+          stage: "detail",
+          toolId: id,
+          materialId: "c752-nickel-silver",
+          axialDepthMm: 0.1,
+          radialEngagementMm: 0.1,
+        }),
+      /not permitted on metal/,
+    );
+  }
+  // Every tool must state a policy; silence is not consent.
+  for (const spec of Object.values(TOOLS)) {
+    assert.ok(spec.metal, `${spec.id} has no metal policy`);
+    assert.ok(spec.metal.reason, `${spec.id} has no stated reason`);
+  }
+  // The two tools Gavin confirmed intact are permitted.
+  assert.equal(TOOLS["spetool-w03010"].metal.permitted, true);
+  assert.equal(TOOLS["spetool-w01015-spe-x"].metal.permitted, true);
+});
+
+test("a permitted small cutter still may not be loaded like the one that snapped", () => {
+  // Permitting the 1/8" cutter on metal is not permitting it to take the cut
+  // that broke the MC40A. Radial engagement, not diameter, is the difference.
+  assert.throws(
+    () =>
+      solveCut({
+        stage: "rough",
+        toolId: "spetool-w03010",
+        materialId: "c752-nickel-silver",
+        axialDepthMm: 0.15,
+        radialEngagementMm: 1.5875, // 50% of diameter
+      }),
+    /limited to 25% radial engagement on metal/,
+  );
+  // 25% is fine.
+  assert.ok(
+    solveCut({
+      stage: "rough",
+      toolId: "spetool-w03010",
+      materialId: "c752-nickel-silver",
+      axialDepthMm: 0.15,
+      radialEngagementMm: 0.79375,
+    }).feedMmPerMin > 0,
+  );
+  // Full immersion is allowed ONLY against the halved slotting chip-load band,
+  // which is the declared tab-severing exemption.
+  assert.ok(
+    solveCut({
+      stage: "release",
+      toolId: "spetool-w03010",
+      materialId: "c752-nickel-silver",
+      axialDepthMm: 0.2,
+      radialEngagementMm: 3.175,
+      chipLoadClass: "single-flute-oflute-slotting",
+    }).feedMmPerMin > 0,
+  );
 });
 
 test("surface speed is checked at the worst case of the gear's modelled rpm range", () => {
@@ -75,7 +174,7 @@ test("surface speed is checked at the worst case of the gear's modelled rpm rang
     toolId: "spetool-w03010",
     materialId: "c752-nickel-silver",
     axialDepthMm: 0.15,
-    radialEngagementMm: 1.5875,
+    radialEngagementMm: 0.79375, // exactly 25%, the metal engagement cap for this cutter
   });
   assert.ok(cut.surfaceSpeedWorstMPerMin <= cut.surfaceSpeedLimitMPerMin);
   assert.ok(cut.surfaceSpeedWorstMPerMin >= cut.surfaceSpeedNominalMPerMin);
@@ -88,7 +187,7 @@ test("chip load is verified at both ends of the gear's rpm uncertainty", () => {
     toolId: "spetool-w03010",
     materialId: "c752-nickel-silver",
     axialDepthMm: 0.15,
-    radialEngagementMm: 1.5875,
+    radialEngagementMm: 0.79375, // exactly 25%, the metal engagement cap for this cutter
   });
   assert.ok(cut.chipLoadActualMinMm >= PLOUGHING_CHIP_LOAD_MM);
   assert.ok(cut.chipLoadActualMaxMm <= material("c752-nickel-silver").chipLoad["single-flute-oflute"].max + 1e-9);
@@ -123,10 +222,16 @@ test("a feed the controller cannot stream is rejected because the real chip load
   assert.ok(assertFeedDeliverable(cut, 1.0, MACHINE.programLinesPerSecond) > cut.feedMmPerMin);
 });
 
-test("retired tools cannot be selected", () => {
+test("only tools that no longer physically exist are retired", () => {
+  // The MC40A snapped, so it is gone and selecting it throws. The RU2100 is
+  // intact and on the bench: it is selectable, and it is the SOLVER that
+  // refuses it, with arithmetic, rather than a flag that hides the reasoning.
   assert.throws(() => tool("genmitsu-mc40a-3p175"), /snapped/);
-  assert.throws(() => tool("whiteside-ru2100"), /Rejected by the operator/);
+  assert.ok(tool("whiteside-ru2100"));
   assert.ok(tool("spetool-w03010"));
+  for (const spec of Object.values(TOOLS)) {
+    if (spec.retired) assert.match(spec.retiredReason, /snapped|no longer exists/);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -444,13 +549,29 @@ test("Release removes every tab and never moves in XY after the part is free", {
   const result = validateProgram(release.code, {
     clearanceZMm: MACHINE.clearanceZMm,
     maxDepthMm: STOCK.thicknessMm + DEFAULT_JOB.sacrificialDepthMm + 0.001,
-    maxCutFeedMmPerMin: release.cuts[0].feedMmPerMin,
+    // Release runs two solved conditions: the full-width centreline cut and the
+    // lighter side lanes that clear the rest of the kerf.
+    maxCutFeedMmPerMin: Math.max(...release.cuts.map((cut) => cut.feedMmPerMin)),
   });
   assert.deepEqual(result.problems, []);
   // Release must reach full through depth, unlike Profile.
   assert.ok(result.metrics.minZ <= -(STOCK.thicknessMm + DEFAULT_JOB.sacrificialDepthMm) + 1e-3);
   const held = findHoldingTabs(release.code, STOCK.thicknessMm + DEFAULT_JOB.sacrificialDepthMm);
   assert.equal(held.tabs, 0, "release must not leave anything holding the part");
+});
+
+test("Release clears the whole kerf, not just the cutter's own width", { skip: !hasModel && "relief model not built" }, () => {
+  // A tab remnant spans the full Profile kerf. Cutting only the centreline
+  // removes the cutter's diameter and leaves a sliver either side, which would
+  // still hold the part in the sheet -- so the lanes are not cosmetic.
+  const release = job.stages.release;
+  const profile = job.stages.profile;
+  assert.ok(profile.kerfWidthMm > release.tool.diameterMm, "this test is meaningless if the kerf is not wider than the tool");
+  assert.ok(release.lanesPerTab >= 3, `expected side lanes, got ${release.lanesPerTab}`);
+  assert.ok(
+    release.kerfClearedMm >= profile.kerfWidthMm - 1e-6,
+    `release clears ${release.kerfClearedMm.toFixed(3)} mm of a ${profile.kerfWidthMm} mm kerf`,
+  );
 });
 
 test("Rough actually removes material and leaves the finish allowance", { skip: !hasModel && "relief model not built" }, () => {
@@ -501,6 +622,14 @@ test("the router gear table is modelled, and that is recorded rather than hidden
   assert.equal(ROUTER.gears.length, 6);
   for (const entry of ROUTER.gears) {
     assert.ok(entry.rpmMin <= entry.rpmNominal && entry.rpmNominal <= entry.rpmMax);
-    if (entry.gear > 1) assert.ok(entry.modelled, `gear ${entry.gear} should be flagged as modelled`);
+    // The two ENDPOINTS are manufacturer-stated, not modelled: on a six-detent
+    // dial spanning 6,500-30,000, detent 1 is 6,500 and detent 6 is 30,000.
+    // Only the four interior detents are genuinely uncertain.
+    const interior = entry.gear > 1 && entry.gear < 6;
+    assert.equal(entry.modelled, interior, `gear ${entry.gear} modelled flag`);
+    assert.ok(entry.rpmMin >= ROUTER.statedRpmMin, `gear ${entry.gear} dips below the router's stated minimum`);
+    assert.ok(entry.rpmMax <= ROUTER.statedRpmMax, `gear ${entry.gear} exceeds the router's stated maximum`);
   }
+  assert.equal(ROUTER.gears[0].rpmNominal, 6500);
+  assert.equal(ROUTER.gears[5].rpmNominal, 30000);
 });

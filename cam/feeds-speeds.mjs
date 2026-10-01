@@ -17,7 +17,12 @@
 // survivable, and silently emitted the result.
 
 import { PLOUGHING_CHIP_LOAD_MM, material as lookupMaterial } from "./material-library.mjs";
-import { engagedDiameterMm, tool as lookupTool } from "./tool-library.mjs";
+import {
+  assertLightEngagementOnMetal,
+  assertPermittedOnMetal,
+  engagedDiameterMm,
+  tool as lookupTool,
+} from "./tool-library.mjs";
 import { ROUTER, gear as lookupGear, surfaceSpeedMPerMin } from "./machine-library.mjs";
 
 export class UnmachinableStageError extends Error {
@@ -72,6 +77,18 @@ export function solveCut(options) {
 
   if (!(axialDepthMm > 0)) throw new UnmachinableStageError(stage, "axial depth must be positive", { axialDepthMm });
   if (!(radialEngagementMm > 0)) throw new UnmachinableStageError(stage, "radial engagement must be positive", { radialEngagementMm });
+
+  // The operator's standing rule, applied before any arithmetic: a cutter he has
+  // excluded from metal must not reach the point of having a feed computed for
+  // it, and a cutter he permits must stay inside the load he permits it.
+  if (materialSpec.isMetal) {
+    try {
+      assertPermittedOnMetal(toolSpec);
+      assertLightEngagementOnMetal(toolSpec, radialEngagementMm, chipLoadClass || toolSpec.kind);
+    } catch (error) {
+      throw new UnmachinableStageError(stage, error.message, { toolId });
+    }
+  }
 
   if (!toolSpec.nonFerrousRated) {
     throw new UnmachinableStageError(stage, `${toolSpec.name} is not rated for non-ferrous metal`, { toolId });

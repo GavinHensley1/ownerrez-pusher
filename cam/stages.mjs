@@ -76,7 +76,13 @@ export function generateRough(context) {
     stockToLeaveMm,
     toolId = "spetool-w03010",
     axialDepthMm: axial = 0.15,
-    stepoverFraction = 0.5,
+    // 25%, not the 50% this stage used to ask for. The tool library caps this
+    // cutter at 25% radial engagement on metal under the operator's "no small
+    // bits on metal" rule, and until 2026-10-01 nothing checked it -- so Rough
+    // was quietly stepping over at twice the tool's own declared limit. Halving
+    // the stepover roughly doubles Rough's path length, but Rough is the
+    // cheapest stage in the job, so the cost is a few minutes.
+    stepoverFraction = 0.25,
   } = context;
   const toolSpec = TOOLS[toolId];
   const radius = toolSpec.diameterMm / 2;
@@ -600,6 +606,16 @@ export function generateProfile(context) {
     throughDepthMm: throughDepth,
     tabs,
     perimeterMm: perimeter,
+    // The TRUE swept kerf, and the number Release must clear. It is exact by
+    // construction: the trochoidal loop radius is derived from this value as
+    // (kerf - diameter)/2, so the swept band is diameter + 2*loopRadius = this.
+    //
+    // Do NOT replace it with the kerfWidthMm that assertNoFullImmersionSlotting
+    // reports (about 4.75 mm). That measures the widest spread of cutter-centre
+    // points inside a coarse bucket, so it adds the forward travel through the
+    // bucket to the loop width. It is the right heuristic for "is this a slot?"
+    // and the wrong number for "how much material is there to clear".
+    kerfWidthMm: trochoidalKerfMm,
     radialEngagementFraction: trochoidalStepMm / toolSpec.diameterMm,
     metrics: { ...metrics, deliverableFeedMmPerMin: deliverable },
   };
@@ -612,18 +628,43 @@ export function generateProfile(context) {
 export function generateRelease(context) {
   const { profile, plate, stock, toolId = "spetool-w03010", passes = 4 } = context;
   const toolSpec = TOOLS[toolId];
-  const { tabs, throughDepthMm, tabHeightMm = 0.8 } = profile;
+  const { tabs, throughDepthMm, tabHeightMm = 0.8, kerfWidthMm = 4.2 } = profile;
   if (!tabs || tabs.length < 2) throw new UnmachinableStageError("release", "profile produced no tabs to remove");
 
+  // THE TAB IS WIDER THAN THE CUTTER. Profile opens a kerf of kerfWidthMm and
+  // leaves the last tabHeightMm of it solid, so the remnant spans the WHOLE
+  // kerf. Running the cutter down the centreline alone removes only its own
+  // diameter and leaves a sliver (kerf - diameter)/2 wide on each side -- 0.51
+  // mm of nickel silver, 0.8 mm tall, six times over. The part would not come
+  // free; it would have to be broken out of the sheet by hand, on a wedding
+  // piece, after the cut. Each tab is therefore cleared in lanes: centreline
+  // first, then one lane either side.
+  const sliverMm = Math.max(0, (kerfWidthMm - toolSpec.diameterMm) / 2);
+  const lanes = sliverMm < 0.02 ? [0] : [0, sliverMm, -sliverMm];
+
   const axial = tabHeightMm / passes;
-  const cut = solveCut({
-    stage: "release",
-    toolId,
-    materialId: MATERIAL,
-    axialDepthMm: axial,
-    radialEngagementMm: toolSpec.diameterMm,
-    chipLoadClass: "single-flute-oflute-slotting",
-  });
+  const { cuts: [cut, laneCut] } = solveSharedGear([
+    {
+      stage: "release",
+      toolId,
+      materialId: MATERIAL,
+      axialDepthMm: axial,
+      // Full width on the centreline: a tab remnant has no side to escape to.
+      // This is the one declared slotting exemption to the light-engagement
+      // rule, and it is why the halved slotting chip-load band is named here.
+      radialEngagementMm: toolSpec.diameterMm,
+      chipLoadClass: "single-flute-oflute-slotting",
+    },
+    {
+      // The side lanes take the full remaining tab height in one pass, because
+      // by then they are only removing a sliver.
+      stage: "release-kerf",
+      toolId,
+      materialId: MATERIAL,
+      axialDepthMm: Math.max(axial, tabHeightMm),
+      radialEngagementMm: Math.max(0.05, sliverMm),
+    },
+  ]);
   const entryFeed = rampFeed(cut, 0.4);
 
   const builder = new ProgramBuilder({
@@ -661,13 +702,27 @@ export function generateRelease(context) {
 
     // A ramp only reaches full depth at the end of its last pass, so the
     // leading part of the tab would still be attached and the part would not
-    // actually come free. Traverse the whole tab once more at full depth.
-    const tail = tab.points[tab.points.length - 1];
-    const atTail = Math.hypot(builder.x - tail.x, builder.y - tail.y) < 1e-4;
-    const level = atTail ? [...tab.points].reverse() : tab.points;
-    for (let i = 1; i < level.length; i += 1) {
-      builder.cutTo(level[i].x, level[i].y, -throughDepthMm, cut.feedMmPerMin);
-      cuttingLines += 1;
+    // actually come free. Traverse the whole tab once more at full depth, then
+    // sweep the lanes either side so the full kerf width is cleared.
+    for (let lane = 0; lane < lanes.length; lane += 1) {
+      const path = offsetAlong(tab.points, lanes[lane]);
+      const head = path[0];
+      const atTail = Math.hypot(builder.x - path[path.length - 1].x, builder.y - path[path.length - 1].y) < 1e-4;
+      const level = atTail ? [...path].reverse() : path;
+      if (lane > 0) {
+        // Step sideways onto the next lane at depth. The move is short and the
+        // cutter is already through, so it is a cut, never a rapid.
+        builder.cutTo(level[0].x, level[0].y, -throughDepthMm, laneCut.feedMmPerMin);
+        cuttingLines += 1;
+      } else if (Math.hypot(builder.x - head.x, builder.y - head.y) > 1e-4 && !atTail) {
+        builder.cutTo(head.x, head.y, -throughDepthMm, cut.feedMmPerMin);
+        cuttingLines += 1;
+      }
+      const feed = lane === 0 ? cut.feedMmPerMin : laneCut.feedMmPerMin;
+      for (let i = 1; i < level.length; i += 1) {
+        builder.cutTo(level[i].x, level[i].y, -throughDepthMm, feed);
+        cuttingLines += 1;
+      }
     }
 
     // Vertical retract immediately: on the last tab the part is now loose and
@@ -683,10 +738,31 @@ export function generateRelease(context) {
     stage: "release",
     tool: toolSpec,
     code,
-    cuts: [cut],
+    cuts: [cut, laneCut],
     tabs: tabs.length,
+    lanesPerTab: lanes.length,
+    kerfClearedMm: lanes.length === 1 ? toolSpec.diameterMm : toolSpec.diameterMm + 2 * sliverMm,
     metrics: { ...metrics, deliverableFeedMmPerMin: deliverable },
   };
+}
+
+/**
+ * Shift a short open polyline sideways by distanceMm, along its own normals.
+ *
+ * Used to sweep the lanes either side of a tab centreline. The tab is a few
+ * millimetres of a smooth outline and the offsets are well under a millimetre,
+ * so per-vertex normals are accurate here; this is not a general offsetter.
+ */
+export function offsetAlong(points, distanceMm) {
+  if (!distanceMm) return points.map((p) => ({ ...p }));
+  return points.map((point, index) => {
+    const prev = points[Math.max(0, index - 1)];
+    const next = points[Math.min(points.length - 1, index + 1)];
+    const dx = next.x - prev.x;
+    const dy = next.y - prev.y;
+    const length = Math.hypot(dx, dy) || 1;
+    return { x: point.x + (dy / length) * distanceMm, y: point.y - (dx / length) * distanceMm };
+  });
 }
 
 // ---------------------------------------------------------------------------

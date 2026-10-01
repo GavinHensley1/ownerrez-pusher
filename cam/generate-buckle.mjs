@@ -2,10 +2,21 @@
 //
 //   node cam/generate-buckle.mjs [output-dir]
 //
-// Placement is a PARAMETER, not a constant. The current blank has damage inside
-// the present footprint (two bored circles at work X0 Y0 and X25.87 Y83.43, plus
-// pre-existing holes on the right), so where this buckle actually goes is an
-// open physical question. --offset-x / --offset-y move the whole job.
+// Placement is a PARAMETER, not a constant: --offset-x / --offset-y move the
+// whole job.
+//
+// THE BLANK IS NEW (operator, 2026-10-01). The damaged sheet -- the one with
+// bored circles at work X0 Y0 and X25.87 Y83.43 from the 2026-09-30 depth
+// incident -- is NOT the target and this job is not designed around it. The
+// baseline below is generated against clean full stock at X0/Y0, which is also
+// the placement the certified library used, so the two remain comparable.
+//
+// Stock dimensions are carried forward unchanged from the operator's own
+// measurement of the previous sheet (260 x 130 x 3.855 mm, memory
+// 2026-09-29/09-30). Width and height only bound where the job may be placed.
+// THICKNESS IS DIFFERENT: it sets the through-depth of Profile and Release, so
+// the new sheet must be measured before either of those stages is cut. A
+// nominally identical sheet is not a measured one.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -21,13 +32,14 @@ export const DEFAULT_JOB = Object.freeze({
   id: "rambo-buckle-c752-v2",
   name: "The Rambo's buckle · C752 nickel silver",
   material: "c752-nickel-silver",
-  // Measured by the operator's own bed/stock probes on 2026-09-30.
-  stock: Object.freeze({ widthMm: 260, heightMm: 130, thicknessMm: 3.855 }),
+  // 260 x 130 confirmed against the operator's measurement of the previous
+  // sheet. 3.855 mm was PROBED on that sheet, not this one -- see the header.
+  stock: Object.freeze({ widthMm: 260, heightMm: 130, thicknessMm: 3.855, thicknessMeasuredOnThisBlank: false }),
   // Operator-chosen plate value, 2026-10-01. NOT a constant: it is validated
   // against the documented SainSmart variants and must stay editable.
   plate: Object.freeze({ thicknessMm: 14.19, confirmed: true }),
-  // Baseline placement, matching the current certified library. Treated as a
-  // parameter pending the blank-damage decision.
+  // Baseline placement on clean full stock, matching the certified library so
+  // the two stay comparable. Overridable with --offset-x / --offset-y.
   placement: Object.freeze({ offsetXMm: 0, offsetYMm: 0 }),
   stockToLeaveMm: 0.12,
   sacrificialDepthMm: 0.1,

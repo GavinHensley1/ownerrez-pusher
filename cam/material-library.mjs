@@ -20,6 +20,7 @@ export const MATERIALS = Object.freeze({
   "c752-nickel-silver": Object.freeze({
     id: "c752-nickel-silver",
     name: "C752 nickel silver",
+    isMetal: true,
     machinabilityRating: 20,
     workHardens: true,
     // Dry / air-blast only. This machine has no flood coolant, so the surface
