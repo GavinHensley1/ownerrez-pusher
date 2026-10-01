@@ -1,10 +1,15 @@
 #!/bin/bash
-# Aggregate every machine/test-*.mjs file into one pass/fail total.
+# Aggregate every test-*.mjs file into one pass/fail total.
 # Some suites use node:test (TAP-ish "# pass N") and some print their own
 # "N/N ... passed" line; handle both so the reported total is real.
+#
+# cam/ IS INCLUDED. It used to be left out, so the CAM layer's tests had to be
+# run by hand and the project ended up quoting several different "suite totals"
+# in the same week depending on which half had been counted. One command, one
+# number.
 cd "$(dirname "$0")/.." || exit 1
 TOTAL=0; FAILED=0; FILES=0; BAD=""
-for f in machine/test-*.mjs; do
+for f in machine/test-*.mjs cam/test-*.mjs; do
   FILES=$((FILES+1))
   out=$(node "$f" 2>&1); code=$?
   # node:test prints its summary as "ℹ pass N" / "ℹ fail N". Anchor on that so a

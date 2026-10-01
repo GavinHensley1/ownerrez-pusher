@@ -1,0 +1,249 @@
+{
+  "generatedAt": "2026-10-01T14:50:42.252Z",
+  "question": "With the W01015 as the smallest tool allowed on metal, what artwork detail is reachable?",
+  "measuredOn": "cam/models/rambo-buckle-relief.bin (sweep of the accepted Finish program)",
+  "tool": {
+    "tool": "SpeTool W01015-SPE-X · TAC tapered ball nose · 1/32\" radius",
+    "tipDiameterMm": 1.5875,
+    "tipRadiusMm": 0.79375,
+    "taperHalfAngleDeg": 5.38,
+    "grooveWidthAtDepth": [
+      {
+        "depthMm": 0.1,
+        "widthMm": 0.7713624310270756
+      },
+      {
+        "depthMm": 0.2,
+        "widthMm": 1.0535653752852738
+      },
+      {
+        "depthMm": 0.28,
+        "widthMm": 1.2101239605924676
+      },
+      {
+        "depthMm": 0.4,
+        "widthMm": 1.378404875209022
+      },
+      {
+        "depthMm": 0.5,
+        "widthMm": 1.4747881203752624
+      },
+      {
+        "depthMm": 0.62,
+        "widthMm": 1.5489996772110703
+      },
+      {
+        "depthMm": 0.79,
+        "widthMm": 1.5874822833657072
+      },
+      {
+        "depthMm": 0.796,
+        "widthMm": 1.5949480622137333
+      }
+    ],
+    "depthReachableInGroove": [
+      {
+        "widthMm": 0.3,
+        "depthMm": 0.014302078391378314
+      },
+      {
+        "widthMm": 0.4,
+        "depthMm": 0.02560999811232323
+      },
+      {
+        "widthMm": 0.6,
+        "depthMm": 0.058876498980947045
+      },
+      {
+        "widthMm": 0.8,
+        "depthMm": 0.10815605129566674
+      },
+      {
+        "widthMm": 1,
+        "depthMm": 0.1772769166459901
+      },
+      {
+        "widthMm": 1.2,
+        "depthMm": 0.2740971711806044
+      },
+      {
+        "widthMm": 1.4,
+        "depthMm": 0.41953206550193234
+      },
+      {
+        "widthMm": 1.5875,
+        "depthMm": 0.7564565426804248
+      }
+    ],
+    "fullDepthGrooveWidthMm": 1.5949480622137333
+  },
+  "maxReliefDepthMm": 0.796,
+  "overall": {
+    "areaMm2": 7733.190000000001,
+    "recessedAreaMm2": 7302.250000000002,
+    "meanDepthMm": 0.36700516964830204,
+    "medianDepthMm": 0.335999995470047,
+    "p90DepthMm": 0.6520000100135803,
+    "maxDepthMm": 0.7960000038146973,
+    "bottomedFraction": 0.21924749221130474,
+    "reliefUsedFraction": 0.4610617709149523
+  },
+  "regions": [
+    {
+      "id": "lettering",
+      "label": "\"The Rambo's\" lettering",
+      "areaMm2": 1341.2100000000003,
+      "recessedAreaMm2": 1263.1600000000003,
+      "meanDepthMm": 0.4056887172447778,
+      "medianDepthMm": 0.4620000123977661,
+      "p90DepthMm": 0.6830000281333923,
+      "maxDepthMm": 0.7960000038146973,
+      "bottomedFraction": 0.2338341936096773,
+      "reliefUsedFraction": 0.5096591925185651
+    },
+    {
+      "id": "corn-left",
+      "label": "Left corn cob (kernels)",
+      "areaMm2": 223.21000000000004,
+      "recessedAreaMm2": 199.89000000000004,
+      "meanDepthMm": 0.30423658017226207,
+      "medianDepthMm": 0.24899999797344208,
+      "p90DepthMm": 0.6240000128746033,
+      "maxDepthMm": 0.7770000100135803,
+      "bottomedFraction": 0.2697983891140127,
+      "reliefUsedFraction": 0.3822067590103795
+    },
+    {
+      "id": "corn-right",
+      "label": "Right corn cob (kernels)",
+      "areaMm2": 223.21000000000004,
+      "recessedAreaMm2": 202.59000000000003,
+      "meanDepthMm": 0.30303613207835284,
+      "medianDepthMm": 0.24699999392032623,
+      "p90DepthMm": 0.5979999899864197,
+      "maxDepthMm": 0.7839999794960022,
+      "bottomedFraction": 0.27849350905770276,
+      "reliefUsedFraction": 0.3806986583898905
+    },
+    {
+      "id": "figures",
+      "label": "Couple (two figures)",
+      "areaMm2": 429.2100000000001,
+      "recessedAreaMm2": 423.0200000000001,
+      "meanDepthMm": 0.2912893953696291,
+      "medianDepthMm": 0.24799999594688416,
+      "p90DepthMm": 0.5139999985694885,
+      "maxDepthMm": 0.7419999837875366,
+      "bottomedFraction": 0.182875514160087,
+      "reliefUsedFraction": 0.3659414514693833
+    },
+    {
+      "id": "rays",
+      "label": "Radiating field / sun rays",
+      "areaMm2": 594.6000000000001,
+      "recessedAreaMm2": 578.8000000000001,
+      "meanDepthMm": 0.3929191085151458,
+      "medianDepthMm": 0.36899998784065247,
+      "p90DepthMm": 0.6140000224113464,
+      "maxDepthMm": 0.7799999713897705,
+      "bottomedFraction": 0.18588458880442293,
+      "reliefUsedFraction": 0.4936169704964143
+    },
+    {
+      "id": "mountains",
+      "label": "Mountains",
+      "areaMm2": 677.8100000000002,
+      "recessedAreaMm2": 674.8700000000001,
+      "meanDepthMm": 0.30330201371072785,
+      "medianDepthMm": 0.3059999942779541,
+      "p90DepthMm": 0.49000000953674316,
+      "maxDepthMm": 0.7129999995231628,
+      "bottomedFraction": 0.1047460992487442,
+      "reliefUsedFraction": 0.3810326805411154
+    },
+    {
+      "id": "rope-inner",
+      "label": "Inner rope ring",
+      "areaMm2": 533.2300000000001,
+      "recessedAreaMm2": 512.4700000000001,
+      "meanDepthMm": 0.436273655036789,
+      "medianDepthMm": 0.43700000643730164,
+      "p90DepthMm": 0.6710000038146973,
+      "maxDepthMm": 0.7799999713897705,
+      "bottomedFraction": 0.23345756824789743,
+      "reliefUsedFraction": 0.5480824812019962
+    },
+    {
+      "id": "rope-outer",
+      "label": "Outer rope border",
+      "areaMm2": 1951.7300000000005,
+      "recessedAreaMm2": 1771.8200000000004,
+      "meanDepthMm": 0.41288067633128955,
+      "medianDepthMm": 0.3959999978542328,
+      "p90DepthMm": 0.6809999942779541,
+      "maxDepthMm": 0.7929999828338623,
+      "bottomedFraction": 0.2984332494271427,
+      "reliefUsedFraction": 0.5186943169991075
+    },
+    {
+      "id": "scroll",
+      "label": "Scrollwork / acanthus",
+      "areaMm2": 2338.1500000000005,
+      "recessedAreaMm2": 2230.7200000000003,
+      "meanDepthMm": 0.347898790548522,
+      "medianDepthMm": 0.2529999911785126,
+      "p90DepthMm": 0.6549999713897705,
+      "maxDepthMm": 0.7860000133514404,
+      "bottomedFraction": 0.19102800889398938,
+      "reliefUsedFraction": 0.4370587820961332
+    }
+  ],
+  "achievedDepthCensus": [
+    {
+      "upperMm": 0.1,
+      "lowerMm": 0,
+      "grooveWidthNeededMm": 0.7713624310270756,
+      "cells": 25095,
+      "areaMm2": 250.95000000000002
+    },
+    {
+      "upperMm": 0.2,
+      "lowerMm": 0.1,
+      "grooveWidthNeededMm": 1.0535653752852738,
+      "cells": 176286,
+      "areaMm2": 1762.8600000000004
+    },
+    {
+      "upperMm": 0.3,
+      "lowerMm": 0.2,
+      "grooveWidthNeededMm": 1.2429802894656052,
+      "cells": 118588,
+      "areaMm2": 1185.88
+    },
+    {
+      "upperMm": 0.45,
+      "lowerMm": 0.3,
+      "grooveWidthNeededMm": 1.4309088021254184,
+      "cells": 153839,
+      "areaMm2": 1538.3900000000003
+    },
+    {
+      "upperMm": 0.6,
+      "lowerMm": 0.45,
+      "grooveWidthNeededMm": 1.5394804318340651,
+      "cells": 125301,
+      "areaMm2": 1253.0100000000002
+    },
+    {
+      "upperMm": 0.8,
+      "lowerMm": 0.6,
+      "grooveWidthNeededMm": 1.59570146747656,
+      "cells": 131116,
+      "areaMm2": 1311.16
+    }
+  ],
+  "previews": [
+    "metal-preview-and-tool-limit.png",
+    "metal-detail-zooms.png"
+  ]
+}
