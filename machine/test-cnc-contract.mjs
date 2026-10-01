@@ -173,8 +173,17 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /BALL-NOSE LAYER CONTRACT:/);
   assert.match(html, /ARTWORK COVERAGE:/);
   assert.match(html, /if\(finishPathCount\)g\.push\('G0 Z'\+safeZ\.toFixed\(2\)\);g\.push\('G0 X'/);
-  assert.match(html, /finishStepoverMm=\.16/);
-  assert.match(html, /finishPassDepthMm=\.1/);
+  // These two used to assert the ASSIGNMENT form (finishStepoverMm=.16), which
+  // existed only inside cncApprovePlanAndGenerate's metal branch. That branch was
+  // unreachable -- every metal job returns earlier with "metal G-code generation
+  // is permanently retired" -- and the whole function was declared twice, so the
+  // assertions were pinning dead code. Assert the live metal defaults instead.
+  assert.match(html, /finishStepoverMm:\.16/);
+  assert.match(html, /finishPassDepthMm:\.1/);
+  // And assert the duplicate declaration cannot come back: sloppy-mode
+  // redeclaration means a future edit to the earlier copy would silently do
+  // nothing at all.
+  assert.equal((html.match(/async function cncApprovePlanAndGenerate\(\)/g) || []).length, 1);
   assert.match(html, /finishLayerStep=Math\.min\(\.1,/);
   assert.match(html, /\(stage==='finish'\|\|stage==='cleanup'\)\?\.1001:\.0251/);
   assert.match(html, /split=wanted<currentZ-finishLayerStep\?Math\.ceil\(\(currentZ-wanted\)\/finishLayerStep\):1/);

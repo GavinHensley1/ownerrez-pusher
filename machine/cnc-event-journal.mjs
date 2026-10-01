@@ -25,7 +25,32 @@ export function readLatestCompletedStockProbe(path) {
     if (event?.type !== "probe.completed" || event?.detail?.kind !== "stock") continue;
     const stockThicknessMm = Number(event.detail.stockThicknessMm), maxCutDepthMm = Number(event.detail.maxCutDepthMm), safetyFloorMm = Math.round((stockThicknessMm - maxCutDepthMm) * 1000) / 1000;
     if (!(stockThicknessMm > 0 && maxCutDepthMm > 0 && safetyFloorMm >= 0.8 && maxCutDepthMm < stockThicknessMm)) continue;
-    return { at: String(event.at || ""), stockThicknessMm, safetyFloorMm, maxCutDepthMm };
+    // The ABSOLUTE references and the plate used are carried through, not just the
+    // derived thicknesses. A caller restoring this measurement has to answer two
+    // questions the thicknesses alone cannot: which plate was it taken with, and
+    // is the controller's Z origin still that same one? Dropping these is why
+    // restoreProbeAfterXyOnlyReset read prior.probeThickness as undefined and so
+    // always threw, and why it could adopt whatever G54 Z happened to be loaded
+    // with no continuity check at all.
+    //
+    // Nullable on purpose: entries written before these fields existed must stay
+    // readable, and the caller refuses them with a clear reason rather than
+    // treating a missing reference as a matching one.
+    // Number("") and Number(null) are both 0, and Number.isFinite accepts that.
+    // Coercing a missing origin to 0 would make the Z-continuity check compare
+    // against machine zero and pass for a machine that happens to sit near it, so
+    // only an actual finite number counts.
+    const num = (value) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+    return {
+      at: String(event.at || ""),
+      stockThicknessMm,
+      safetyFloorMm,
+      maxCutDepthMm,
+      probeThickness: num(event.detail.probeThickness),
+      stockSurfaceMPos: num(event.detail.stockSurfaceMPos),
+      bedSurfaceMPos: num(event.detail.bedSurfaceMPos),
+      zOriginMPos: num(event.detail.zOriginMPos),
+    };
   }
   return null;
 }

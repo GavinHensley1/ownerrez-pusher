@@ -8,13 +8,38 @@ export function cleanProgramLine(raw) {
     .toUpperCase();
 }
 
-const AXIS_WORD = (axis) => new RegExp(`\\b${axis}${NUMBER}`);
-const FEED_WORD = new RegExp(`\\bF(${NUMBER})`);
+// WHY NOT \b, ANYWHERE IN THIS FILE:
+// Whitespace between G-code words is OPTIONAL -- "G1Z-0.5F600" is valid RS-274
+// and GRBL executes it. \b matches only between a word and a non-word character,
+// and a digit and a letter are both word characters, so `\bZ` does NOT match the
+// Z in "G1Z-0.5". Measured before this fix, in isolation: "G1Z-0.5F600" passed
+// the 60 mm/min vertical plunge limiter at 600 mm/min, and "G1X0G92Z0",
+// "G1X1G91" and "G1X1M30" slipped past the G92/G53 ban, the relative-motion ban
+// and the M2/M30 placement rule.
+//
+// HOW BAD WAS IT, HONESTLY: not live. analyzeProgram requires one word per
+// whitespace-separated token and re-checks the G-codes from the tokenised word
+// list, so compact input is refused at accept time before any of these helpers
+// run on a stored program. This was a latent trap rather than an open hole: the
+// line-level guards were silently doing nothing, so they would have provided no
+// protection the moment anyone relaxed the whitespace rule, and
+// assertPlungeFeedWithinLimit / limitVerticalPlungeFeed are exported and can be
+// called directly on unvalidated text.
+//
+// An address letter in G-code is never preceded by another letter, so "not
+// preceded by a letter" is the correct boundary. Comments are already stripped by
+// cleanProgramLine, so a letter inside a comment cannot reach here.
+const ADDRESS_START = "(?<![A-Z])";
+// Keeps G92 from matching inside G921. Decimal variants such as G92.1 are spelled
+// out explicitly in each pattern rather than being caught by a loose boundary.
+const WORD_END = "(?![\\d.])";
+const AXIS_WORD = (axis) => new RegExp(`${ADDRESS_START}${axis}${NUMBER}`);
+const FEED_WORD = new RegExp(`${ADDRESS_START}F(${NUMBER})`);
 // A vertical plunge is a feed move that changes Z with no X/Y component.
-// The axis test MUST use the full number grammar: `\bZ[-+]?\d` silently misses the
+// The axis test MUST use the full number grammar: `Z[-+]?\d` silently misses the
 // perfectly legal leading-dot forms `Z-.5` / `Z.5`, which would let an unlimited
 // plunge straight through the limiter.
-const isVerticalPlunge = (line) => /^G0*1\b/.test(line) && AXIS_WORD("Z").test(line) && !AXIS_WORD("X").test(line) && !AXIS_WORD("Y").test(line);
+const isVerticalPlunge = (line) => new RegExp(`^G0*1${WORD_END}`).test(line) && AXIS_WORD("Z").test(line) && !AXIS_WORD("X").test(line) && !AXIS_WORD("Y").test(line);
 
 const assertPlungeLimit = (maxFeedMmMin) => {
   const limit = Number(maxFeedMmMin);
@@ -29,7 +54,7 @@ export function limitVerticalPlungeFeed(source, maxFeedMmMin = 60) {
     if (!isVerticalPlunge(line)) return raw;
     const feed = line.match(FEED_WORD);
     if (!feed || Number(feed[1]) <= limit) return raw;
-    return raw.replace(new RegExp(`\\bF(${NUMBER})`, "i"), `F${limit}`);
+    return raw.replace(new RegExp(`${ADDRESS_START}F(${NUMBER})`, "i"), `F${limit}`);
   }).join("\n");
 }
 
@@ -80,8 +105,8 @@ export function analyzeProgram(source, { maxBytes = 10_000_000, maxLines = 750_0
     if (unsupportedWords) throw new Error(`Unsupported G-code word(s): ${line}`);
     if (lines.length >= maxLines) throw new Error(`G-code exceeds ${maxLines} executable lines`);
     if (line.includes("$")) throw new Error("GRBL settings/system commands are not allowed in a carve file");
-    if (/\bG(?:10|28|30|38(?:\.\d+)?|53|92)\b/.test(line)) throw new Error(`Unsafe coordinate/probe command is not allowed: ${line}`);
-    if (/\bG91(?:\.\d+)?\b/.test(line)) throw new Error("Relative motion is not allowed in a carve file");
+    if (new RegExp(`${ADDRESS_START}G(?:10|28|30|38(?:\\.\\d+)?|53|92(?:\\.\\d+)?)${WORD_END}`).test(line)) throw new Error(`Unsafe coordinate/probe command is not allowed: ${line}`);
+    if (new RegExp(`${ADDRESS_START}G91(?:\\.\\d+)?${WORD_END}`).test(line)) throw new Error("Relative motion is not allowed in a carve file");
     const words = [...line.matchAll(new RegExp(`([GMXYZFSP])(${NUMBER})`, "g"))].map((match) => ({ letter: match[1], value: Number(match[2]) }));
     // Downstream envelope/resume parsers consume spaced words. Reject compact
     // input instead of allowing different components to interpret different paths.
@@ -140,7 +165,7 @@ export function analyzeProgram(source, { maxBytes = 10_000_000, maxLines = 750_0
     // manually, so omit only terminal program-end commands after validating the
     // complete file. An embedded M2/M30 is still unsafe and rejected.
     while (/^M0*(?:2|30)$/.test(lines.at(-1) || "")) lines.pop();
-    if (lines.some((line) => /\bM0*(?:2|30)\b/.test(line))) throw new Error("Manual-router M2/M30 is allowed only as the terminal command");
+    if (lines.some((line) => new RegExp(`${ADDRESS_START}M0*(?:2|30)${WORD_END}`).test(line))) throw new Error("Manual-router M2/M30 is allowed only as the terminal command");
   } else if (spindleMode === "controller") {
     if (!spindleStart || !spindleStop) throw new Error("Controller-spindle G-code must contain both M3 and M5");
   } else {

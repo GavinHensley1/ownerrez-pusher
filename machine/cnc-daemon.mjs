@@ -107,6 +107,12 @@ let controller, lastControllerStatus, lastWorkOffset, incident, moving = false, 
 // last reported Idle with zero feed and spindle and no active input pin -- and
 // only after a grace period far longer than any single command timeout.
 const STALE_MOTION_GRACE_MS = 120_000;
+// Coordinate-continuity window for judging whether a saved lock still describes
+// the controller's live frame. Named once because it was previously written as a
+// bare 0.05 at each call site. This is a CONTINUITY tolerance, deliberately much
+// looser than the plate-thickness match tolerance, which compares two typed
+// numbers rather than two measurements of a physical position.
+const PROBE_LOCK_TOLERANCE_MM = 0.05;
 let movingSince = 0, movingReason = "";
 const setMoving = (active, reason = "") => {
   moving = active === true;
@@ -299,7 +305,7 @@ const persistLockedXy = (status) => {
 const restoreLockedXy = (status, workOffset) => {
   const raw = readXyLock(XY_STATE_PATH);
   if (!raw) return null;
-  try { return applyXyLock(setup, raw, status, 0.05, workOffset); }
+  try { return applyXyLock(setup, raw, status, PROBE_LOCK_TOLERANCE_MM, workOffset); }
   catch (error) {
     setup.xyReady = false;
     setup.xyLockStatus = `rejected: ${error.message}`;
@@ -334,7 +340,7 @@ const restoreLockedProbe = (status, workOffset, options) => {
     if (!plateThicknessMatches(raw.probeThickness, configuredPlateMm())) {
       throw new Error(`saved calibration used a ${Number(raw.probeThickness).toFixed(2)} mm probe plate but ${configuredPlateMm().toFixed(2)} mm is configured; its Z zero is wrong by ${Math.abs(Number(raw.probeThickness) - configuredPlateMm()).toFixed(2)} mm. Re-probe the bed and stock; this calibration cannot be converted.`);
     }
-    return applyProbeLock(setup, raw, status, 0.05, workOffset, options);
+    return applyProbeLock(setup, raw, status, PROBE_LOCK_TOLERANCE_MM, workOffset, options);
   }
   catch (error) {
     setup.probeLocked = false;
@@ -666,6 +672,24 @@ const restoreProbeAfterXyOnlyReset = async (payload) => {
   if (!plateThicknessMatches(priorPuckMm, configuredPlateMm())) throw new Error(`The saved stock probe used a ${priorPuckMm.toFixed(2)} mm plate but ${configuredPlateMm().toFixed(2)} mm is configured; re-probe instead of restoring`);
   const status = await assertIdle(), workOffset = parseWorkOffset(await controller.query("$#")), stockSurfaceMPos = Number(workOffset.Z);
   if (!Number.isFinite(stockSurfaceMPos)) throw new Error("Current controller Z origin is unavailable");
+  // Z CONTINUITY. This operation adopts the controller's current G54 Z as the
+  // stock surface. That is only legitimate after an X/Y-ONLY reset, where Z was
+  // never touched -- which is precisely the thing that was never checked. Without
+  // it, any G54 Z the controller happened to be holding became "the stock
+  // surface", and all the derived numbers (floor, maximum cut depth) were then
+  // rebuilt around it and reported as a restored, locked calibration.
+  //
+  // The prior probe recorded its own absolute Z origin, so compare against it and
+  // refuse a discontinuity rather than adopting it. Fails closed when the prior
+  // entry predates the field: an unknown reference is not a matching one.
+  const priorZOriginMPos = Number.isFinite(prior.zOriginMPos) ? prior.zOriginMPos : prior.stockSurfaceMPos;
+  if (!Number.isFinite(priorZOriginMPos)) {
+    throw new Error("The saved stock probe did not record its absolute Z origin, so Z continuity cannot be proven; re-probe instead of restoring");
+  }
+  const zDriftMm = Math.abs(stockSurfaceMPos - priorZOriginMPos);
+  if (zDriftMm > PROBE_LOCK_TOLERANCE_MM) {
+    throw new Error(`The controller Z origin is ${stockSurfaceMPos.toFixed(3)} mm but the saved stock probe was taken at ${priorZOriginMPos.toFixed(3)} mm, a ${zDriftMm.toFixed(3)} mm difference. Z is not continuous with that probe, so it cannot be restored; re-probe the bed and stock.`);
+  }
   lastWorkOffset = workOffset;
   Object.assign(setup, {
     bedProbeReady: true, stockProbeReady: true, probeReady: true, probeLocked: true,
