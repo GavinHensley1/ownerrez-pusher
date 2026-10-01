@@ -3045,7 +3045,13 @@ if(action==="email_recipients"){
               }
               try{await redis.set("parkside:cnc:command",JSON.stringify(cmd),{ex:600});}catch(e){return res.status(500).json({error:"Could not queue CNC command"});}
               job.agentState="queued"; job.agentMsg=act.replace(/_/g," ")+" sent to Mac bridge"; job.agentAt=now; job.agentCommandId=cmd.id; job.agentAction=act; job.agentQueuedAt=now;
-              if(act==="start"){job.startedAt=now;job.progress=0;job.stageRequiresProbe=false;}
+              // stageRequiresProbe is NOT cleared here. It used to be cleared the
+              // moment a start was QUEUED, so if the bridge then rejected the start
+              // (hold, preflight failure, lost connection) the flag stayed false and
+              // the "this stage changed bits, re-probe and lock Z" gate was disarmed
+              // for the rest of that stage's life. It is now cleared only once the
+              // bridge reports the carve actually running, below.
+              if(act==="start"){job.startedAt=now;job.progress=0;}
             }
             job.updatedAt=now;
           }
@@ -3055,6 +3061,10 @@ if(action==="email_recipients"){
             if(ag.progress!==undefined) job.progress=Math.max(0,Math.min(100,Number(ag.progress)||0));
             if(ag.message!==undefined) job.agentMsg=String(ag.message||"").slice(0,300);
             job.agentAt=now; job.updatedAt=now;
+            // Only a carve that genuinely reached the machine clears the
+            // changed-bit probe requirement. Any other outcome leaves it armed, so
+            // a rejected or failed start cannot silently retire the gate.
+            if(state==="running"||state==="done") job.stageRequiresProbe=false;
             if(state==="done"){ job.status="Finishing"; }
           }
         }

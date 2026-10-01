@@ -44,7 +44,7 @@ async function fixture(t, initialPosition, initialState = "Idle", { latched = tr
       else if (command === "$G") socket.write("[GC:G0 G54 G17 G21 G90 G94 G49 M5 M9 T0 F0 S0]\r\nok\r\n");
       else if (command.startsWith("G10 L20 P1")) { const p = position.split(",").map(Number); for (const match of command.matchAll(/([XYZ])(-?[\d.]+)/g)) { const i = "XYZ".indexOf(match[1]); g54[i] = p[i] - Number(match[2]); } socket.write("ok\r\n"); }
       else if (streaming && /^G1\b/.test(command)) { state="Run";setTimeout(()=>{if(!socket.destroyed)socket.write("ok\r\n");},500); }
-      else if (command === "$$") socket.write("$13=0\r\n$21=1\r\nok\r\n");
+      else if (command === "$$") socket.write("$13=0\r\n$20=0\r\n$21=1\r\n$100=800.000\r\n$101=800.000\r\n$102=800.000\r\n$130=400.000\r\n$131=400.000\r\n$132=80.000\r\nok\r\n");
       else if (command === "$X") { state = "Idle"; socket.write("ok\r\n"); }
       else if (command.startsWith("$J=")) { const p = position.split(",").map(Number), m = command.match(/([XYZ])(-?[\d.]+) F/); p["XYZ".indexOf(m[1])] += Number(m[2]); position = p.join(","); jogPolls = 1; socket.write("ok\r\n"); }
       else socket.write("ok\r\n");

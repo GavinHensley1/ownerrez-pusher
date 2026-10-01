@@ -382,14 +382,14 @@ export class GrblTcpController extends EventEmitter {
         if (delta >= -0.25 || Math.abs(Math.abs(delta) - retract) > 0.75) throw new Error(`Rear-limit recovery delta mismatch: expected -${retract}, got ${delta}`);
         if (String(cleared.Pn || "").includes("Y")) throw new Error("Rear Y limit input did not clear after the inward move");
         if (hardLimitsWereEnabled) {
-          await this.#lineCommandUnlocked("$21=1", false);
+          await this.#restoreHardLimitsVerifiedUnlocked();
           hardLimitsSuppressed = false;
         }
         const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
         const [afterFeed, afterSpindle] = feedAndSpindle(after);
         if (after.state !== "Idle" || afterFeed !== 0 || afterSpindle !== 0 || String(after.Pn || "").includes("Y")) throw new Error(`Unsafe controller state after rear-limit recovery: ${after.raw}`);
         await this.motionGuard();
-        return { before, unlocked, reply, after, deltaMm: delta, samples, hardLimitsRestored: hardLimitsWereEnabled };
+        return { before, unlocked, reply, after, deltaMm: delta, samples, hardLimitsRestored: hardLimitsWereEnabled ? !hardLimitsSuppressed : false };
       } catch (error) {
         if (hardLimitsWereEnabled === true && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
         if (!this.fault) await this.#emergencyStop(`REAR_Y_LIMIT_RECOVERY_FAILED:${error.message}`);
@@ -449,6 +449,21 @@ export class GrblTcpController extends EventEmitter {
     return this.#lineCommandUnlocked("$21=1", false);
   }
 
+  // WRITING $21=1 IS NOT THE SAME AS HARD LIMITS BEING ON.
+  // Probing deliberately suppresses hard limits, because this board shares the
+  // probe and Z-limit input and would otherwise raise error:9 on contact. Every
+  // exit path then wrote "$21=1" and moved on, and probeZ reported
+  // `hardLimitsRestored: hardLimitsWereEnabled` -- the value it INTENDED, not the
+  // value the controller holds. If that write was dropped or refused, the machine
+  // carried on with hard limits off while the software said they were restored.
+  // Read it back and say so plainly if it did not take.
+  async #restoreHardLimitsVerifiedUnlocked() {
+    await this.#lineCommandUnlocked("$21=1", false);
+    const enabled = await this.#booleanSettingUnlocked(21);
+    if (!enabled) throw new Error("Hard limits could not be restored after probing: $21 still reads 0. Do not cut; power-cycle the controller and verify $21=1.");
+    return true;
+  }
+
   recoverProbeContact({ retractMm = 3, feed = 100 } = {}) {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for probe recovery");
@@ -476,12 +491,12 @@ export class GrblTcpController extends EventEmitter {
         const retract = await this.#probeRetractUnlocked(retractMm, feed);
         if (/[PZ]/.test(String(retract.after.Pn || ""))) throw new Error(`Probe/limit input did not clear after retract: ${retract.after.Pn}`);
         if (hardLimitsWereEnabled) {
-          await this.#lineCommandUnlocked("$21=1", false);
+          await this.#restoreHardLimitsVerifiedUnlocked();
           hardLimitsSuppressed = false;
         }
         const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
         await this.motionGuard();
-        return { before, retract, after, hardLimitsRestored: hardLimitsWereEnabled };
+        return { before, retract, after, hardLimitsRestored: hardLimitsWereEnabled ? !hardLimitsSuppressed : false };
       } catch (error) {
         if (hardLimitsWereEnabled === true && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
         if (!this.fault) await this.#emergencyStop(`PROBE_RECOVERY_FAILED:${error.message}`);
@@ -566,7 +581,7 @@ export class GrblTcpController extends EventEmitter {
           if (returnErrorMm > 0.05) throw new Error(`Probe return-to-start verification failed by ${returnErrorMm.toFixed(3)} mm`);
           await this.#lineCommandUnlocked("G90", false);
           if (hardLimitsWereEnabled) {
-            await this.#lineCommandUnlocked("$21=1", false);
+            await this.#restoreHardLimitsVerifiedUnlocked();
             hardLimitsSuppressed = false;
           }
           this.emit("probeProgress", { phase: "returned_no_contact", travelledMm: searchedMm, limitMm: searchLimit });
@@ -591,7 +606,7 @@ export class GrblTcpController extends EventEmitter {
           if (returnErrorMm > 0.05) throw new Error(`Probe return-to-start verification failed by ${returnErrorMm.toFixed(3)} mm`);
           await this.#lineCommandUnlocked("G90", false);
           if (hardLimitsWereEnabled) {
-            await this.#lineCommandUnlocked("$21=1", false);
+            await this.#restoreHardLimitsVerifiedUnlocked();
             hardLimitsSuppressed = false;
           }
           throw new ProbeVerificationError(`The slow confirmation touch did not see the plate. Z returned to its starting height; check the clip and plate, then retry.`);
@@ -614,7 +629,7 @@ export class GrblTcpController extends EventEmitter {
         if (/[PZ]/.test(String(finalRetract.after.Pn || ""))) throw new Error(`Probe/limit input did not clear after final retract: ${finalRetract.after.Pn}`);
         await this.#lineCommandUnlocked("G90", false);
         if (hardLimitsWereEnabled) {
-          await this.#lineCommandUnlocked("$21=1", false);
+          await this.#restoreHardLimitsVerifiedUnlocked();
           hardLimitsSuppressed = false;
         }
         const finalModes = await this.#lineCommandUnlocked("$G", false);
@@ -629,7 +644,7 @@ export class GrblTcpController extends EventEmitter {
         const frameReadback = inspectEffectiveCutFrame({ modalLines: finalModes, parameterLines: finalParameters, status: after, expectedOrigin: expectedProbeOrigin });
         this.emit("probeProgress", { phase: "complete", travelledMm: searchedMm, limitMm: searchLimit });
         await this.motionGuard();
-        return { actualWorkOffset, frameReadback, thicknessMm: thickness, establishedZero: establishZero === true, before, search, searchedMm, fastReply, firstContact, firstProbe, firstRetract, slowReply, finalContact, finalProbe, finalRetract, after, hardLimitsRestored: hardLimitsWereEnabled };
+        return { actualWorkOffset, frameReadback, thicknessMm: thickness, establishedZero: establishZero === true, before, search, searchedMm, fastReply, firstContact, firstProbe, firstRetract, slowReply, finalContact, finalProbe, finalRetract, after, hardLimitsRestored: hardLimitsWereEnabled ? !hardLimitsSuppressed : false };
       } catch (error) {
         await this.#lineCommandUnlocked("G90", false).catch(() => {});
         if (hardLimitsWereEnabled && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});

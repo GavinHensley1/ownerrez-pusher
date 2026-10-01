@@ -14,7 +14,8 @@ import { buildBufferedStopResume, buildCheckpointReplayResume, buildResumeProgra
 import { readRunCheckpoint, writeRunCheckpoint } from "./cnc-run-state.mjs";
 import { completeStockProbe, completeToolTouch } from "./cnc-setup-flow.mjs";
 import { appendCncEvent, readLatestCompletedStockProbe } from "./cnc-event-journal.mjs";
-import { assertWorkJogWithinStock, positioningBoundsFromStock } from "./cnc-positioning-envelope.mjs";
+import { assertWorkJogWithinStock, positioningBoundsFromStock, POSITIONING_OUTSIDE_STOCK_MM } from "./cnc-positioning-envelope.mjs";
+import { parseGrblSettings, readSettingsBaseline, validateControllerSettings, writeSettingsBaseline } from "./cnc-controller-settings.mjs";
 import { assertFrameValid, readFrameIncident, writeFrameIncident, resolveFrameIncident } from "./cnc-frame-incident.mjs";
 import { inspectSavedFrame } from "./cnc-frame-recovery.mjs";
 import { configuredPlateThickness, normalizePlateThickness, plateThicknessMatches, writePlateConfig, PLATE_THICKNESS_MIN_MM, PLATE_THICKNESS_MAX_MM } from "./cnc-plate-config.mjs";
@@ -32,6 +33,7 @@ const RUN_STATE_PATH = process.env.CNC_RUN_STATE || join(homedir(), ".openclaw",
 const EVENT_JOURNAL_PATH = process.env.CNC_EVENT_JOURNAL || join(homedir(), ".openclaw", "state", "cnc-events.jsonl");
 const FRAME_INCIDENT_PATH = process.env.CNC_FRAME_INCIDENT || join(homedir(), ".openclaw", "state", "cnc-frame-incident.json");
 const PLATE_CONFIG_PATH = process.env.CNC_PLATE_CONFIG || join(homedir(), ".openclaw", "state", "cnc-plate-config.json");
+const CONTROLLER_SETTINGS_PATH = process.env.CNC_CONTROLLER_SETTINGS || join(homedir(), ".openclaw", "state", "cnc-controller-settings.json");
 const STATUS_TIMEOUT_MS = Number(process.env.CNC_STATUS_TIMEOUT_MS || 1500);
 const MAX_BODY_BYTES = 900_000;
 // High-resolution Finish programs are transported as decoded G-code over the
@@ -113,6 +115,14 @@ const STALE_MOTION_GRACE_MS = 120_000;
 // looser than the plate-thickness match tolerance, which compares two typed
 // numbers rather than two measurements of a physical position.
 const PROBE_LOCK_TOLERANCE_MM = 0.05;
+// How long a saved measurement may still speak for the physical setup. Beyond
+// this the stock may have been swapped, shifted or re-clamped with nothing in
+// software to notice. Named once: probeRecoverySnapshot and
+// restoreProbeAfterXyOnlyReset each carried their own 4 * 60 * 60 * 1000, and the
+// /probe/tool touch-off path -- which rebuilds the bed reference from a stored
+// material profile -- had NO bound at all and would happily reuse a days-old
+// thickness.
+const SAVED_MEASUREMENT_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 let movingSince = 0, movingReason = "";
 const setMoving = (active, reason = "") => {
   moving = active === true;
@@ -492,7 +502,7 @@ const xyRecoverySnapshot = () => {
 const probeRecoverySnapshot = () => {
   const prior = readLatestCompletedStockProbe(EVENT_JOURNAL_PATH), ageMs = prior ? Date.now() - Date.parse(prior.at) : NaN;
   const continuousXyLock = setup.xyReady && new Set(["locked", "restored"]).has(setup.xyLockStatus);
-  return { available: !!prior && Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 4 * 60 * 60 * 1000 && continuousXyLock && !setup.probeLocked, sourceProbeAt: prior?.at || null, stockThicknessMm: prior?.stockThicknessMm ?? null, maxCutDepthMm: prior?.maxCutDepthMm ?? null };
+  return { available: !!prior && Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= SAVED_MEASUREMENT_MAX_AGE_MS && continuousXyLock && !setup.probeLocked, sourceProbeAt: prior?.at || null, stockThicknessMm: prior?.stockThicknessMm ?? null, maxCutDepthMm: prior?.maxCutDepthMm ?? null };
 };
 // Read-only recovery is housekeeping, not an operator prerequisite. It never
 // unlocks, resets coordinates, moves, or releases a held program.
@@ -663,7 +673,7 @@ const restoreProbeAfterXyOnlyReset = async (payload) => {
   const prior = readLatestCompletedStockProbe(EVENT_JOURNAL_PATH);
   if (!prior) throw new Error("No completed stock probe is available to restore");
   const ageMs = Date.now() - Date.parse(prior.at);
-  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > 4 * 60 * 60 * 1000) throw new Error("The saved stock probe is too old to restore safely");
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > SAVED_MEASUREMENT_MAX_AGE_MS) throw new Error("The saved stock probe is too old to restore safely");
   await motionGuard();
   // The restored reference is only as good as the plate used for the original probe.
   // Refuse to resurrect a measurement taken with a different plate than the one now set.
@@ -786,6 +796,20 @@ const probeSurface = async (kind, payload) => {
   if (kind === "tool") {
     materialProfile = readMaterialProfile(MATERIAL_STATE_PATH);
     if (!materialProfile) throw new Error("Complete one bed + stock setup before touching off a changed bit");
+    // A tool touch-off measures ONLY the new bit against the stock top, then
+    // reconstructs the bed reference, the protected floor and the maximum cut
+    // depth from this stored profile. That had no age bound at all, so a days-old
+    // thickness could be reinstated as the live Z reference for a blank that may
+    // since have been swapped, shifted or re-clamped.
+    const profileAgeMs = Date.now() - Date.parse(String(materialProfile.capturedAt || ""));
+    if (!Number.isFinite(profileAgeMs) || profileAgeMs < 0 || profileAgeMs > SAVED_MEASUREMENT_MAX_AGE_MS) {
+      throw new Error(`The saved bed and stock measurement is from ${materialProfile.capturedAt || "an unrecorded time"} and is too old to rebuild the Z reference from. Probe the bed and stock again for this blank.`);
+    }
+    // A profile derived from a calibration we already rejected is wrong by the
+    // same amount as that calibration was.
+    if (materialProfileIsStale(materialProfile, readProbeLockInvalidation(PROBE_STATE_PATH))) {
+      throw new Error("The saved bed and stock measurement came from a Z calibration that was invalidated. Probe the bed and stock again.");
+    }
     removeProbeLock(PROBE_STATE_PATH);
     clearProbeSetup("tool_touch_in_progress");
     applyMaterialProfile(setup, materialProfile);
@@ -1133,10 +1157,62 @@ const restoreHardLimitsOnStartup = async (knownStatus) => {
     if (new Set(["Door", "Hold"]).has(String(state).split(":")[0])) return { skipped: true, state };
     const lines = await controller.query("$$");
     if (lines.some((line) => /^\$21=0(?:\s|$)/.test(line))) await controller.setBooleanSetting(21, true);
-    return { skipped: false, state };
+    // $20, $130-$132 and $100-$102 were read but never validated. The steps/mm
+    // settings are the conversion between commanded steps and physical travel, so
+    // a change there rescales every stored measurement at once -- the probed
+    // surface, the protected floor, the maximum cut depth, the clearance height --
+    // while leaving them all consistent with each other. Pin them and refuse on
+    // drift rather than cutting to a silently different depth.
+    const settingsVerdict = verifyControllerSettings(parseGrblSettings(lines));
+    return { skipped: false, state, settings: settingsVerdict };
   } catch (error) {
     incident = `STARTUP_SAFETY_CHECK_FAILED:${error?.message || "unknown"}`;
   }
+};
+
+// The travel this software actually intends to command, so $130-$132 can be
+// checked against it. Only what is genuinely known is returned: the validator
+// skips any axis it is not given, which is correct -- inventing an envelope would
+// produce either a false alarm or a false reassurance.
+const machineEnvelopeMm = () => {
+  const envelope = {};
+  let saved; try { saved = readProgram(PROGRAM_STATE_PATH); } catch { /* no accepted program yet */ }
+  const width = Number(saved?.context?.stockWidthMm), height = Number(saved?.context?.stockHeightMm);
+  if (width > 0) envelope.X = width + POSITIONING_OUTSIDE_STOCK_MM;
+  if (height > 0) envelope.Y = height + POSITIONING_OUTSIDE_STOCK_MM;
+  return envelope;
+};
+
+const verifyControllerSettings = (settings) => {
+  const baseline = readSettingsBaseline(CONTROLLER_SETTINGS_PATH);
+  const verdict = validateControllerSettings(settings, { expectedEnvelope: machineEnvelopeMm(), baseline });
+  if (verdict.frameInvalid) {
+    // ONLY a drifted steps/mm reaches here. The scale between commanded and
+    // physical distance changed, so every saved measurement now means a different
+    // physical position and the frame the calibration lives in really is invalid.
+    latchFrameIncident(`CONTROLLER_SETTINGS_REJECTED:${verdict.frameProblems[0]}`, false);
+    recordEvent("controller.settings_rejected", { problems: verdict.frameProblems, stepsPerMm: verdict.stepsPerMm, softLimits: verdict.softLimits });
+    return verdict;
+  }
+  if (!verdict.ok) {
+    // Unreadable, implausible, soft limits on, or declared travel smaller than
+    // intended. Surfaced, never silent -- but NOT latched. An unreadable `$$` is a
+    // communications problem, not evidence that the machine moved, and latching a
+    // hard interlock on a dropped read would brick the setup the way the stuck
+    // motion flag and the invisible Lock button did.
+    incident = `CONTROLLER_SETTINGS_UNVERIFIED:${verdict.problems[0]}`;
+    recordEvent("controller.settings_unverified", { problems: verdict.problems, stepsPerMm: verdict.stepsPerMm, softLimits: verdict.softLimits });
+    return verdict;
+  }
+  // First clean sight of this controller becomes the baseline every later start
+  // is judged against.
+  if (!baseline) {
+    try {
+      writeSettingsBaseline(CONTROLLER_SETTINGS_PATH, { stepsPerMm: verdict.stepsPerMm, capturedAt: verdict.validatedAt, source: "First verified controller connection" });
+      recordEvent("controller.settings_baselined", { stepsPerMm: verdict.stepsPerMm });
+    } catch (error) { recordEvent("controller.settings_baseline_failed", { message: error?.message || "unknown" }); }
+  }
+  return verdict;
 };
 
 const keepalive = setInterval(async () => { if (moving || keepaliveBusy || !controller.connected) return; keepaliveBusy = true; try { await readStatus(); } catch (error) { incident = `KEEPALIVE_FAILED:${error?.message || "unknown"}`; logConnectionEvent(incident, `[cnc] ${incident}`); } finally { keepaliveBusy = false; } }, 1500);
