@@ -119,6 +119,7 @@ export function loadBrowserScript(indexPath) {
         resume: document.getElementById('cncResumeBtn'),
         readiness: document.getElementById('cncReadiness'),
         auditHold: document.getElementById('cncCutAuditHold'),
+        thicknessHold: document.getElementById('cncStockThicknessHold'),
       };
     },
   };`);

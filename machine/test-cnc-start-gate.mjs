@@ -159,3 +159,64 @@ test("the ruined program offers no resume", () => {
   assert.equal(g.resume.disabled, true, "a non-resumable checkpoint must not offer Resume");
   assert.equal(g.start.textContent, "▶ Start carve", "Start must not advertise a resume");
 });
+
+// ---------------------------------------------------------------------------
+// Blank-thickness hold (cam-v3 / rambo-buckle-c752-v2).
+//
+// The v2 Profile and Release programs cut through the sheet to 3.955 mm, derived
+// from 3.855 mm probed on the PREVIOUS damaged blank. The certificate records
+// stock.thicknessMeasuredOnThisBlank: false, and the API publishes a hold for
+// the loaded stage computed from the certified through-depth and the thickness
+// probed on the blank that is actually in the machine. These prove the hold
+// reaches the Start button, and that it does so WITHOUT re-introducing a camera
+// gate — Gavin's acceptance test still has to hold for the four-stage job.
+// ---------------------------------------------------------------------------
+
+const v2MetalJob = (over = {}) => ({
+  ...readyJob,
+  material: "C752 nickel silver",
+  metalMode: "raised-surface",
+  certifiedLibraryId: "rambo-buckle-c752-v2",
+  certifiedStockThicknessMm: "3.855",
+  certifiedStockMeasuredOnThisBlank: "false",
+  profileDepthMm: "3.955",
+  activeStage: "profile",
+  camStage: "profile",
+  stockThicknessHold: "",
+  ...over,
+});
+
+test("the blank-thickness hold disables Start on its own, with every other gate green", () => {
+  const hold = "The profile stage cuts to 3.955 mm but this blank probed 3.700 mm — this blank is thinner than the programs assume.";
+  const held = gate(() => {}, v2MetalJob({ stockThicknessHold: hold }));
+  assert.deepEqual(redChecks(held.readinessHtml), [], "the hold is separate from readiness");
+  assert.equal(held.start.disabled, true, "a mismatched blank thickness must block Start");
+  assert.match(String(held.thicknessHold.textContent || ""), /Blank thickness/);
+  assert.match(String(held.thicknessHold.textContent || ""), /3\.700 mm/);
+  assert.equal(held.thicknessHold.style.display, "");
+  // The reason is on the button too, so a disabled Start is never unexplained.
+  assert.match(String(held.start.title || ""), /3\.955 mm/);
+});
+
+test("clearing the blank-thickness hold re-enables Start, camera still absent", () => {
+  const ok = gate((h) => {
+    // A blank that agrees with the certified through-depth.
+    h.setup.stockThicknessMm = 3.855;
+    h.camera = { state: "offline", fresh: false };
+  }, v2MetalJob({ stockThicknessHold: "" }));
+  assert.deepEqual(redChecks(ok.readinessHtml), [], `unexpected red gates: ${ok.readinessHtml}`);
+  assert.equal(ok.start.disabled, false, "an agreeing blank must not block Start");
+  assert.equal(ok.thicknessHold.style.display, "none");
+  assert.doesNotMatch(ok.readinessHtml, /camera/i);
+});
+
+test("the blank-thickness hold is independent of the audit hold", () => {
+  // Either one alone blocks; neither masks the other's message.
+  const both = gate(() => {}, v2MetalJob({
+    cutAuditHold: "Cutting is held until you confirm the measured thickness of the Z-probe plate.",
+    stockThicknessHold: "The release stage cuts to 3.955 mm but this blank probed 4.100 mm.",
+  }));
+  assert.equal(both.start.disabled, true);
+  assert.match(String(both.auditHold.textContent || ""), /Z-probe plate/);
+  assert.match(String(both.thicknessHold.textContent || ""), /4\.100 mm/);
+});

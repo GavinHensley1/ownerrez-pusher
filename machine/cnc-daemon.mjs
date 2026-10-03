@@ -1,5 +1,9 @@
 import http from "node:http";
 import programHolds from "../api/cnc-program-holds.cjs";
+// Same modules the Vercel API uses, so the provider a metal program may carry and
+// the blank-thickness rule for a through-cut cannot drift between API and bridge.
+import certifiedCam from "../api/cnc-certified-library.cjs";
+import camStageGate from "../api/cnc-cam-stage-gate.cjs";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
@@ -207,10 +211,34 @@ const latchFrameIncident = (reason, duringMotion = hazardousOperationActive?.() 
 const programGuard = async ({ before, analysis, programContext }) => {
   assertFrameValid(frameIncident);
   if (/C752 nickel silver/i.test(String(programContext?.material || ""))) {
-    if (programContext?.camProvider !== "kiri-moto" || programContext?.camCertification !== "verified") throw new Error("Metal program is not a certified Kiri:Moto export");
+    // A program installed from an in-repo certified library must carry exactly
+    // that library's provider; the library re-verified the bytes against a fixed
+    // SHA-256 and re-ran the per-stage motion audit server-side. Anything with no
+    // resolvable library is a hand-import and still has to be a kiri-moto export
+    // with the full operator attestation. An unknown library id resolves to "",
+    // so it falls back to the stricter kiri-moto requirement rather than to none.
+    const libraryProvider = certifiedCam.certifiedLibraryProvider(String(programContext?.certifiedLibraryId || ""));
+    const expectedProvider = libraryProvider || "kiri-moto";
+    if (programContext?.camProvider !== expectedProvider || programContext?.camCertification !== "verified") throw new Error(`Metal program is not a certified ${expectedProvider} export`);
     for (const field of ["camSourceHash", "camAuditHash"]) if (!/^[a-f0-9]{64}$/.test(String(programContext?.[field] || ""))) throw new Error(`Metal CAM ${field} is invalid`);
     if (!["rough", "cleanup", "finish", "profile", "release"].includes(String(programContext?.camStage || ""))) throw new Error("Metal CAM operation is invalid");
     if (!String(programContext?.camTool || "").trim()) throw new Error("Metal CAM tool contract is missing");
+    // A stage that cuts through the blank is only executable if its certified
+    // through-depth still agrees with THIS bridge's probed thickness. The same
+    // function the API uses, so the refusal and the 409 cannot disagree.
+    // approvedProgramDepth below independently re-derives the depth ceiling; this
+    // states the rule as its own refusal so the reason given is the real one.
+    const thicknessHold = camStageGate.certifiedThicknessHold(
+      {
+        profileDepthMm: programContext?.profileDepthMm,
+        certifiedLibraryId: programContext?.certifiedLibraryId,
+        allowSacrificialCutThrough: programContext?.allowSacrificialCutThrough === true,
+      },
+      String(programContext?.camStage || ""),
+      setup,
+      certifiedCam,
+    );
+    if (thicknessHold) throw new Error(thicknessHold);
   }
   const snap = workspace.snapshot();
   if (!snap.calibrated) throw new Error("Virtual boundaries are not calibrated");
@@ -1005,7 +1033,7 @@ const unlockProbeCalibration = async (payload) => {
   workspace.clear();
   return { ok: true, setup: { ...setup } };
 };
-const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", material = "", camProvider = "", camCertification = "", camSourceHash = "", camAuditHash = "", camStage = "", camTool = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
+const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", material = "", camProvider = "", camCertification = "", camSourceHash = "", camAuditHash = "", camStage = "", camTool = "", certifiedLibraryId = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
   const actualSourceHash = createHash("sha256").update(String(gcode || "")).digest("hex");
   // Independent third enforcement of the conditional cut hold, after the browser
   // and the Vercel API. The hold no longer blocklists program hashes; it asserts
@@ -1020,7 +1048,7 @@ const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockRe
   assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (/C752 nickel silver/i.test(String(material || "")) && createHash("sha256").update(String(gcode || "")).digest("hex") !== String(camSourceHash || "")) throw new Error("Metal G-code no longer matches its certified Kiri:Moto source hash");
-  const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true, operation: String(operation || ""), material: String(material || ""), camProvider: String(camProvider || ""), camCertification: String(camCertification || ""), camSourceHash: String(camSourceHash || ""), camAuditHash: String(camAuditHash || ""), camStage: String(camStage || ""), camTool: String(camTool || ""), allowSacrificialCutThrough: allowSacrificialCutThrough === true, sacrificialBackingConfirmed: sacrificialBackingConfirmed === true, profileDepthMm: profileDepthMm !== null && profileDepthMm !== undefined && Number.isFinite(Number(profileDepthMm)) ? Number(profileDepthMm) : null } });
+  const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true, operation: String(operation || ""), material: String(material || ""), camProvider: String(camProvider || ""), camCertification: String(camCertification || ""), camSourceHash: String(camSourceHash || ""), camAuditHash: String(camAuditHash || ""), camStage: String(camStage || ""), camTool: String(camTool || ""), certifiedLibraryId: String(certifiedLibraryId || ""), allowSacrificialCutThrough: allowSacrificialCutThrough === true, sacrificialBackingConfirmed: sacrificialBackingConfirmed === true, profileDepthMm: profileDepthMm !== null && profileDepthMm !== undefined && Number.isFinite(Number(profileDepthMm)) ? Number(profileDepthMm) : null } });
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { version: 1, jobId: savedProgram.jobId, programCapturedAt: savedProgram.capturedAt, state: "running", lastCompletedLine: 0, totalLines: savedProgram.analysis.executableLines, message: "Preflight checks", updatedAt: new Date().toISOString() });
   setMoving(true, "program run"); incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
   recordEvent("program.started", { jobId, executableLines: savedProgram.analysis.executableLines, manualRouter: manualRouter === true });

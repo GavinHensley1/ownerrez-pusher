@@ -9,7 +9,10 @@
 //     Then a GENTLE per-unit nudge (~20%, capped +/-$25) for unit-level scarcity vs the resort.
 //   Overrides pin a night. No occupancy data at all -> price at market.
 let redis=null; try{ const {Redis}=require("@upstash/redis"); redis=new Redis({url:process.env.KV_REST_API_URL,token:process.env.KV_REST_API_TOKEN}); }catch{ redis=null; }
-const { loadCertifiedLibrary: loadCertifiedCncLibrary } = require("./cnc-certified-library.cjs");
+const certifiedCncCam = require("./cnc-certified-library.cjs");
+const { loadCertifiedLibrary: loadCertifiedCncLibrary, certifiedLibraryProvider: certifiedCncLibraryProvider } = certifiedCncCam;
+// Stage-chain and blank-thickness gates, shared verbatim with the Mac bridge.
+const camStageGate = require("./cnc-cam-stage-gate.cjs");
 const { programAuditHold } = require("./cnc-program-holds.cjs");
 // Operator-measured Z-probe puck height. SainSmart ships 14 / 14.19 / 20.17 mm
 // variants and documents unit-to-unit variation, so this is a default, not a fact.
@@ -18,6 +21,16 @@ const { programAuditHold } = require("./cnc-program-holds.cjs");
 // NOT literals: these come from the one plate contract the ESM machine layer also
 // uses, so the API and the daemon cannot drift on the number that sets Z zero.
 const { PLATE_THICKNESS_DEFAULT_MM: PROBE_PUCK_DEFAULT_MM, PLATE_THICKNESS_MIN_MM: PROBE_PUCK_MIN_MM, PLATE_THICKNESS_MAX_MM: PROBE_PUCK_MAX_MM } = require("./cnc-plate-contract.cjs");
+
+// Thin bindings over the shared gate module, so every call site in this file
+// passes the same certified-library accessor and cannot drift from the bridge.
+const metalCertifiedOrder = (job) => camStageGate.metalCertifiedOrder(job, certifiedCncCam);
+const certifiedThicknessHold = (job, stage, setup) => camStageGate.certifiedThicknessHold(
+  // A job with no certified library is gated only when it really is a sacrificial
+  // through-cut; a profile that stops at the protected floor does not go through.
+  Object.assign({}, job, { allowSacrificialCutThrough: String((job && job.profileMode) || "") === "sacrificial-through" && String((job && job.sacrificialBackingConfirmed) || "") === "true" }),
+  stage, setup, certifiedCncCam,
+);
 const FLOOR=99, CEIL=300, OV_MIN=50, OV_MAX=1000, ENDPOINT="https://api.ownerrez.com/v2/spotrates";
 const UNITS=[
   {orp:486910,name:"Bear Claw",offset:0},{orp:486911,name:"Flyin' Horse",offset:5},
@@ -2695,7 +2708,16 @@ if(action==="email_recipients"){
       // proven" rather than as consent.
       {
         const holdHealth=(st.agent&&st.agent.health)||null;
-        for(const entry of st.jobs) if(entry) entry.cutAuditHold=programAuditHold(entry,holdHealth);
+        const holdSetup=(holdHealth&&holdHealth.setup)||{};
+        for(const entry of st.jobs) if(entry){
+          entry.cutAuditHold=programAuditHold(entry,holdHealth);
+          // Published so the operator sees the blank-thickness dependency on the
+          // stage card and the Start button, not only in a 409 after clicking.
+          // Computed for the currently loaded stage, from the same inputs the
+          // Start gate uses.
+          entry.stockThicknessHold=/C752 nickel silver/i.test(String(entry.material||""))||String(entry.metalMode||"")==="raised-surface"
+            ? certifiedThicknessHold(entry,String(entry.activeStage||entry.camStage||""),holdSetup) : "";
+        }
       }
       const now=new Date().toISOString();
       if(req.method==="POST"){
@@ -2832,10 +2854,15 @@ if(action==="email_recipients"){
               for(const stage of order){const program=library.programs[stage];await redis.set("parkside:cnc:gc:"+jid+":"+stage,"@gzip:"+program.gzipBase64);certs[stage]=program.certificate;names[stage]=program.file;}
               await redis.set("parkside:cnc:gc:"+jid,"@gzip:"+library.programs.rough.gzipBase64);
             }catch(e){return res.status(500).json({error:"Could not persist the certified program library"});}
-            const active=certs.rough,design=library.manifest.design,stock=library.manifest.stock;
+            const active=certs.rough,design=library.manifest.design,stock=library.manifest.stock,profile=library.manifest.profile||{};
             job.material=library.manifest.material;job.metalMode="raised-surface";job.carveType="3D relief";job.status="Relief";
-            job.sizeMM=String(design.widthMm);job.sizeVal=String(design.widthMm);job.sizeUnit="mm";job.pieceW=String(design.widthMm);job.pieceH=String(design.heightMm);job.originOffsetXMm=String(design.offsetXMm);job.originOffsetYMm=String(design.offsetYMm);job.reliefDepth=String(design.reliefDepthMm);job.matThick=String(stock.thicknessMm);job.profileMode="sacrificial-through";job.profileDepthMm="4.024";job.profilePassDepthMm="0.05";job.sacrificialBackingConfirmed="true";
-            job.planTools=JSON.stringify({roughBit:library.manifest.stages.rough.tool,finishBit:library.manifest.stages.finish.tool,profileBit:library.manifest.stages.profile.tool,roughRpm:18000,finishRpm:18000});job.planStatus="approved";job.planVersion="certified-library-1";
+            job.sizeMM=String(design.widthMm);job.sizeVal=String(design.widthMm);job.sizeUnit="mm";job.pieceW=String(design.widthMm);job.pieceH=String(design.heightMm);job.originOffsetXMm=String(design.offsetXMm);job.originOffsetYMm=String(design.offsetYMm);job.reliefDepth=String(design.reliefDepthMm);job.matThick=String(stock.thicknessMm);job.profileMode="sacrificial-through";job.profileDepthMm=String(profile.depthMm);job.profilePassDepthMm=String(((library.manifest.stages.profile||{}).maxDescentPerCutMove)||profile.sacrificialAllowanceMm||0.05);job.sacrificialBackingConfirmed="true";
+            // Carry the manifest's own stock provenance onto the job. The through-cut
+            // stages' depth is derived from this thickness, and when it was not
+            // measured on the blank now in the machine the Start gate below refuses
+            // them rather than relying on anyone reading a note.
+            job.certifiedStockThicknessMm=String(stock.thicknessMm);job.certifiedStockMeasuredOnThisBlank=stock.thicknessMeasuredOnThisBlank===true?"true":"false";job.certifiedStockMeasuredOn=String(stock.thicknessMeasuredOn||"");job.certifiedThicknessSensitiveStages=JSON.stringify(library.manifest.thicknessSensitiveStages||[]);job.certifiedOmittedStages=JSON.stringify(library.manifest.omittedStages||[]);
+            job.planTools=JSON.stringify({roughBit:library.manifest.stages.rough.tool,finishBit:library.manifest.stages.finish.tool,profileBit:library.manifest.stages.profile.tool,roughRpm:library.manifest.stages.rough.rpmNominal||18000,finishRpm:library.manifest.stages.finish.rpmNominal||18000,profileRpm:library.manifest.stages.profile.rpmNominal||18000});job.planStatus="approved";job.planVersion="certified-library-"+library.manifest.version;
             job.hasGcode=true;job.gcodeEncoding="gzip-base64";job.gcodeStages=JSON.stringify(order);job.gcodeNames=JSON.stringify(names);job.camCertificates=JSON.stringify(certs);job.stageCompletions="{}";job.activeStage="rough";job.gcodeName=names.rough;job.progress=0;job.stageRequiresProbe=true;job.stageActivatedAt=now;job.resumeInvalidatedAt=now;job.certifiedLibraryId=library.manifest.id;job.certifiedLibraryVersion=String(library.manifest.version);job.certifiedLibraryInstalledAt=now;
             job.camProvider=active.provider;job.camCertification=active.certification;job.camCertifiedAt=active.certifiedAt;job.camSourceHash=active.sourceHash;job.camAuditHash=active.auditHash;job.camStage="rough";job.camTool=active.tool;job.camAudit=active.audit;delete job.profileCompletedAt;job.updatedAt=now;
           }
@@ -2870,7 +2897,7 @@ if(action==="email_recipients"){
           if(b.activateStage!==undefined){
             const stage=String(b.activateStage||""); if(["rough","cleanup","finish","detail","profile","release","all"].indexOf(stage)===-1) return res.status(400).json({error:"invalid machining stage"});
             if(["queued","accepted","running","paused"].indexOf(String(job.agentState||""))!==-1) return res.status(409).json({error:"Stop the current machine operation before loading another stage",cnc:st});
-            let stageOrder=[];try{stageOrder=JSON.parse(job.gcodeStages||"[]");}catch(e){}let completed={};try{completed=JSON.parse(job.stageCompletions||"{}");}catch(e){}const certifiedOrder=["rough","cleanup","finish","profile","release"],certifiedIndex=certifiedOrder.indexOf(stage);
+            let stageOrder=[];try{stageOrder=JSON.parse(job.gcodeStages||"[]");}catch(e){}let completed={};try{completed=JSON.parse(job.stageCompletions||"{}");}catch(e){}const certifiedOrder=metalCertifiedOrder(job),certifiedIndex=certifiedOrder.indexOf(stage);
             if(metalJob&&certifiedIndex>0){const required=certifiedOrder[certifiedIndex-1];if(!stageOrder.includes(required))return res.status(409).json({error:"Import the certified "+required+" stage before loading "+stage,cnc:st});if(!completed[required])return res.status(409).json({error:"Complete the "+required+" stage before loading "+stage,cnc:st});}
             if(stage==="release"&&!job.profileCompletedAt)return res.status(409).json({error:"Complete the Profile stage before loading Final Release",cnc:st});
             let code=""; try{if(redis){const v=await redis.get("parkside:cnc:gc:"+jid+":"+stage);code=(v==null)?"":String(v);}}catch(e){} if(!code)return res.status(404).json({error:"stage G-code not found"});
@@ -2927,8 +2954,27 @@ if(action==="email_recipients"){
                 // conductive touch for metal. Still a 409, still fails closed.
                 const auditHold=programAuditHold(job,health);if(auditHold)return res.status(409).json({error:auditHold,cnc:st});
                 if(!job.hasGcode) return res.status(409).json({error:"Generate the design before Start",cnc:st});
-                if(metalJob&&(job.camProvider!=="kiri-moto"||job.camCertification!=="verified"||!/^[a-f0-9]{64}$/.test(String(job.camSourceHash||""))||!/^[a-f0-9]{64}$/.test(String(job.camAuditHash||"")))) return res.status(409).json({error:"Metal Start is blocked. Import an animated and certified Kiri:Moto operation first.",cnc:st});
-                if(metalJob){let imported=[];try{imported=JSON.parse(job.gcodeStages||"[]");}catch(e){}const required=["rough","cleanup","finish","profile","release"],missing=required.filter(stage=>!imported.includes(stage));if(missing.length)return res.status(409).json({error:"Metal Start is blocked until all five certified Kiri:Moto stages are imported. Missing: "+missing.join(", "),cnc:st});}
+                // A metal program is only startable if it carries a verified certificate
+                // with both 64-hex hashes. The provider must be kiri-moto UNLESS the job
+                // was installed from an in-repo certified library, in which case it must
+                // be exactly that library's provider — the library itself re-verified the
+                // bytes and re-ran the per-stage motion audit server-side. Hand-imported
+                // files have no library to vouch for them and still require kiri-moto plus
+                // the full operator attestation at the import endpoint.
+                if(metalJob){
+                  const libraryProvider=certifiedCncLibraryProvider(String(job.certifiedLibraryId||""));
+                  const providerOk=libraryProvider?job.camProvider===libraryProvider:job.camProvider==="kiri-moto";
+                  if(!providerOk||job.camCertification!=="verified"||!/^[a-f0-9]{64}$/.test(String(job.camSourceHash||""))||!/^[a-f0-9]{64}$/.test(String(job.camAuditHash||""))) return res.status(409).json({error:"Metal Start is blocked. Load the certified program library, or import an animated and certified Kiri:Moto operation first.",cnc:st});
+                }
+                if(metalJob){let imported=[];try{imported=JSON.parse(job.gcodeStages||"[]");}catch(e){}const required=metalCertifiedOrder(job),missing=required.filter(stage=>!imported.includes(stage));if(missing.length)return res.status(409).json({error:"Metal Start is blocked until all "+required.length+" certified stages are imported. Missing: "+missing.join(", "),cnc:st});}
+                // BLANK-THICKNESS GATE. Profile and Release cut through the sheet at a
+                // depth derived from a measured stock thickness. If that measurement came
+                // from a different blank — cam-v3 records
+                // stock.thicknessMeasuredOnThisBlank: false — those two programs are not
+                // valid for the sheet now in the machine. Checked against the probed value,
+                // not against a note, and independently re-checked by the daemon in
+                // approvedProgramDepth. Rough and Finish are relief-only and unaffected.
+                if(metalJob){const thicknessHold=certifiedThicknessHold(job,String(job.activeStage||job.camStage||""),setup);if(thicknessHold)return res.status(409).json({error:thicknessHold,cnc:st});}
                 if(job.hasCreative&&job.planStatus!=="approved") return res.status(409).json({error:"Approve the machining plan before Start",cnc:st});
                 if(!ws.calibrated) return res.status(409).json({error:"Virtual machine boundaries are not ready",cnc:st});
                 if(!setup.xyReady) return res.status(409).json({error:"Set X/Y zero before Start",cnc:st});
@@ -3001,7 +3047,7 @@ if(action==="email_recipients"){
               }
               if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
               if(act==="start"){
-                cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;cmd.operation=String(job.activeStage||job.camStage||"");cmd.material=String(job.material||"");cmd.camProvider=String(job.camProvider||"");cmd.camCertification=String(job.camCertification||"");cmd.camSourceHash=String(job.camSourceHash||"");cmd.camAuditHash=String(job.camAuditHash||"");cmd.camStage=String(job.camStage||"");cmd.camTool=String(job.camTool||"");
+                cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;cmd.operation=String(job.activeStage||job.camStage||"");cmd.material=String(job.material||"");cmd.camProvider=String(job.camProvider||"");cmd.camCertification=String(job.camCertification||"");cmd.camSourceHash=String(job.camSourceHash||"");cmd.camAuditHash=String(job.camAuditHash||"");cmd.camStage=String(job.camStage||"");cmd.camTool=String(job.camTool||"");cmd.certifiedLibraryId=String(job.certifiedLibraryId||"");
                 const throughProfile=["profile","release"].includes(cmd.operation)&&job.profileMode==="sacrificial-through"&&job.sacrificialBackingConfirmed==="true";
                 if(throughProfile){const stock=Number(setup.stockThicknessMm),target=Number(job.profileDepthMm),allowance=target-stock;if(!(stock>0&&target>=stock&&allowance>=0&&allowance<=.2001))return res.status(409).json({error:"Approved sacrificial profile depth no longer matches the measured stock",cnc:st});cmd.allowSacrificialCutThrough=true;cmd.sacrificialBackingConfirmed=true;cmd.profileDepthMm=target;}
               }

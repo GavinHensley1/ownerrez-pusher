@@ -145,10 +145,24 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /Project metal G-code generation is permanently retired/);
   assert.match(html, /METAL CAM CERTIFICATION · KIRI:MOTO ONLY/);
   assert.match(html, /option value="cleanup">W01015 progressive cleanup/);
-  assert.match(html, /Stages are sequential: Rough → Cleanup → Finish → Profile → Release/);
-  assert.match(html, /Load certified five-stage job/);
-  assert.match(html, /cutting approval has been withdrawn/);
-  assert.match(html, /installCertifiedProgram:'rambo-buckle-c752-v1'/);
+  // The stage sequence, the stage count and the per-stage tool are rendered from
+  // the installed certificate, not written out, so a library that deliberately
+  // omits a stage cannot leave the UI naming a stage or bit that does not exist.
+  assert.match(html, /Stages are sequential: '\+cncEsc\(sequence\)/);
+  assert.match(html, /var sequence=stages\.map\(function\(s\)\{return cncStageLabel\(s\);\}\)\.join\(' → '\)/);
+  assert.match(html, /Load certified job/);
+  assert.match(html, /var CNC_CERTIFIED_LIBRARY_ID='rambo-buckle-c752-v2'/);
+  assert.match(html, /installCertifiedProgram:CNC_CERTIFIED_LIBRARY_ID/);
+  // Omitted stages are disclosed with the certificate's own recorded reason.
+  assert.match(html, /Deliberately omitted:/);
+  assert.match(html, /certifiedOmittedStages/);
+  // The blank-thickness dependency is rendered, and the Start button is disabled
+  // on the server-computed hold rather than only refused after the click.
+  assert.match(html, /BLANK THICKNESS NOT MEASURED ON THIS SHEET/);
+  assert.match(html, /cam\/generate-buckle\.mjs/);
+  assert.match(html, /var thicknessHold=String\(job&&job\.stockThicknessHold\|\|''\)/);
+  assert.match(html, /start\.disabled=!\(ready&&!auditHold&&!thicknessHold/);
+  assert.match(html, /CUTS THROUGH THE BLANK to/);
   assert.match(html, /cncCamAnimated/);
   assert.match(html, /cncCamOrigin/);
   assert.match(html, /cncCamToolDepth/);
@@ -437,15 +451,39 @@ test("Vercel queues commands for an authenticated outbound CNC agent", () => {
   assert.match(api, /\["rough","cleanup","finish","profile","release"\]/);
   assert.match(api, /camCertificates/);
   assert.match(api, /stageCompletions/);
-  assert.match(api, /all five certified Kiri:Moto stages are imported/);
+  // The completeness gate now counts the installed library's own stages, so a
+  // library that records why it omits one is not blocked forever on a stage it
+  // deliberately does not have. A job with no library keeps the fixed five.
+  assert.match(api, /certified stages are imported\. Missing: /);
+  assert.match(api, /const required=metalCertifiedOrder\(job\)/);
+  // The chain and thickness rules live in one CommonJS module both the API and
+  // the bridge require, so the 409 and the bridge refusal cannot diverge.
+  const camGate = readFileSync(new URL("api/cnc-cam-stage-gate.cjs", root), "utf8");
+  assert.match(camGate, /const METAL_FALLBACK_ORDER = \["rough", "cleanup", "finish", "profile", "release"\]/);
+  assert.match(camGate, /const SACRIFICIAL_ALLOWANCE_MAX_MM = 0\.2/);
+  assert.match(api, /require\("\.\/cnc-cam-stage-gate\.cjs"\)/);
+  assert.match(daemon, /from "\.\.\/api\/cnc-cam-stage-gate\.cjs"/);
+  assert.match(daemon, /camStageGate\.certifiedThicknessHold\(/);
   assert.match(api, /Import the certified Rough stage first/);
   assert.match(api, /Complete the "\+required\+" stage before loading/);
   assert.match(api, /The imported metal G-code does not match its CAM certificate/);
   assert.match(api, /compressed G-code could not be decoded/);
-  assert.match(api, /Metal Start is blocked\. Import an animated and certified Kiri:Moto operation first/);
+  assert.match(api, /Metal Start is blocked\. Load the certified program library, or import an animated and certified Kiri:Moto operation first/);
+  // The provider a metal program may carry is the installed library's own, and an
+  // unresolvable library id falls back to the stricter kiri-moto requirement.
+  assert.match(api, /const libraryProvider=certifiedCncLibraryProvider\(String\(job\.certifiedLibraryId\|\|""\)\)/);
+  assert.match(api, /providerOk=libraryProvider\?job\.camProvider===libraryProvider:job\.camProvider==="kiri-moto"/);
+  // Blank-thickness gate: checked at Start against the probed value, published to
+  // the UI, and independently re-checked in the daemon.
+  assert.match(api, /const thicknessHold=certifiedThicknessHold\(job,String\(job\.activeStage\|\|job\.camStage\|\|""\),setup\);if\(thicknessHold\)return res\.status\(409\)/);
+  assert.match(api, /entry\.stockThicknessHold=/);
+  assert.match(api, /cmd\.certifiedLibraryId=String\(job\.certifiedLibraryId\|\|""\)/);
   assert.match(api, /Saved-program resume is disabled for metal/);
   assert.match(agent, /camProvider: command\.camProvider/);
-  assert.match(daemon, /Metal program is not a certified Kiri:Moto export/);
+  assert.match(agent, /certifiedLibraryId: command\.certifiedLibraryId/);
+  assert.match(daemon, /Metal program is not a certified \$\{expectedProvider\} export/);
+  assert.match(daemon, /certifiedCam\.certifiedLibraryProvider\(String\(programContext\?\.certifiedLibraryId \|\| ""\)\)/);
+  assert.match(daemon, /const expectedProvider = libraryProvider \|\| "kiri-moto"/);
   assert.match(daemon, /\["rough", "cleanup", "finish", "profile", "release"\]/);
   assert.match(daemon, /Metal G-code no longer matches its certified Kiri:Moto source hash/);
   // The daemon now refuses metal resume from resumeSnapshot, which is also what

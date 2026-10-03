@@ -506,12 +506,16 @@
       <div class="muted" id="cncSetupHint" style="font-size:11px;margin-top:8px"></div>
       <div id="cncMetalContract" class="cnc-plan-ok" style="display:none;margin-top:10px;text-align:left">
         <b>Raised-metal buckle mode · external CAM required</b><br>
-        Project's custom metal generator is retired. Build and animate each operation in Kiri:Moto, then import its certified .nc file. Project independently audits the exact file, protects the probed depth and stock envelope, hashes the certificate, and blocks Start if the Kiri:Moto contract is missing or changed.
+        Project's custom metal generator is retired. Metal programs come from an independently audited CAM library. Project re-verifies the exact bytes against a fixed SHA-256, re-runs a per-stage motion audit server-side, protects the probed depth and stock envelope, hashes the certificate, and blocks Start if any of it is missing or changed.
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(126,224,172,.28);display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <div style="flex:1;min-width:220px"><b>Saved Programs · Rambo set under audit</b><div class="muted" style="font-size:11px;margin-top:2px">The five files remain available for review, but their cutting approval has been withdrawn. Depth, remaining-stock engagement, and runtime require correction. This does not restrict manual setup.</div></div>
-          <button id="cncCertifiedInstallBtn" class="ghost" onclick="cncInstallCertifiedProgram(this)">Load certified five-stage job</button>
+          <div style="flex:1;min-width:220px"><b>Saved Programs · The Rambo's buckle · C752</b><div class="muted" id="cncCertifiedLibraryNote" style="font-size:11px;margin-top:2px">Four stages rebuilt from tool and material physics: Rough → Finish → Profile → Release, 3.91 h programmed. Cleanup and Detail are deliberately omitted and record why.</div></div>
+          <button id="cncCertifiedInstallBtn" class="ghost" onclick="cncInstallCertifiedProgram(this)">Load certified job</button>
           <span id="cncCertifiedInstallStatus" class="muted" style="font-size:11px"></span>
         </div>
+        <!-- The through-cut stages' depth is derived from a stock thickness that may
+             not have been measured on the blank now in the machine. This states it;
+             the Start gate enforces it against the probed value independently. -->
+        <div id="cncBlankThicknessNotice" class="cnc-plan-warning" style="display:none;margin-top:10px;text-align:left"></div>
       </div>
     </div>
 
@@ -598,6 +602,7 @@
       <div id="cncReadiness" style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:11px"></div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <p id="cncCutAuditHold" style="display:none;color:#ffcf79;font-size:12px" role="status"></p>
+        <p id="cncStockThicknessHold" style="display:none;color:#ff9e7a;font-size:12px;font-weight:600" role="status"></p>
         <p id="cncResumeWithdrawn" style="display:none;color:#ffcf79;font-size:12px" role="status"></p>
         <button id="cncStartBtn" class="cncCommandBtn" onclick="cncStart(this)" disabled style="font-size:16px;padding:12px 22px;font-weight:700">&#9654; Start carve</button>
         <button id="cncPauseBtn" class="cncCommandBtn" onclick="cncMachineAction('pause',{},this)">Pause</button>
@@ -1922,12 +1927,42 @@ async function cncSaveSetup(){
 function cncSetActive(id){ CNC_CUR=id||null; cncRenderActive(); }
 async function cncNewJob(){ var p=prompt('New job — project name?','Belt Buckle'); if(p===null) return; var material=String((document.getElementById('cncMat')||{}).value||'').trim(); var j=await cncPost({addJob:{project:(p||'Job'),material:material}}); if(j&&j.cnc){ CNC=j.cnc; CNC_CUR=CNC.jobs[CNC.jobs.length-1].id; renderCncJobs(); await cncRenderActive(); } }
 async function cncPrepareMetalJob(){var source=cncCurrentJob();if(!source||!source.hasCreative){alert('Choose the completed buckle job with its artwork first.');return;}if(!confirm('Create a new raised-metal buckle job from this artwork?\n\nThis copies only the artwork and dimensions. It does not copy wood G-code, depth, probes, zeroes, checkpoints, or machine commands. Metal relief depth stays locked until the actual C752 blank is probed.'))return;var r=await cncPost({prepareMetalJob:{sourceJobId:source.id}});if(!r||!r.cnc||r.error){alert((r&&r.error)||'Could not prepare the metal job');return;}CNC=r.cnc;CNC_CUR=String(r.jobId||'');renderCncJobs();await cncRenderActive();var st=document.getElementById('cncRunStatus');if(st)st.textContent='Raised-metal job prepared. Artwork is copied; no G-code or machine command was created.';}
-async function cncInstallCertifiedProgram(button){var job=cncCurrentJob();if(!job){alert('Pick the raised-metal buckle job first.');return;}if(!cncIsMetalJob(job)){alert('The certified Rambo buckle library can be loaded only into a raised C752 metal job.');return;}var status=document.getElementById('cncCertifiedInstallStatus'),old=button.textContent;button.disabled=true;button.textContent='Verifying & loading…';if(status)status.textContent='Server-side hash and motion audit running…';try{var r=await cncPost({jobId:job.id,installCertifiedProgram:'rambo-buckle-c752-v1'});if(!r||!r.cnc||r.error)throw Error((r&&r.error)||'Could not load certified programs');CNC=r.cnc;renderCncJobs();await cncRenderActive();job=cncCurrentJob();if(status)status.textContent='Five stages installed · Rough selected · no machine command sent';var run=document.getElementById('cncRunStatus');if(run)run.textContent='Certified Rambo buckle library loaded. Rough is selected. Start remains blocked until the visible machine, X/Y, probe, bit, and router checks are complete.';}catch(e){if(status)status.textContent='Load failed';alert(e.message||e);}finally{button.disabled=false;button.textContent=(cncCurrentJob()&&cncCurrentJob().certifiedLibraryId==='rambo-buckle-c752-v1')?'Reload certified five-stage job':old;}}
+// The production metal library. v1 (five Kiri:Moto operations) stays resolvable
+// server-side for an already-installed job, but the loader installs v2 — the
+// openclaw-cam rebuild, four stages, 3.91 h instead of 20.27 h.
+var CNC_CERTIFIED_LIBRARY_ID='rambo-buckle-c752-v2';
+function cncCertifiedStageCount(job){var stages=[];try{stages=JSON.parse(job&&job.gcodeStages||'[]');}catch(e){}return stages.length;}
+async function cncInstallCertifiedProgram(button){var job=cncCurrentJob();if(!job){alert('Pick the raised-metal buckle job first.');return;}if(!cncIsMetalJob(job)){alert('The certified Rambo buckle library can be loaded only into a raised C752 metal job.');return;}var status=document.getElementById('cncCertifiedInstallStatus'),old=button.textContent;button.disabled=true;button.textContent='Verifying & loading…';if(status)status.textContent='Server-side hash and motion audit running…';try{var r=await cncPost({jobId:job.id,installCertifiedProgram:CNC_CERTIFIED_LIBRARY_ID});if(!r||!r.cnc||r.error)throw Error((r&&r.error)||'Could not load certified programs');CNC=r.cnc;renderCncJobs();await cncRenderActive();job=cncCurrentJob();var n=cncCertifiedStageCount(job);if(status)status.textContent=n+' stages installed · Rough selected · no machine command sent';var run=document.getElementById('cncRunStatus');if(run)run.textContent='Certified Rambo buckle library loaded ('+n+' stages). Rough is selected. Start remains blocked until the visible machine, X/Y, probe, bit, and router checks are complete.';}catch(e){if(status)status.textContent='Load failed';alert(e.message||e);}finally{button.disabled=false;var cur=cncCurrentJob();button.textContent=(cur&&cur.certifiedLibraryId===CNC_CERTIFIED_LIBRARY_ID)?'Reload certified job':old;}}
+// Renders the blank-thickness dependency from the installed certificate. It is
+// shown whenever the certificate says the thickness was not measured on this
+// blank, whether or not a through-cut stage is currently loaded — the dependency
+// exists from install time, not only at Start.
+function cncRenderBlankThicknessNotice(job){
+  var el=document.getElementById('cncBlankThicknessNotice');if(!el)return;
+  if(!job||!cncIsMetalJob(job)||!job.certifiedLibraryId){el.style.display='none';el.innerHTML='';return;}
+  var measuredHere=String(job.certifiedStockMeasuredOnThisBlank||'')==='true',certified=Number(job.certifiedStockThicknessMm),through=Number(job.profileDepthMm);
+  var sensitive=[];try{sensitive=JSON.parse(job.certifiedThicknessSensitiveStages||'[]');}catch(e){}
+  if(!sensitive.length)sensitive=['profile','release'];
+  var su=((((CNC||{}).agent||{}).health||{}).setup)||{},probed=Number(su.stockThicknessMm);
+  if(measuredHere&&!(Number.isFinite(certified)&&Number.isFinite(probed)&&Math.abs(certified-probed)>0.05)){el.style.display='none';el.innerHTML='';return;}
+  var labels=sensitive.map(function(s){return cncStageLabel(s);}).join(' and ');
+  var agree=Number.isFinite(probed)&&probed>0&&Number.isFinite(through)&&(through-probed)>=-0.001&&(through-probed)<=0.2001;
+  el.style.display='';
+  el.innerHTML='<b>BLANK THICKNESS NOT MEASURED ON THIS SHEET — '+cncEsc(labels.toUpperCase())+' DEPEND ON IT</b><br>'
+    +'These programs assume '+(Number.isFinite(certified)?certified.toFixed(3):'?')+' mm, measured on '+cncEsc(String(job.certifiedStockMeasuredOn||'a different sheet'))+'. '
+    +cncEsc(labels)+' cut through the blank to '+(Number.isFinite(through)?through.toFixed(3):'?')+' mm (through the sheet plus the sacrificial allowance), so if the sheet now in the machine differs materially those two stages must be regenerated with <code>cam/generate-buckle.mjs</code> and the library reloaded before they are run. '
+    +'Rough and Finish are relief-only and are not sensitive to this.<br>'
+    +'<b>Probed on this blank: '+(Number.isFinite(probed)&&probed>0?(probed.toFixed(3)+' mm'):'not yet measured')+'</b> · '
+    +(Number.isFinite(probed)&&probed>0?(agree?('agrees with the certified through-depth — '+cncEsc(labels)+' may run'):('does NOT agree — '+cncEsc(labels)+' are blocked at Start')):('probe the bed and stock; '+cncEsc(labels)+' stay blocked until a measured thickness agrees'))+'.';
+}
 async function cncEnsureJob(){ var j=cncCurrentJob(); if(j) return j; var r=await cncPost({addJob:{project:'Belt Buckle'}}); if(r&&r.cnc){ CNC=r.cnc; CNC_CUR=CNC.jobs[CNC.jobs.length-1].id; renderCncJobs(); return cncCurrentJob(); } return null; }
 async function cncRenderActive(){
   renderCncActiveSelect();
   var job=cncCurrentJob(); cncPopulateSetup(job); cncFillMachine(); cncRenderPanelPlan();
-  var libraryButton=document.getElementById('cncCertifiedInstallBtn'),libraryStatus=document.getElementById('cncCertifiedInstallStatus');if(libraryButton)libraryButton.textContent=job&&job.certifiedLibraryId==='rambo-buckle-c752-v1'?'Reload certified five-stage job':'Load certified five-stage job';if(libraryStatus)libraryStatus.textContent=job&&job.certifiedLibraryId==='rambo-buckle-c752-v1'?('Installed '+new Date(job.certifiedLibraryInstalledAt||job.updatedAt).toLocaleString()):'';
+  var libraryButton=document.getElementById('cncCertifiedInstallBtn'),libraryStatus=document.getElementById('cncCertifiedInstallStatus'),installed=!!(job&&job.certifiedLibraryId);
+  if(libraryButton)libraryButton.textContent=installed?'Reload certified job':'Load certified job';
+  if(libraryStatus)libraryStatus.textContent=installed?(String(job.certifiedLibraryId)+' · '+cncCertifiedStageCount(job)+' stages · installed '+new Date(job.certifiedLibraryInstalledAt||job.updatedAt).toLocaleString()):'';
+  cncRenderBlankThicknessNotice(job);
   var cp=document.getElementById('cncCreativePrev'), gp=document.getElementById('cncGcodePrev'), gm=document.getElementById('cncGcodeMeta');
   cncRenderAgent(job); cncMaybePoll();
   if(!job){ if(cp)cp.innerHTML='<span class="muted">No image yet</span>'; if(gp)gp.innerHTML='<span class="muted">Hit Load to populate the design</span>'; if(gm)gm.textContent=''; return; }
@@ -1992,7 +2027,13 @@ function cncRenderAgent(job){
   var resumeNote=document.getElementById('cncResumeWithdrawn');
   if(resumeNote){resumeNote.textContent=resumeBlocked?('Resume withdrawn · '+resumeBlocked):'';resumeNote.style.display=resumeBlocked?'':'none';}
   var auditHold=String(job&&job.cutAuditHold||''),auditNote=document.getElementById('cncCutAuditHold');if(auditNote){auditNote.textContent=auditHold;auditNote.style.display=auditHold?'':'none';}
-  var start=document.getElementById('cncStartBtn'); if(start){start.disabled=!(ready&&!auditHold&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&state!=='running'&&state!=='queued');start.textContent=hasSavedResume?'▶ Restart stage from beginning':'▶ Start carve';}
+  // Blank-thickness hold. The server computes this for the loaded stage from the
+  // certificate's through-depth and the physically probed thickness, so a Profile
+  // or Release posted for a different sheet cannot be armed. Shown here as well as
+  // returned as a 409, so it is visible before the click rather than after it.
+  var thicknessHold=String(job&&job.stockThicknessHold||''),thicknessNote=document.getElementById('cncStockThicknessHold');
+  if(thicknessNote){thicknessNote.textContent=thicknessHold?('Blank thickness · '+thicknessHold):'';thicknessNote.style.display=thicknessHold?'':'none';}
+  var start=document.getElementById('cncStartBtn'); if(start){start.disabled=!(ready&&!auditHold&&!thicknessHold&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&state!=='running'&&state!=='queued');start.textContent=hasSavedResume?'▶ Restart stage from beginning':'▶ Start carve';start.title=thicknessHold||auditHold||'';}
   var pause=document.getElementById('cncPauseBtn'); if(pause) pause.disabled=state!=='running';
   var resume=document.getElementById('cncResumeBtn'); if(resume){resume.disabled=!!auditHold||h.frameValid===false||(state!=='paused'&&!(hasSavedResume&&controller.idle&&!h.moving));resume.textContent=hasSavedResume&&state!=='paused'?'Resume saved carve':'Resume';resume.title=state!=='paused'&&resumeBlocked?resumeBlocked:'';}
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!h.moving&&!['queued','accepted','running','paused'].includes(state);
@@ -2223,7 +2264,40 @@ function cncRenderToolpath(text,requestedStage){
   if(meta) meta.textContent=cncStageLabel(stage)+' · exact G-code depth · '+nc+' cut moves · '+w.toFixed(1)+'×'+h.toFixed(1)+' mm · '+(isFinite(minz)?Math.abs(minz).toFixed(3):'0')+' mm deepest'+(covered>=0?(' · '+foot.diameterMm.toFixed(2)+' mm cutter clears '+(covered*100/(W*H)).toFixed(0)+'% of the preview frame'):'')+(airMin+cutMin>0?(' · '+(cutMin*100/(airMin+cutMin)).toFixed(1)+'% of feed time in material'):'')+' · '+nr+' rapids not drawn';
 }
 function cncStageLabel(s){return s==='all'?'Relief':s==='cleanup'?'W01015 Cleanup':s.charAt(0).toUpperCase()+s.slice(1);}
-function cncRenderStages(job){var el=document.getElementById('cncGeneratedStages');if(!el)return;var stages=[],tools={},certs={};try{stages=JSON.parse(job&&job.gcodeStages||'[]');tools=JSON.parse(job&&job.planTools||'{}');certs=JSON.parse(job&&job.camCertificates||'{}');}catch(e){}if(!stages.length){el.innerHTML='';return;}el.innerHTML='<div class="muted" style="font-size:10.5px;margin-top:7px">'+(job.cutAuditHold?'KIRI:MOTO STAGES · CUT HELD UNTIL THE Z REFERENCE IS PROVEN':'CERTIFIED KIRI:MOTO STAGES · MANUAL ROUTER')+'</div>'+stages.map(function(s,i){var active=job.activeStage===s,rough=(s==='rough'||s==='profile'||s==='release'),detail=s==='detail',tool=(certs[s]&&certs[s].tool)||(detail?tools.detailBit:(rough?tools.roughBit:tools.finishBit)),rpm=detail?tools.detailRpm:(rough?tools.roughRpm:tools.finishRpm),note=s==='rough'?'run first':(s==='cleanup'?'change to W01015 + touch off on stock':(s==='finish'?'reuse W01015; no new touch-off if unchanged':(detail?'change to V-bit + touch off on stock':(s==='profile'?'change to RU2100 + touch off on stock':'run last · reuse RU2100 · independently secure buckle to sacrificial backing')))),rpmNote=rpm?('set '+Math.round(rpm)+' RPM'+(Math.round(rpm)===18000?' / gear 4':'')):'use the certified Kiri:Moto spindle setting';return '<div class="cnc-stage"><b>'+cncStageLabel(s)+'</b><span>'+cncEsc(tool||'selected bit')+'</span><span class="muted">'+(job.cutAuditHold?'Cut held · confirm the plate, re-probe and verify surface contact':note+' · '+rpmNote+' · turn router on manually')+'</span><span style="margin-left:auto;display:flex;gap:6px;align-items:center"><button class="ghost" onclick="cncPreviewStage(\''+s+'\',this)">Preview</button>'+(active?'<span style="color:#7ee0ac">Loaded</span>':'<button class="ghost" onclick="cncActivateStage(\''+s+'\',this)">Load stage</button>')+'</span></div>';}).join('')+'<div class="cnc-plan-warning" style="margin-top:7px">Stages are sequential: Rough → Cleanup → Finish → Profile → Release. Project cannot start or stop the Genmitsu 710W AC router. Switch it off manually after completion or any Stop.</div>';}
+function cncRenderStages(job){
+  var el=document.getElementById('cncGeneratedStages');if(!el)return;
+  var stages=[],tools={},certs={},omitted=[],sensitive=[];
+  try{stages=JSON.parse(job&&job.gcodeStages||'[]');tools=JSON.parse(job&&job.planTools||'{}');certs=JSON.parse(job&&job.camCertificates||'{}');}catch(e){}
+  try{omitted=JSON.parse(job&&job.certifiedOmittedStages||'[]');}catch(e){}
+  try{sensitive=JSON.parse(job&&job.certifiedThicknessSensitiveStages||'[]');}catch(e){}
+  if(!stages.length){el.innerHTML='';return;}
+  if(!sensitive.length)sensitive=['profile','release'];
+  var thicknessHold=String(job&&job.stockThicknessHold||''),measuredHere=String(job&&job.certifiedStockMeasuredOnThisBlank||'')==='true';
+  // The tool for a stage is the certificate's own tool, so a stage card can never
+  // name a bit the audited program was not posted for.
+  var prevTool='';
+  var rows=stages.map(function(s){
+    var active=job.activeStage===s,cert=certs[s]||null,tool=(cert&&cert.tool)||'',rpm=(s==='finish')?tools.finishRpm:((s==='profile'||s==='release')?(tools.profileRpm||tools.roughRpm):(s==='detail'?tools.detailRpm:tools.roughRpm));
+    var changed=!!tool&&!!prevTool&&String(tool)!==String(prevTool),first=!prevTool;
+    var note=first?'run first':(changed?'change the bit, then touch off on stock':'same bit as the previous stage · no new touch-off needed');
+    if(s==='release')note+=' · run last · independently secure the buckle to the sacrificial backing first';
+    var through=sensitive.indexOf(s)>=0;
+    var rpmNote=rpm?('set '+Math.round(rpm)+' RPM'):'use the certified spindle setting';
+    prevTool=tool||prevTool;
+    var detailLine=job.cutAuditHold?'Cut held · confirm the plate, re-probe and verify surface contact':(note+' · '+rpmNote+' · turn the router on manually');
+    // A through-cut stage says, on its own card, that its depth came from a
+    // thickness measured elsewhere — and whether it is currently blocked.
+    var throughLine=through?('<span style="color:'+(thicknessHold?'#ff9e7a':'#ffcf79')+';font-size:11px">CUTS THROUGH THE BLANK to '+Number(job.profileDepthMm||0).toFixed(3)+' mm'+(measuredHere?'':' · depth derived from '+Number(job.certifiedStockThicknessMm||0).toFixed(3)+' mm measured on a different sheet')+(thicknessHold?' · BLOCKED until a probed thickness agrees':'')+'</span>'):'';
+    return '<div class="cnc-stage"><b>'+cncStageLabel(s)+'</b><span>'+cncEsc(tool||'selected bit')+'</span><span class="muted">'+detailLine+'</span>'+throughLine+'<span style="margin-left:auto;display:flex;gap:6px;align-items:center"><button class="ghost" onclick="cncPreviewStage(\''+s+'\',this)">Preview</button>'+(active?'<span style="color:#7ee0ac">Loaded</span>':'<button class="ghost" onclick="cncActivateStage(\''+s+'\',this)">Load stage</button>')+'</span></div>';
+  }).join('');
+  var sequence=stages.map(function(s){return cncStageLabel(s);}).join(' → ');
+  // Omitted stages are disclosed with the certificate's own reason, so an absent
+  // stage reads as a recorded decision rather than as something missing.
+  var omittedHtml=omitted.length?('<div class="muted" style="font-size:11px;margin-top:7px"><b>Deliberately omitted:</b> '+omitted.map(function(o){return cncEsc(cncStageLabel(String(o.stage||''))) +' — '+cncEsc(String(o.reason||''));}).join('<br>')+'</div>'):'';
+  el.innerHTML='<div class="muted" style="font-size:10.5px;margin-top:7px">'+(job.cutAuditHold?'CERTIFIED STAGES · CUT HELD UNTIL THE Z REFERENCE IS PROVEN':'CERTIFIED STAGES · '+cncEsc(String(job.certifiedLibraryId||'external CAM'))+' · MANUAL ROUTER')+'</div>'
+    +rows+omittedHtml
+    +'<div class="cnc-plan-warning" style="margin-top:7px">Stages are sequential: '+cncEsc(sequence)+'. Project cannot start or stop the Genmitsu 710W AC router. Switch it off manually after completion or any Stop.</div>';
+}
 async function cncPreviewStage(stage,button){var job=cncCurrentJob();if(!job)return;var old=button.textContent;button.disabled=true;button.textContent='Loading…';try{var gc=await cncFetchFile(job.id,'gc',stage);if(!gc)throw Error('Stage G-code is unavailable');cncRenderToolpath(gc,stage);var st=document.getElementById('cncRunStatus');if(st)st.textContent=cncStageLabel(stage)+' preview shown. Previewing does not load or arm the stage.';}catch(e){alert(e.message||e);}finally{button.disabled=false;button.textContent=old;}}
 async function cncActivateStage(stage,button){var job=cncCurrentJob();if(!job)return;var warning=stage==='rough'?'Load the roughing stage?':stage==='release'?'Load FINAL RELEASE?\n\nProfile must be complete. Independently secure the buckle to the sacrificial backing before removing its six temporary tabs. Release fully separates the buckle; its final bridge is removed by the final cutting move, followed immediately by vertical retract.':'Load the '+stage+' stage?\n\nConfirm the previous stage is complete, the correct bit is installed, and Z has been re-probed and locked after any bit change.';if(!confirm(warning))return;button.disabled=true;button.textContent='Loading…';try{var j=await cncPost({jobId:job.id,activateStage:stage});if(!j||!j.cnc||j.error)throw Error((j&&j.error)||'Could not load stage');CNC=j.cnc;job=cncCurrentJob();var gc=await cncFetchFile(job.id,'gc');if(gc)cncRenderToolpath(gc,stage);cncRenderStages(job);cncRenderAgent(job);var st=document.getElementById('cncRunStatus');if(st)st.textContent=cncStageLabel(stage)+' stage loaded. Verify the correct bit and probe lock before Start.';}catch(e){alert(e.message||e);button.disabled=false;button.textContent='Load stage';}}
 function cncCompressImage(file, cb){
@@ -2358,7 +2432,7 @@ function cncGlobalRange(img){ try{ var W=200, ar=(img.height||1)/(img.width||1),
   var d=x.getImageData(0,0,W,H).data, mn=1e9,mx=-1e9; for(var i=0;i<W*H;i++){ var v=0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2]; if(v<mn)mn=v; if(v>mx)mx=v; }
   return {mn:mn,mx:mx}; }catch(e){ return {mn:0,mx:255}; } }
 function cncBitStepover(job){ var b=String(job&&job.bit||'').toLowerCase(); if(b.indexOf('w01015')>=0||b.indexOf('tapered ball')>=0)return .16;if(b.indexOf('ru2100')>=0||b.indexOf('1/4″ upcut')>=0)return 2.5;if(b.indexOf('ball')>=0) return 0.2; if(b.indexOf('flat')>=0||b.indexOf('end mill')>=0) return 1.0; return 0.5; }
-function cncBitRadius(job){ var b=String(job&&job.bit||'').toLowerCase(); if(b.indexOf('ru2100')>=0||b.indexOf('1/4″ upcut')>=0)return 3.175;if(b.indexOf('w01015')>=0||b.indexOf('1/32″ radius')>=0)return .79375;var m=b.match(/([\d.]+)\s*mm/); if(m){ return (parseFloat(m[1])||3.175)/2; } if(b.indexOf('v-bit')>=0||b.indexOf('vbit')>=0) return 0.5; return 1.5875; }
+function cncBitRadius(job){ var b=String(job&&job.bit||'').toLowerCase(); if(b.indexOf('ru2100')>=0||b.indexOf('1/4″ upcut')>=0)return 3.175;if(b.indexOf('w01015')>=0||b.indexOf('1/32″ radius')>=0)return .79375;if(b.indexOf('w03010')>=0||b.indexOf('1/8″ single-flute')>=0)return 1.5875;var m=b.match(/([\d.]+)\s*mm/); if(m){ return (parseFloat(m[1])||3.175)/2; } if(b.indexOf('v-bit')>=0||b.indexOf('vbit')>=0) return 0.5; return 1.5875; }
 function cncMinimumFeatureMm(material,bit){var m=String(material||'').toLowerCase(),diameter=cncBitRadius({bit:bit})*2;if(/softwood|pine/.test(m))return Math.max(2,diameter*1.25);if(/hardwood/.test(m))return Math.max(1.5,diameter);if(/nickel|aluminum|metal/.test(m))return Math.max(.8,diameter*.5);if(/acrylic/.test(m))return Math.max(1,diameter*.7);return Math.max(1.2,diameter*.8);}
 function cncBoxBlurMasked(src,mask,cols,rows,radius){radius=Math.max(0,Math.min(12,Math.round(radius)||0));if(!radius)return src;var tmp=new Float32Array(src.length),tw=new Uint16Array(src.length),out=new Float32Array(src.length),x,y,k,sum,count,inside;
   for(y=0;y<rows;y++)for(x=0;x<cols;x++){sum=0;count=0;inside=!mask||!!mask[y*cols+x];for(k=Math.max(0,x-radius);k<=Math.min(cols-1,x+radius);k++){var hi=y*cols+k;if(mask&&!!mask[hi]!==inside)continue;sum+=src[hi];count++;}var i=y*cols+x;tmp[i]=count?sum/count:src[i];tw[i]=count;}
