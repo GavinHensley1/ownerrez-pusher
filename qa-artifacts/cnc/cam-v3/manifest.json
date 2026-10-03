@@ -1,0 +1,391 @@
+{
+  "id": "rambo-buckle-c752-v2",
+  "name": "The Rambo's buckle · C752 nickel silver",
+  "generatedAt": "2026-10-01T14:49:02.224Z",
+  "generator": "openclaw-cam",
+  "material": "c752-nickel-silver",
+  "stock": {
+    "widthMm": 260,
+    "heightMm": 130,
+    "thicknessMm": 3.855,
+    "thicknessMeasuredOnThisBlank": false
+  },
+  "plate": {
+    "thicknessMm": 14.19,
+    "confirmed": true,
+    "nearest": 14.19,
+    "familyError": 0,
+    "residual": 0.1899999999999995,
+    "spread": 6.170000000000002,
+    "physicalSurfaceProofRequired": true
+  },
+  "clearanceZMm": 4.99,
+  "fidelity": {
+    "cells": 757197,
+    "meanAbsDeviationUm": 9.065775485130395,
+    "maxTooDeepUm": 26.999999999999996,
+    "maxNotReachedUm": 114.99999999999999,
+    "fractionOver10um": 0.3455481202381943,
+    "fractionOver25um": 0.060182488837119005,
+    "worstTooDeep": {
+      "x": 65.1,
+      "y": 37.5,
+      "target": 0.166,
+      "cut": 0.193
+    }
+  },
+  "placement": {
+    "offsetXMm": 0,
+    "offsetYMm": 0
+  },
+  "router": {
+    "model": "Genmitsu GM7100E · 710 W · 65 mm manual AC router",
+    "manualSpeedControl": true,
+    "gearRpmIsModelled": true,
+    "statedRange": [
+      6500,
+      30000
+    ]
+  },
+  "part": {
+    "perimeterMm": 323.88210214206964,
+    "areaMm2": 7732.71197414415
+  },
+  "omittedStages": [
+    {
+      "stage": "cleanup",
+      "reason": "Folded into Finish. The 3.175 mm rougher reaches only part of this relief, but the only tool that can reach the remainder is the W01015 itself, so a separate cleanup stage would be the same tool on the same geometry. Finish now descends in bounded layers instead, which is what the cleanup stage existed to provide."
+    },
+    {
+      "stage": "detail",
+      "reason": "No V-bit detail pass: the W01015 finish resolves the artwork and a tool change adds a re-probe."
+    }
+  ],
+  "totals": {
+    "minutes": 234.71770255894197,
+    "hours": 3.9119617093156993,
+    "lines": 252630
+  },
+  "stages": [
+    {
+      "stage": "rough",
+      "file": "rambo-buckle-c752-rough-spetool-w03010.nc",
+      "tool": "SpeTool W03010 · 1/8\" single-flute O-flute upcut",
+      "sha256": "43642568b0fb08f87a9d5cb7cc309fa2b066694d573c906fc2022c117e503b72",
+      "bytes": 171257,
+      "lines": 10533,
+      "cutMoves": 8987,
+      "meanCutSegmentMm": 0.5515036964938288,
+      "minZ": -0.434,
+      "bounds": {
+        "minX": 17.6,
+        "maxX": 112.4,
+        "minY": 26.5563,
+        "maxY": 101.1687
+      },
+      "steepestEntryDeg": 54.27206047624126,
+      "feedMinutes": 19.054757075931192,
+      "transportMinutes": 7.022,
+      "minutes": 19.054757075931192,
+      "valid": true,
+      "problems": [],
+      "cuts": [
+        {
+          "phase": "rough",
+          "gear": 2,
+          "rpmNominal": 10600,
+          "rpmRange": [
+            10000,
+            11200
+          ],
+          "feedMmPerMin": 490,
+          "axialDepthMm": 0.15,
+          "radialEngagementMm": 0.79375,
+          "engagedDiameterMm": 3.175,
+          "surfaceSpeedMPerMin": 105.73030075656447,
+          "surfaceSpeedWorstMPerMin": 111.71503476165303,
+          "surfaceSpeedLimitMPerMin": 120,
+          "chipLoadUmPerTooth": [
+            37.88861141556919,
+            42.43524478543749
+          ],
+          "materialRemovalRateMm3PerMin": 58.340624999999996
+        }
+      ],
+      "levels": 3,
+      "levelDepthMm": 0.15
+    },
+    {
+      "stage": "finish",
+      "file": "rambo-buckle-c752-finish-spetool-w01015-spe-x.nc",
+      "tool": "SpeTool W01015-SPE-X · TAC tapered ball nose · 1/32\" radius",
+      "sha256": "381498978c562783cc352457d9fcb73096fd79edfca60a5786c63100145ca306",
+      "bytes": 3876322,
+      "lines": 223365,
+      "cutMoves": 214744,
+      "meanCutSegmentMm": 0.3903696673768663,
+      "minZ": -0.787,
+      "bounds": {
+        "minX": 12.6,
+        "maxX": 117.4,
+        "minY": 23.08,
+        "maxY": 106.92
+      },
+      "steepestEntryDeg": 63.51493888993812,
+      "feedMinutes": 201.23436931363506,
+      "transportMinutes": 148.91,
+      "minutes": 201.23436931363506,
+      "valid": true,
+      "problems": [],
+      "cuts": [
+        {
+          "phase": "finish-bulk",
+          "gear": 3,
+          "rpmNominal": 14950,
+          "rpmRange": [
+            14000,
+            15900
+          ],
+          "feedMmPerMin": 462,
+          "axialDepthMm": 0.25,
+          "radialEngagementMm": 0.6,
+          "engagedDiameterMm": 1.1565033506220377,
+          "surfaceSpeedMPerMin": 54.31727333098431,
+          "surfaceSpeedWorstMPerMin": 57.768872639642176,
+          "surfaceSpeedLimitMPerMin": 150,
+          "chipLoadUmPerTooth": [
+            14.088841866138525,
+            16.00089897654304
+          ],
+          "materialRemovalRateMm3PerMin": 69.3
+        },
+        {
+          "phase": "finish-detail",
+          "gear": 3,
+          "rpmNominal": 14950,
+          "rpmRange": [
+            14000,
+            15900
+          ],
+          "feedMmPerMin": 550,
+          "axialDepthMm": 0.125,
+          "radialEngagementMm": 0.16,
+          "engagedDiameterMm": 0.8551315688243535,
+          "surfaceSpeedMPerMin": 40.16280206434599,
+          "surfaceSpeedWorstMPerMin": 42.71495336609373,
+          "surfaceSpeedLimitMPerMin": 150,
+          "chipLoadUmPerTooth": [
+            10.413575761805276,
+            11.826846758050278
+          ],
+          "materialRemovalRateMm3PerMin": 11
+        }
+      ],
+      "layers": [
+        {
+          "layer": 1,
+          "kind": "bulk",
+          "areaMm2": 7941.28000012692,
+          "stepoverMm": 0.6
+        },
+        {
+          "layer": 2,
+          "kind": "bulk",
+          "areaMm2": 2588.060000010071,
+          "stepoverMm": 0.6
+        },
+        {
+          "layer": 3,
+          "kind": "bulk",
+          "areaMm2": 722.3299999994881,
+          "stepoverMm": 0.6
+        },
+        {
+          "layer": 4,
+          "kind": "detail",
+          "areaMm2": 7993.550000128061,
+          "stepoverMm": 0.16
+        }
+      ]
+    },
+    {
+      "stage": "profile",
+      "file": "rambo-buckle-c752-profile-spetool-w03010.nc",
+      "tool": "SpeTool W03010 · 1/8\" single-flute O-flute upcut",
+      "sha256": "de9ff840bfa2e1149e117cb8f55a357eac706a5c7997c7c7856ffa194e628dce",
+      "bytes": 388334,
+      "lines": 18094,
+      "cutMoves": 18059,
+      "meanCutSegmentMm": 0.4045426028763247,
+      "minZ": -3.955,
+      "bounds": {
+        "minX": 11.2835,
+        "maxX": 118.7157,
+        "minY": 21.8009,
+        "maxY": 108.1971
+      },
+      "steepestEntryDeg": 11.278123760845432,
+      "feedMinutes": 13.031765768920573,
+      "transportMinutes": 12.062666666666667,
+      "minutes": 13.031765768920573,
+      "valid": true,
+      "problems": [],
+      "cuts": [
+        {
+          "phase": "profile",
+          "gear": 2,
+          "rpmNominal": 10600,
+          "rpmRange": [
+            10000,
+            11200
+          ],
+          "feedMmPerMin": 582,
+          "axialDepthMm": 1.3183333333333334,
+          "radialEngagementMm": 0.5,
+          "engagedDiameterMm": 3.175,
+          "surfaceSpeedMPerMin": 105.73030075656447,
+          "surfaceSpeedWorstMPerMin": 111.71503476165303,
+          "surfaceSpeedLimitMPerMin": 120,
+          "chipLoadUmPerTooth": [
+            37.85629640393847,
+            42.39905197241109
+          ],
+          "materialRemovalRateMm3PerMin": 383.635
+        }
+      ],
+      "immersion": {
+        "slotting": false,
+        "kerfWidthMm": 4.753400000000002,
+        "centreSpreadMm": 1.578400000000002,
+        "samples": 368,
+        "narrowFraction": 0.043478260869565216
+      },
+      "holding": {
+        "tabs": 6,
+        "regions": [
+          {
+            "cells": 6,
+            "shallowestZ": -2.6367,
+            "centroid": {
+              "x": 46.64641666666666,
+              "y": 22.949983333333332
+            }
+          },
+          {
+            "cells": 7,
+            "shallowestZ": -2.6367,
+            "centroid": {
+              "x": 101.6299,
+              "y": 26.135814285714282
+            }
+          },
+          {
+            "cells": 7,
+            "shallowestZ": -2.6367,
+            "centroid": {
+              "x": 117.65018571428571,
+              "y": 74.61832857142858
+            }
+          },
+          {
+            "cells": 4,
+            "shallowestZ": -2.6367,
+            "centroid": {
+              "x": 82.907525,
+              "y": 106.366075
+            }
+          },
+          {
+            "cells": 5,
+            "shallowestZ": -2.6367,
+            "centroid": {
+              "x": 27.893820000000005,
+              "y": 103.7467
+            }
+          },
+          {
+            "cells": 7,
+            "shallowestZ": -2.6367,
+            "centroid": {
+              "x": 12.399042857142856,
+              "y": 55.55227142857144
+            }
+          }
+        ],
+        "heldCells": 36,
+        "totalCells": 690
+      },
+      "perimeterMm": 333.8462468196869,
+      "levels": 3,
+      "levelDepthMm": 1.3183333333333334
+    },
+    {
+      "stage": "release",
+      "file": "rambo-buckle-c752-release-spetool-w03010.nc",
+      "tool": "SpeTool W03010 · 1/8\" single-flute O-flute upcut",
+      "sha256": "e8e3f55436be971196de5f3a9d63d72521fbdbdde1244e48cbdc6eb8e3377522",
+      "bytes": 17598,
+      "lines": 638,
+      "cutMoves": 606,
+      "meanCutSegmentMm": 0.4692156096491471,
+      "minZ": -3.955,
+      "bounds": {
+        "minX": 11.4764,
+        "maxX": 118.5505,
+        "minY": 22.3584,
+        "maxY": 107.2577
+      },
+      "steepestEntryDeg": 13.130573961981334,
+      "feedMinutes": 1.3968104004551243,
+      "transportMinutes": 0.42533333333333334,
+      "minutes": 1.3968104004551243,
+      "valid": true,
+      "problems": [],
+      "cuts": [
+        {
+          "phase": "release",
+          "gear": 2,
+          "rpmNominal": 10600,
+          "rpmRange": [
+            10000,
+            11200
+          ],
+          "feedMmPerMin": 265,
+          "axialDepthMm": 0.2,
+          "radialEngagementMm": 3.175,
+          "engagedDiameterMm": 3.175,
+          "surfaceSpeedMPerMin": 105.73030075656447,
+          "surfaceSpeedWorstMPerMin": 111.71503476165303,
+          "surfaceSpeedLimitMPerMin": 120,
+          "chipLoadUmPerTooth": [
+            23.660714285714285,
+            26.5
+          ],
+          "materialRemovalRateMm3PerMin": 168.275
+        },
+        {
+          "phase": "release-kerf",
+          "gear": 2,
+          "rpmNominal": 10600,
+          "rpmRange": [
+            10000,
+            11200
+          ],
+          "feedMmPerMin": 576,
+          "axialDepthMm": 0.8,
+          "radialEngagementMm": 0.5125000000000002,
+          "engagedDiameterMm": 3.175,
+          "surfaceSpeedMPerMin": 105.73030075656447,
+          "surfaceSpeedWorstMPerMin": 111.71503476165303,
+          "surfaceSpeedLimitMPerMin": 120,
+          "chipLoadUmPerTooth": [
+            37.842730934127005,
+            42.38385864622224
+          ],
+          "materialRemovalRateMm3PerMin": 236.16000000000008
+        }
+      ],
+      "tabs": 6
+    }
+  ]
+}
