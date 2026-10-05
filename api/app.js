@@ -598,7 +598,7 @@ async function sendSmsGateway(cfg, text){
   try{ const hs=String((cfg&&cfg.smsHeaders)||"").trim(); if(hs){ if(hs.charAt(0)==="{"){ Object.assign(headers, JSON.parse(hs)); } else { hs.split(/\n+/).forEach(function(l){ const i=l.indexOf(":"); if(i>0) headers[l.slice(0,i).trim()]=l.slice(i+1).trim(); }); } } }catch(e){}
   if((cfg&&cfg.smsUser) && !Object.keys(headers).some(function(k){return k.toLowerCase()==="authorization";})){ headers["Authorization"]="Basic "+Buffer.from(String(cfg.smsUser)+":"+String(cfg.smsPass||"")).toString("base64"); }
   try{ const r=await fetch(url,{method:"POST",headers:headers,body:fillSmsBody(tmpl,to,text)});
-    const t=await r.text(); return {sent:r.ok, status:r.status, provider:"gateway", body:String(t).slice(0,160)}; }
+    const t=await r.text(); let j={}; try{j=JSON.parse(t);}catch(e){} return {sent:r.ok, status:r.status, provider:"gateway", messageId:j.id||j.messageId||null, deliveryStatus:j.state||j.status||(r.ok?"accepted":"failed"), body:String(t).slice(0,160)}; }
   catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 async function smsVictor(enabled, text){
@@ -612,7 +612,7 @@ let _memNotify=null;
 async function getNotifyRaw(){ return (redis?(await redis.get(NCKEY)):_memNotify)||{}; }
 async function setNotifyRaw(c){ if(redis) await redis.set(NCKEY,c); else _memNotify=c; return c; }
 // Merged notify config: Redis (set via Victor's UI) wins, env vars are the fallback.
-async function getNotifyConfig(){ const c=await getNotifyRaw(); return {
+async function getNotifyConfig(){ const c=await getNotifyRaw(); const cfg={
   apiKey: (c.resendApiKey||process.env.RESEND_API_KEY||"").trim(),
   from:   (c.from||process.env.RESEND_FROM||"").trim(),
   to:     (c.victorEmail||process.env.VICTOR_EMAIL||"").trim(),
@@ -630,7 +630,28 @@ async function getNotifyConfig(){ const c=await getNotifyRaw(); return {
   smsHeaders: (c.smsHeaders||process.env.SMS_HEADERS||""),
   smsUser: (c.smsUser||process.env.SMS_USER||"").trim(),
   smsPass: (c.smsPass||process.env.SMS_PASS||""),
-}; }
+}; cfg.routes=notificationRoutes(c, cfg); return cfg; }
+// Explicit routes are opt-in on save. Legacy installations keep their ACTUAL SMS-first behavior.
+function notificationRoutes(raw, cfg){
+  const legacy={normal:{channel:"sms",recipient:cfg.smsTo||""},complaint:{channel:"sms",recipient:cfg.smsTo||""},backup:{channel:"email",recipient:cfg.to2||""}};
+  return Object.fromEntries(Object.keys(legacy).map(k=>[k,raw.routes&&raw.routes[k]?{channel:raw.routes[k].channel,recipient:String(raw.routes[k].recipient||"").trim()}:legacy[k]]));
+}
+function validateNotificationRoutes(routes){
+  if(!routes || typeof routes!=="object") return "Routing settings are required.";
+  for(const k of ["normal","complaint","backup"]){
+    const r=routes[k]; if(!r || !["email","sms"].includes(r.channel)) return "Choose Email or Text for "+k+".";
+    const to=String(r.recipient||"").trim();
+    if(!to && k==="backup") continue;
+    if(r.channel==="email" ? !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to) : !/^\+[1-9]\d{7,14}$/.test(to)) return "Enter a valid "+(r.channel==="sms"?"phone number with country code":"email address")+" for "+k+".";
+  }
+  return "";
+}
+function routeFor(cfg,item,backup){ return cfg.routes[backup?"backup":(item&&item.complaint?"complaint":"normal")]; }
+function routedSmsConfig(cfg,route){ return {...cfg,smsTo:route.recipient}; }
+function authorizedSmsNumbers(cfg){ return [cfg.smsTo,...Object.values(cfg.routes||{}).filter(r=>r.channel==="sms").map(r=>r.recipient)].filter(Boolean).map(phoneDigits); }
+let _memRouteTests=[];
+async function getRouteTests(){ return (redis?await redis.get("parkside:route_tests"):_memRouteTests)||[]; }
+async function saveRouteTests(items){ if(redis) await redis.set("parkside:route_tests",items.slice(-20)); else _memRouteTests=items.slice(-20); }
 let _memWh=null;
 async function writeWhStatus(o){ const x={...o}; if(redis) await redis.set("parkside:wh_status",x); else _memWh=x; return x; }
 async function getWhStatus(){ return (redis?await redis.get("parkside:wh_status"):_memWh)||null; }
@@ -650,7 +671,7 @@ async function resendSend({apiKey,from,to,subject,html}){
   try{ const r=await fetch("https://api.resend.com/emails",{method:"POST",headers:{Authorization:"Bearer "+apiKey,"Content-Type":"application/json"},body:JSON.stringify({from,to,subject,html})});
     const t=await r.text(); let detail=t.slice(0,300);
     try{ const j=JSON.parse(t); if(!r.ok && (j.message||j.error)) detail=j.message||j.error; }catch(e){}
-    return {sent:r.ok, status:r.status, detail}; }
+    let j={}; try{j=JSON.parse(t);}catch(e){} return {sent:r.ok, status:r.status, messageId:j.id||null, deliveryStatus:r.ok?"accepted":"failed", detail}; }
   catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 // ---- per-conversation message log (BOTH directions) ----
@@ -700,10 +721,13 @@ async function renderThread(item, approvals){
 // Build + send (or stage) the Victor approval email with Approve/Reject links.
 async function sendVictorApprovalEmail(req, item, ctx){
   ctx=ctx||{};
-  const cfg=await getNotifyConfig();
+  if(item.complaint) return sendVictorEscalationSms(req,item,{...ctx,complaint:true});
+  const baseCfg=await getNotifyConfig(); const route=routeFor(baseCfg,item,ctx.backup);
+  if(route.channel==="email") return {...await sendApprovalEmail(req,item,route.recipient,!!ctx.backup),channel:"email"};
+  const cfg=routedSmsConfig(baseCfg,route);
   const unit=ctx.unit||""; const guestName=ctx.guestName||"";
   const proposed=item.proposed||"";
-  // SMS-only: text the owner the labeled approval. (Email channel removed.)
+  // Text route: preserve the existing labeled approval workflow.
   if(cfg.smsUrl && cfg.smsTo){
     const _lbl=item.smsLabel||"Q?"; const _ctx=[unit,guestName].filter(Boolean).join(" - "); const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-8); const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"You: ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim().slice(0,150)).join("\n\n"):("Guest: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,160)); const smsText=_lbl+(_ctx?(" - "+_ctx):"")+"\n"+_convo+"\n\nDraft: "+String(proposed||"(none)").replace(/\s+/g," ").trim().slice(0,300)+"\n\nReply: "+_lbl+" yes  |  "+_lbl+" no";
     const result=await sendSmsGateway(cfg, smsText);
@@ -724,20 +748,20 @@ async function sendApprovalEmail(req, item, toAddr, isEsc, opts){ opts=opts||{};
   const unit=item.unit||""; const guestName=item.guest_name||""; const proposed=item.proposed||"";
   const esc2=(item.status==="escalated"); // waiting on a FACT from Victor (no draft to approve yet)
   let threadHtml=""; try{ threadHtml=await renderThread(item, await getApprovals()); }catch(e){}
-  const subject=(esc2?"Guest question needs info":"Parkside approval needed")+(unit?(" - "+unit):""); // item: removed the "No text reply/2nd notice" concept — this system never escalates on non-response.
+  const subject=(item.complaint?"Guest complaint — human reply needed":(esc2?"Guest question needs info":"Parkside approval needed"))+(unit?(" - "+unit):""); // item: removed the "No text reply/2nd notice" concept — this system never escalates on non-response.
   const btn=(href,bg,label)=>'<a href="'+href+'" style="display:inline-block;background:'+bg+';color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 22px;border-radius:8px;margin:6px 8px 6px 0">'+label+'</a>';
   const html='<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">'
     +'' /* item: removed the "No response to the text within the time limit" banner — this system does not act on non-response */
-    +'<h2 style="margin:0 0 8px">Guest message - approval needed</h2>'
+    +'<h2 style="margin:0 0 8px">'+escHtml(item.smsLabel||'')+' '+(item.complaint?'Guest complaint':'Guest message')+'</h2>'
     +(unit?'<div style="color:#64748b;font-size:13px">Unit: <b>'+escHtml(unit)+'</b></div>':'')
     +(guestName?'<div style="color:#64748b;font-size:13px">Guest: <b>'+escHtml(guestName)+'</b></div>':'')
     +'<div style="margin:14px 0 6px;font-size:12px;color:#64748b;text-transform:uppercase">Conversation</div>'
     +'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:4px 12px">'+threadHtml+'</div>'
     +'<div style="margin:14px 0 6px;font-size:12px;color:#64748b;text-transform:uppercase">'+(esc2?"What happened":"Suggested reply")+'</div>'
-    +(esc2
-       ? '<div style="background:#fff8e1;border:1px solid #fcd34d;border-radius:10px;padding:10px 12px;font-size:14px;color:#0f172a">The assistant doesn’t have this answer yet. Click below and tell it the fact — it will write the full reply and send it to the guest. You don’t need to write the whole message.</div>'
+    +(item.complaint ? '<p>Please respond to this guest directly in OwnerRez. The assistant will not compose or send a complaint reply.</p></div>' : esc2
+       ? '<div style="background:#fff8e1;border:1px solid #fcd34d;border-radius:10px;padding:10px 12px;font-size:14px;color:#0f172a">The assistant doesn’t have this answer yet. Click below and tell it the fact — it will draft the full reply for your approval. You don’t need to write the whole message.</div>'
          +'<div style="margin:18px 0">'+btn(supplyUrl,"#2563eb","Answer this — supply the fact")+'</div>'
-         +'<p style="color:#94a3b8;font-size:12px">Type just the fact (e.g. “11pm” or “early check-in is $30”), review the reply, then send. Nothing goes to the guest until you confirm. It’s also gone to Victor by text. (Ref '+escHtml(item.id)+')</p></div>'
+         +'<p style="color:#94a3b8;font-size:12px">Type just the fact (e.g. “11pm” or “early check-in is $30”), review the reply, then send. Nothing goes to the guest until you confirm. (Ref '+escHtml(item.id)+')</p></div>'
        : '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:14px;white-space:pre-wrap">'+(proposed?escHtml(proposed):'<i>No suggested reply</i>')+'</div>'
          +'<div style="margin:18px 0">'+btn(yes,"#16a34a","Approve & Send")+btn(editUrl,"#2563eb","Edit")+(opts.hideReject?"":btn(no,"#dc2626","Reject"))+'</div>'
          +'<p style="color:#94a3b8;font-size:12px">Approve sends this reply to the guest. Reject sends nothing. (Ref '+escHtml(item.id)+')</p></div>');
@@ -748,8 +772,8 @@ async function sendApprovalEmail(req, item, toAddr, isEsc, opts){ opts=opts||{};
 async function escalateStaleApprovals(req){
   try{
     const cfg=await getNotifyConfig();
-    if(!cfg.to2) return {escalated:0, reason:"no backup email set"};
-    if(!cfg.apiKey||!cfg.from) return {escalated:0, reason:"backup email not configured (need Resend key + From)"};
+    const backup=cfg.routes.backup;
+    if(!backup.recipient) return {escalated:0, reason:"no backup recipient set"};
     const now=Date.now();
     const windowMs=(cfg.escalateMins||60)*60*1000;                 // must be OLDER than this (past the answer timer)
     const maxAgeMs=Math.max(3*3600*1000, windowMs+3600*1000);       // but NEVER older than this — HARD recency guard, no backlog blast
@@ -777,9 +801,10 @@ async function escalateStaleApprovals(req){
       let _first=true;
       try{ if(redis){ const _r=await redis.set("parkside:backup_ask:"+it.id, new Date().toISOString(), {nx:true, ex:30*24*3600}); _first=(_r!==null && _r!==false); } }catch(e){}
       if(!_first){ it.backupAskSent=true; changed=true; continue; }
-      const r=await sendApprovalEmail(req, it, cfg.to2, false);   // clean "Guest question needs info" subject (first & only email)
-      it.backupAskSent=true; it.escalatedTo2=true; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=!!(r&&r.sent===true);
-      changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:cfg.to2});
+      const r=await sendVictorEscalationSms(req, it, {backup:true});   // clean "Guest question needs info" subject (first & only email)
+      it.backupAskSent=!!(r&&r.sent===true); it.escalatedTo2=it.backupAskSent; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=it.backupAskSent;
+      if(!it.backupAskSent && redis) await redis.del("parkside:backup_ask:"+it.id);
+      changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:backup.recipient, channel:backup.channel});
     }
     if(changed) await setApprovals(list);
     return {escalated:done.length, neutralized:neutralized, maxAgeH:Math.round(maxAgeMs/3600000), mins:cfg.escalateMins, items:done};
@@ -1155,13 +1180,13 @@ function editPageHtml(it, token, unit, guestName, errMsg){
 // item RES: RESERVATIONS/front-desk FACT-SUPPLY pages. The email links here for an UNKNOWN-fact escalation:
 // they type just the fact, the model writes the full guest reply, they review and send. Same design as
 // Victor's "Q# <fact>" flow, routed through decideApproval so it can never double-send with Victor.
-function supplyFactFormHtml(it, token, errMsg){
-  const action='/api/app?action=supply_fact&id='+encodeURIComponent(it.id)+'&token='+encodeURIComponent(token||'');
+function supplyFactFormHtml(it, token, errMsg, to){
+  const action='/api/app?action=supply_fact&id='+encodeURIComponent(it.id)+'&token='+encodeURIComponent(token||'')+'&to='+encodeURIComponent(to||'');
   return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Answer the guest</title></head>'
     +'<body style="font-family:-apple-system,Arial,Helvetica,sans-serif;background:#0f1720;color:#e7eef6;margin:0;padding:16px">'
     +'<div style="max-width:560px;margin:0 auto">'
     +'<h1 style="font-size:20px;margin:6px 0 4px 0">A guest needs an answer</h1>'
-    +'<div style="color:#9fb0c0;font-size:13px;margin-bottom:12px">Tell us the fact and the assistant writes the full reply and sends it — you don’t need to write the whole message.</div>'
+    +'<div style="color:#9fb0c0;font-size:13px;margin-bottom:12px">Tell us the fact and the assistant drafts the full reply for your approval — you don’t need to write the whole message.</div>'
     +(it.guest_name?'<div style="color:#9fb0c0;font-size:13px">Guest: <b style="color:#e7eef6">'+escHtml(it.guest_name)+'</b></div>':'')
     +(it.unit?'<div style="color:#9fb0c0;font-size:13px">Unit: <b style="color:#e7eef6">'+escHtml(it.unit)+'</b></div>':'')
     +'<div style="background:#16212e;border:1px solid #26354a;border-radius:10px;padding:12px 14px;margin:12px 0">'
@@ -1520,7 +1545,9 @@ function clipWords(s, max){
 }
 async function sendVictorEscalationSms(req, item, ctx){
   ctx=ctx||{};
-  const cfg=await getNotifyConfig();
+  const baseCfg=await getNotifyConfig(); const route=routeFor(baseCfg,{...item,complaint:!!(ctx.complaint||item.complaint)},ctx.backup);
+  if(route.channel==="email") return {...await sendApprovalEmail(req,item,route.recipient,!!ctx.backup),channel:"email"};
+  const cfg=routedSmsConfig(baseCfg,route);
   if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false, reason:"SMS not configured"};
   const unit=ctx.unit||item.unit||""; const guestName=ctx.guestName||item.guest_name||"";
   const lbl=item.smsLabel||"Q?";
@@ -1533,13 +1560,13 @@ async function sendVictorEscalationSms(req, item, ctx){
   const _ctx=[unit,guestName].filter(Boolean).join(" - ");
   if(ctx.followup){
     const _nm=String(ctx.newMsg||item.question||"").replace(/\s+/g," ").trim();
-    const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent ANOTHER message:\n\""+_nm+"\"\n\nFull recent conversation:\n"+_convo+"\n\nTo answer, text: "+lbl+" then the fact.";
+    const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent ANOTHER message:\n\""+_nm+"\"\n\nFull recent conversation:\n"+_convo+(item.complaint?"\n\nPlease reply directly in OwnerRez.":"\n\nTo answer, text: "+lbl+" then the fact.");
     try{ return await sendSmsGateway(cfg, _ft); }catch(e){ return {sent:false, error:String(e.message||e)}; }
   }
   const _isComp=!!(ctx.complaint||item.complaint);
-  const _mid=_isComp?"I told the guest I'm sorry and a manager will follow up.":(ctx.partial?"I answered what I could and told the guest I'd confirm the rest.":"I told the guest I'd check with a manager.");
+  const _mid=_isComp?(item.holdingSent===true?"I told the guest I'm sorry and a manager will follow up.":"This complaint needs your personal response."):(ctx.partial?"I answered what I could and told the guest I'd confirm the rest.":"I told the guest I'd check with a manager.");
   const _tag=_isComp?" (COMPLAINT)":(ctx.partial?" (partial \u2014 needs the rest)":" (escalated)");
-  const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+_tag+"\n"+_convo+"\n\n"+_mid+" To answer, text: "+lbl+" then the fact.";
+  const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+_tag+"\n"+_convo+"\n\n"+_mid+(_isComp?" Please reply directly in OwnerRez. Text "+lbl+" no to close this alert.":" To answer, text: "+lbl+" then the fact.");
   try{ return await sendSmsGateway(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 
@@ -4185,7 +4212,7 @@ if(action==="email_recipients"){
       if(req.method==="POST"){
         let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch{ try{b=Object.fromEntries(new URLSearchParams(b));}catch{b={};} } } b=b||{};
         const fact=String(b.fact||"").trim();
-        if(!fact){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Please enter the answer / fact first.")); }
+        if(!fact){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Please enter the answer / fact first.", q.to)); }
         // STEP 1 (mirrors Victor's SMS flow exactly): capture ONLY the fact. The model composes the guest reply and
         // the item is re-staged to 'pending' (reviseFromSms). NOTHING is sent to the guest here. We then email a
         // FRESH approval email (composed reply + Approve & Send) — the ACTUAL send happens when they approve THAT
@@ -4195,32 +4222,32 @@ if(action==="email_recipients"){
         if(rev && rev.alreadyHandled){ res.statusCode=200; return res.end(htmlPage("Already handled ✓","This was already handled by someone else. The guest was not messaged twice.")); }
         if(rev && rev.humanOnly){ res.statusCode=200; return res.end(htmlPage("Complaint — reply directly","This is a complaint, so the engine won’t compose or send a guest reply. Please respond to the guest directly. Nothing was sent to the guest.")); }
         const draft=(rev && rev.proposed && !rev.failed)?String(rev.proposed):"";
-        if(!draft){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Couldn’t draft a reply from that — try rephrasing the fact.")); }
+        if(!draft){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "Couldn’t draft a reply from that — try rephrasing the fact.", q.to)); }
         // #4 FIX: reviseFromSms re-staged the item to 'pending' with proposed=draft in a SEPARATE list copy, so the
         // 'it' fetched at the top is STALE (still status 'escalated' + old holding) — passing it made sendApprovalEmail
         // render the wrong (esc2 'answer this') template, not the approval email, so the real approval email only
         // arrived later from a sweep (the ~8-min lag). RE-FETCH the fresh item and send the approval email INLINE,
         // awaited, right now. Also mark it emailed (+ set the one-shot key) so the sweep can't duplicate it.
-        const _cfg=await getNotifyConfig(); const _cands=[_cfg.to2, _cfg.to].filter(Boolean);
-        let _to=String(q.to||"").trim(); if(!_to || _cands.indexOf(_to)===-1) _to=_cfg.to2||_cfg.to||"";
+        const _cfg=await getNotifyConfig(); const _cands=[_cfg.to2, _cfg.to,...Object.values(_cfg.routes).filter(r=>r.channel==="email").map(r=>r.recipient)].filter(Boolean);
+        let _to=String(q.to||"").trim(); if(!_to || _cands.indexOf(_to)===-1) _to=(routeFor(_cfg,it).channel==="email"?routeFor(_cfg,it).recipient:"")||_cfg.to2||_cfg.to||"";
         const _list2=await getApprovals(); const _it2=_list2.find(x=>x&&x.id===id)||it;
         // ABSOLUTE GUARD: never send an approval email whose suggested reply is the holding note. If the composed
         // draft is somehow empty or holding-like, FAIL LOUDLY and ask for the fact again — do NOT email a holding.
-        if(!_it2.proposed || isHoldingLike(_it2.proposed)){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "That didn’t produce a real answer yet. Please re-enter the actual fact to tell the guest (e.g. the availability, price, or specific detail) and we’ll compose the reply.")); }
+        if(!_it2.proposed || isHoldingLike(_it2.proposed)){ res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "That didn’t produce a real answer yet. Please re-enter the actual fact to tell the guest (e.g. the availability, price, or specific detail) and we’ll compose the reply.", q.to)); }
         // DEDUPE the approval email: a double-submit / concurrent request must not send two "Approve & Send" emails.
         let _sendOk=true; try{ if(redis){ const _r=await redis.set("parkside:approval_email:"+id, new Date().toISOString(), {nx:true, ex:300}); _sendOk=(_r!==null && _r!==false); } }catch(e){}
         let emailed=null;
         if(_sendOk){ try{ emailed=await sendApprovalEmail(req, _it2, _to, false, {hideReject:true}); }catch(e){ emailed={sent:false, error:String(e.message||e)}; } }
-        else { emailed={sent:true, deduped:true}; } // an approval email for this item already went out moments ago
+        else { emailed={sent:false, deduped:true, reason:"An approval email is already being processed. Check your inbox or try again shortly."}; }
+        if(_sendOk && !(emailed&&emailed.sent) && redis) await redis.del("parkside:approval_email:"+id);
         // mark it so the backup sweep never re-asks and never nudges this (now-pending) item.
-        try{ _it2.backupAskSent=true; _it2.escalatedTo2=true; _it2.escalatedTo2At=new Date().toISOString(); _it2.escalatedTo2Sent=!!(emailed&&emailed.sent); await setApprovals(_list2); }catch(e){}
-        try{ if(redis) await redis.set("parkside:backup_ask:"+id, new Date().toISOString(), {ex:30*24*3600}); }catch(e){}
+        try{ if(emailed&&emailed.sent){ _it2.backupAskSent=true; _it2.escalatedTo2=true; _it2.escalatedTo2At=new Date().toISOString(); _it2.escalatedTo2Sent=true; await setApprovals(_list2); if(redis) await redis.set("parkside:backup_ask:"+id, new Date().toISOString(), {ex:30*24*3600}); } }catch(e){}
         const _ok=!!(emailed && emailed.sent);
         res.statusCode=200; return res.end(htmlPage("Got it — reply drafted"+(_ok?" ✓":""),
           _ok ? "Thanks! We drafted a reply from that and just emailed it to you. Open that new email and tap “Approve & Send” to send it to the guest. Nothing goes to the guest until you approve."
-              : "We drafted the reply but couldn’t email it just now"+((emailed&&(emailed.reason||emailed.error))?(" ("+String(emailed.reason||emailed.error)+")"):"")+". It’s saved and waiting for approval; Victor was also texted. (Ref "+it.id+")"));
+              : "We drafted the reply but couldn’t email it just now"+((emailed&&(emailed.reason||emailed.error))?(" ("+String(emailed.reason||emailed.error)+")"):"")+". It’s saved and waiting for approval. Retry using the original email link. (Ref "+it.id+")"));
       }
-      res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, ""));
+      res.statusCode=200; return res.end(supplyFactFormHtml(it, tok, "", q.to));
     }
     // View rejected drafts (password) so the owner can see what was wrong.
     if(action==="rejected_log"){
@@ -4446,10 +4473,9 @@ if(action==="email_recipients"){
           await _dbg("media_receipt:"+media.length); return res.status(200).json({receipt:true, count:media.length, via:"robust"});
         }
       }
-      const vn=cfg.smsTo||victorNumber();
-      if(vn && from && from.replace(/\D/g,"").slice(-10)!==vn.replace(/\D/g,"").slice(-10)){
+      if(!from || !authorizedSmsNumbers(cfg).includes(phoneDigits(from))){
         await _dbg("sender_mismatch from="+_dbgRec.fromL10+" smsTo="+_dbgRec.smsToL10);
-        return res.status(200).json({ignored:true, reason:"sender is not the owner's number"}); }
+        return res.status(200).json({ignored:true, reason:"sender is not a configured notification contact"}); }
       // MMS receipt intake: Victor texts a photo of a receipt to the StayDeck number -> store in the Fraud Alert receipts.
       const numMedia=parseInt(pl.NumMedia||b.NumMedia||b.num_media||0,10)||0; const mediaUrls=[];
       if(numMedia>0){ for(let _i=0;_i<numMedia;_i++){ const mu=b["MediaUrl"+_i]||pl["MediaUrl"+_i]; if(mu) mediaUrls.push(String(mu)); } }
@@ -4462,7 +4488,7 @@ if(action==="email_recipients"){
         return res.status(200).json({receipt:true, count:mediaUrls.length});
       }
       if(!bodyRaw){ await _dbg("empty_body"); return res.status(200).json({ignored:true, reason:"empty"}); }
-      const ackBack=async(t)=>{ if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false}; let _r=null; for(let _i=0;_i<3;_i++){ try{ _r=await sendSmsGateway(cfg, t); if(_r && _r.sent) return _r; }catch(e){ _r={sent:false, error:String(e.message||e)}; } if(_i<2) await new Promise(function(res){setTimeout(res,1200);}); } return _r||{sent:false}; };
+      const ackBack=async(t)=>{ if(!(cfg.smsUrl&&from)) return {sent:false}; let _r=null; for(let _i=0;_i<3;_i++){ try{ _r=await sendSmsGateway({...cfg,smsTo:from}, t); if(_r && _r.sent) return _r; }catch(e){ _r={sent:false, error:String(e.message||e)}; } if(_i<2) await new Promise(function(res){setTimeout(res,1200);}); } return _r||{sent:false}; };
       // TAPBACK/REACTION GUARD: a reaction (or emoji-only) inbound is NOT a reply. Ignore it entirely — no prompt,
       // no processing, and there is NO path from here to a guest message (guest sends only happen on decideApproval
       // via an explicit "Q# yes"). Silently drop.
@@ -4603,6 +4629,7 @@ if(action==="email_recipients"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
       const cur=await getNotifyRaw(); const next={...cur};
+      if(b.routes!==undefined){ const err=validateNotificationRoutes(b.routes); if(err) return res.status(400).json({error:err}); next.routes=Object.fromEntries(["normal","complaint","backup"].map(k=>[k,{channel:b.routes[k].channel,recipient:String(b.routes[k].recipient||"").trim()}])); }
       // Only write non-empty values, so a blank field never wipes a saved one.
       const setIf=(k,v)=>{ if(v===undefined||v===null) return; const t=String(v).trim(); if(t==="") return; next[k]=t; };
       setIf("victorEmail", b.victorEmail);
@@ -4626,7 +4653,7 @@ if(action==="email_recipients"){
       if(typeof b.scoreAlertEmails==="string"){ const t=b.scoreAlertEmails.trim(); if(t!=="") next.scoreAlertEmails=t; else delete next.scoreAlertEmails; }
       await setNotifyRaw(next);
       const cfg=await getNotifyConfig();
-      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth, primaryChannel:cfg.primaryChannel, smsUrlSet:!!cfg.smsUrl, smsToSet:!!cfg.smsTo }});
+      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth, primaryChannel:cfg.primaryChannel, smsUrlSet:!!cfg.smsUrl, smsToSet:!!cfg.smsTo, routes:cfg.routes }});
     }
     // Send ONE sample approval email to the configured Victor address (password).
     if(action==="sms_register_webhook"){
@@ -4646,6 +4673,35 @@ if(action==="email_recipients"){
         const t=await r.text(); let j=null; try{j=JSON.parse(t);}catch(e){}
         return res.status(200).json({ ok:r.ok, status:r.status, callback:cbUrl, result:(j||String(t).slice(0,300)) });
       }catch(e){ return res.status(200).json({ ok:false, error:String(e.message||e) }); }
+    }
+    if(action==="test_notification_route" || action==="notification_test_status"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
+      const cfg=await getNotifyConfig(); let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{};
+      if(action==="test_notification_route"){
+        if(req.method!=="POST") return res.status(405).json({error:"POST required"});
+        const key=String(b.route||""); if(!["normal","complaint","backup"].includes(key)) return res.status(400).json({error:"Choose a route"});
+        const route=cfg.routes[key]; if(!route.recipient) return res.status(400).json({error:"Save a recipient first"});
+        const text="Parkside routing TEST — "+key+" notifications. No guest is involved and no guest message will be sent.";
+        const testSmsCfg=routedSmsConfig(cfg,route);
+        // Delivery reports are opt-in for this staff-only test, without changing the saved gateway template.
+        if(/^https:\/\/api\.sms-gate\.app\//.test(cfg.smsUrl)){ try{ const template=JSON.parse(testSmsCfg.smsBody); template.withDeliveryReport=true; testSmsCfg.smsBody=JSON.stringify(template); }catch(e){} }
+        const result=route.channel==="sms" ? await sendSmsGateway(testSmsCfg,text) : await resendSend({apiKey:cfg.apiKey,from:cfg.from,to:route.recipient,subject:"Parkside routing TEST — "+key,html:"<p>"+escHtml(text)+"</p>"});
+        const record={id:Date.now().toString(36)+Math.random().toString(36).slice(2,8),at:new Date().toISOString(),route:key,channel:route.channel,to:route.recipient,accepted:!!result.sent,messageId:result.messageId||null,status:result.deliveryStatus||(result.sent?"accepted":"failed"),httpStatus:result.status||null,error:result.sent?null:(result.reason||result.error||"Provider rejected the test")};
+        const tests=await getRouteTests(); tests.push(record); await saveRouteTests(tests); return res.status(200).json({ok:record.accepted,test:record});
+      }
+      const tests=await getRouteTests(); const record=tests.find(x=>x.id===String(b.id||req.query.id||""));
+      if(!record) return res.status(200).json({ok:true,tests:tests.slice().reverse()});
+      if(record.messageId){
+        try{
+          let url,headers;
+          if(record.channel==="email"){ url="https://api.resend.com/emails/"+encodeURIComponent(record.messageId); headers={Authorization:"Bearer "+cfg.apiKey}; }
+          else if(/^https:\/\/api\.sms-gate\.app\//.test(cfg.smsUrl) && cfg.smsUser){ url=cfg.smsUrl.replace(/\/$/,"")+"/"+encodeURIComponent(record.messageId); headers={Authorization:"Basic "+Buffer.from(cfg.smsUser+":"+cfg.smsPass).toString("base64")}; }
+          if(url){ const response=await fetch(url,{headers}); const data=await response.json().catch(()=>({})); if(response.ok){record.status=data.last_event||data.state||data.status||record.status; record.checkedAt=new Date().toISOString(); delete record.checkError;} else record.checkError="Provider status check returned HTTP "+response.status; }
+          else record.checkError="This gateway does not support status checks; acceptance is confirmed, delivery is unverified.";
+        }catch(e){record.checkError="Provider status could not be checked.";}
+        await saveRouteTests(tests);
+      } else if(record.accepted){ record.checkError="Provider accepted the test without a message ID; delivery cannot be checked."; }
+      return res.status(200).json({ok:true,test:record});
     }
     if(action==="send_test_sms"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
@@ -4700,7 +4756,7 @@ if(action==="email_recipients"){
         messaging_enabled:!!stN.messaging_enabled,
         counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
-        from:cfg.from||null, to:cfg.to||null, to2:cfg.to2||null, primaryChannel:cfg.primaryChannel, smsUrl:cfg.smsUrl||null, smsTo:cfg.smsTo||null, smsBody:cfg.smsBody||null, smsHeaders:cfg.smsHeaders||null, smsUser:cfg.smsUser||null, smsPassSet:!!cfg.smsPass,
+        routes:cfg.routes, from:cfg.from||null, to:cfg.to||null, to2:cfg.to2||null, primaryChannel:cfg.primaryChannel, smsUrl:cfg.smsUrl||null, smsTo:cfg.smsTo||null, smsBody:cfg.smsBody||null, smsHeaders:cfg.smsHeaders||null, smsUser:cfg.smsUser||null, smsPassSet:!!cfg.smsPass,
         source:{ apiKey: raw.resendApiKey?"ui":(process.env.RESEND_API_KEY?"env":null), from: raw.from?"ui":(process.env.RESEND_FROM?"env":null), to: raw.victorEmail?"ui":(process.env.VICTOR_EMAIL?"env":null), secret: raw.approveSecret?"ui":(process.env.APPROVE_LINK_SECRET?"env":null) } };
       if(cfg.apiKey){
         try{ const r=await fetch("https://api.resend.com/domains",{headers:{Authorization:"Bearer "+cfg.apiKey}});
@@ -4726,3 +4782,5 @@ module.exports.__calls={hookBody,phoneDigits,recordingSidOf};
 // item MW-12: expose pure helpers for unit tests (attaches to the handler export).
 module.exports.onDutyActivePct=onDutyActivePct;
 module.exports.timeOffForDate=timeOffForDate;
+
+module.exports.__routing={notificationRoutes,validateNotificationRoutes,routeFor,getNotifyConfig,setNotifyRaw,getNotifyRaw,sendVictorApprovalEmail,sendVictorEscalationSms,sendApprovalEmail,escalateStaleApprovals,setApprovals,getApprovals,authorizedSmsNumbers};
