@@ -542,9 +542,9 @@ async function sendGuestReply(enabled, ids, body){
       const payload = threadId ? {thread_id:threadId, body} : {booking_id:bookingId, body};
       try{ const r=await fetch("https://api.ownerrez.com/v2/messages",{method:"POST",
           headers:{Authorization:auth,"Content-Type":"application/json","User-Agent":"parkside-control/1.0"},
-          body:JSON.stringify(payload)});
+          signal:AbortSignal.timeout(15000),body:JSON.stringify(payload)});
         const t=await r.text(); result={sent:r.ok, status:r.status, via:(threadId?"thread_id":"booking_id"), body:t.slice(0,300)}; }
-      catch(e){ result={sent:false, error:String(e.message||e)}; }
+      catch(e){ result={sent:false, uncertain:true, error:String(e.message||e)}; }
     }
   }
   // Persist the exact outcome so the owner/dev can see it in notify_status.lastSend.
@@ -820,7 +820,7 @@ async function autoRejectStaleApprovals(req){
       // Only 'pending' (a drafted reply awaiting a yes) auto-rejects after 24h. Escalated items
       // (waiting on a fact from Victor) are LEFT OPEN on purpose so their Q# keeps piling up and
       // they stay visible until handled — the backup email nudges instead of auto-closing them.
-      if(!it || it.status!=="pending") continue;
+      if(!it || it.status!=="pending" || it.sendUncertain) continue;
       const t=Date.parse(it.ts||it.primaryNotifiedAt||"");
       if(!isFinite(t) || t>cutoff) continue;
       it.status="rejected"; it.decidedAt=new Date().toISOString();
@@ -1226,7 +1226,26 @@ function supplyFactReviewHtml(it, token, fact, draft, errMsg){
 // ===== Approval queue + knowledge-base matching (human-in-the-loop messaging) =====
 const AQKEY="parkside:approvals", INQKEY="parkside:inquiries";
 let _memApprovals=[];
-async function getApprovals(){ return redis?((await redis.get(AQKEY))||[]):_memApprovals; }
+const approvalSendMemory=new Map();
+const approvalSendKey=id=>"parkside:approval_send:"+id;
+async function approvalSendRecord(id){ return redis?await redis.get(approvalSendKey(id)):(approvalSendMemory.get(id)||null); }
+async function saveApprovalSend(id,record){ if(redis) await redis.set(approvalSendKey(id),record); else approvalSendMemory.set(id,record); }
+function overlayApprovalSend(it,record){
+  if(!record) return it;
+  if(record.state==="sent") return {...it,status:"approved",answer:record.answer,decidedAt:record.at,sendUncertain:false};
+  if(record.state==="closed") return {...it,status:"rejected",decidedAt:record.at,rejectReason:record.reason,sendUncertain:!!record.uncertain};
+  if(record.state==="sending"||record.state==="uncertain") return {...it,status:"pending",proposed:record.answer,sendUncertain:true};
+  if(record.state==="failed"&&!(it.revisedAt&&Date.parse(it.revisedAt)>Date.parse(record.at))) return {...it,proposed:record.answer};
+  return it;
+}
+async function getApprovals(){
+  const list=redis?((await redis.get(AQKEY))||[]):_memApprovals;
+  if(!list.length) return list;
+  // Per-question receipts survive a stale shared-list write from another intake or
+  // approval. Reads must honor them before offering any retry or sending backup.
+  const records=redis?await redis.mget(...list.map(it=>approvalSendKey(it.id))):list.map(it=>approvalSendMemory.get(it.id));
+  return list.map((it,i)=>overlayApprovalSend(it,records[i]));
+}
 async function setApprovals(list){ const trimmed=list.slice(-500); if(redis) await redis.set(AQKEY, trimmed); else _memApprovals=trimmed; return list; }
 function normQ(x){ return String(x||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim(); }
 
@@ -1706,24 +1725,54 @@ function rejectPageHtml(it, token){
     +'</div></body></html>';
 }
 // Decide a queued approval item: YES -> send to guest + learn into KB; NO -> reject.
+const approvalDecisionLocks=new Set();
 async function decideApproval(id, decision, overrideAnswer, reason){
+  if(!id) return {ok:false, error:"no id"};
+  const lockKey="parkside:approval_decision:"+id;
+  const lockToken=require("crypto").randomBytes(16).toString("hex");
+  let locked=false;
+  try{
+    // Serialize the complete read/send/write operation, including decisions from a
+    // second contact. A status check alone can let two simultaneous approvals send.
+    if(redis){ const acquired=await redis.set(lockKey,lockToken,{nx:true,ex:300}); locked=acquired==="OK"||acquired===true; }
+    else if(!approvalDecisionLocks.has(id)){ approvalDecisionLocks.add(id); locked=true; }
+    if(!locked) return {ok:false, retryable:true, error:"This reply is already being processed. Wait a moment, then check its status before retrying."};
+    return await decideApprovalLocked(id,decision,overrideAnswer,reason);
+  }catch(e){ return {ok:false, retryable:true, error:"Could not complete the approval. Please check its status before retrying."}; }
+  finally{ if(locked){ if(redis){ try{ await redis.eval("if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end",[lockKey],[lockToken]); }catch(e){} }else approvalDecisionLocks.delete(id); } }
+}
+async function decideApprovalLocked(id, decision, overrideAnswer, reason){
   if(!id) return {ok:false, error:"no id"};
   const list=await getApprovals(); const it=list.find(x=>x.id===id);
   if(!it) return {ok:false, error:"item not found: "+id};
   if(it.status!=="pending") return {ok:false, error:"already "+it.status, item:it};
+  const journal=await approvalSendRecord(id);
   const st=await getState(); const enabled=!!st.messaging_enabled;
   if(decision==="yes"||decision==="approve"){
     // COMPLAINT = human-only: the engine NEVER sends a composed/approved reply to a complaint guest. The only
     // guest-facing message on a complaint is the ONE initial serious holding, sent directly at intake. Block the
     // entire compose-approve send path here so a complaint reply can never auto-reach the guest.
     if(it.complaint){ return {ok:false, error:"complaint is human-only — no reply was sent to the guest", complaint:true, humanOnly:true}; }
+    if(journal&&(journal.state==="sending"||journal.state==="uncertain")) return {ok:false,sent:false,retryable:false,uncertain:true,error:"The earlier send outcome is unconfirmed. Do not approve again. Check this guest conversation in OwnerRez; if needed, reply there manually, then use Reject (or Q# no) to close this request. No additional reply was sent."};
     const isOverride=!!(overrideAnswer&&overrideAnswer.trim());
     let answer=(isOverride?overrideAnswer.trim():"")||it.proposed||"";
     if(!answer) return {ok:false, error:"no answer to send (proposed was empty — supply an answer)"};
     if(/^\s*(q\s*\d+|y|yes|n|no|ok|okay|send|approve|approved|reject|skip)\s*$/i.test(answer)) return {ok:false, error:"refused: that looks like a command, not a guest reply — nothing was sent"};
     answer=scrubContact(answer);
     if(!answer || !answer.trim()) return {ok:false, error:"reply was only contact info (phone/email) which the channel blocks - nothing to send"};
+    // Write intent BEFORE calling the provider. If the process dies, or the final
+    // receipt cannot be saved, future approvals fail closed instead of resending.
+    await saveApprovalSend(id,{state:"sending",answer,at:new Date().toISOString()});
     const guestSend=await sendGuestReply(enabled, {threadId:it.thread_id, bookingId:it.booking_id}, answer);
+    if(!guestSend || guestSend.sent!==true){
+      const uncertain=!guestSend||guestSend.uncertain===true||!!guestSend.error||guestSend.status>=500;
+      await saveApprovalSend(id,{state:uncertain?"uncertain":"failed",answer,at:new Date().toISOString()});
+      if(isOverride){ it.proposed=answer; await setApprovals(list); }
+      if(uncertain) return {ok:false,sent:false,retryable:false,uncertain:true,id,error:"The send outcome is unconfirmed. Check this guest conversation in OwnerRez; if needed, reply there manually, then use Reject (or Q# no) to close this request. Do not approve again; no automatic retry will occur."};
+      const detail=guestSend&&(guestSend.reason||(guestSend.status?"OwnerRez HTTP "+guestSend.status:""));
+      return {ok:false,sent:false,retryable:true,id,guestSend,error:"Reply was not sent"+(detail?": "+detail:"")+". The draft is still pending; retry approval after the issue is resolved."};
+    }
+    await saveApprovalSend(id,{state:"sent",answer,at:new Date().toISOString()});
     // LEARN only a REAL answer: an owner-typed answer (override) OR an approved known answer.
     // NEVER learn a holding/escalation message (it.escalate && not overridden).
     const shouldLearn = isOverride || !it.escalate;
@@ -1737,15 +1786,18 @@ async function decideApproval(id, decision, overrideAnswer, reason){
     let learnedEdit=false;
     try{ if(isOverride && it.proposed && answer && String(answer).trim()!==String(it.proposed).trim()){ await appendCorrection(it.question, it.proposed, answer); learnedEdit=true; } }catch(e){}
     it.status="approved"; it.answer=answer; it.decidedAt=new Date().toISOString();
-    await setApprovals(list);
+    // The independent receipt is authoritative even if the shared list save fails.
+    try{ await setApprovals(list); }catch(e){}
     return {ok:true, decision:"approved", id, guestSend, sent:guestSend.sent===true, learned:shouldLearn, learnedEdit, approvedBankSize:bankSize};
   }
+  if(journal&&journal.state==="sending"&&Date.now()-Date.parse(journal.at)<60000) return {ok:false,error:"A send is still being processed. Wait a moment and check the guest conversation before closing this request."};
   const _reason=reason?String(reason).slice(0,500):"";
+  await saveApprovalSend(id,{state:"closed",at:new Date().toISOString(),reason:_reason,uncertain:!!(journal&&(journal.state==="sending"||journal.state==="uncertain"))});
   it.status="rejected"; it.decidedAt=new Date().toISOString(); it.rejectReason=_reason; await setApprovals(list);
   try{ const rk=(redis?(await redis.get("parkside:kb_rejected")):_memRejected)||[];
     rk.push({id:it.id, q:it.question, draft:it.proposed||"", reason:_reason, source:it.source||null, ts:new Date().toISOString()});
     const trimmed=rk.slice(-500); if(redis) await redis.set("parkside:kb_rejected", trimmed); else _memRejected=trimmed; }catch(e){}
-  return {ok:true, decision:"rejected", id, reason:_reason};
+  return {ok:true, decision:"rejected", id, reason:_reason,uncertain:!!(journal&&(journal.state==="sending"||journal.state==="uncertain"))};
 }
 
 // --- SMS approval labels (Q1, Q2 ...) + revise-from-text ---
@@ -3283,8 +3335,8 @@ if(action==="email_recipients"){
       if(!it){ res.statusCode=200; return res.end(htmlPage("Link expired","This approval link is no longer valid (it may already have been handled).")); }
       if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status+" ✓",(it.smsLabel||"This one")+" was already "+it.status+". The guest was not messaged twice.")); }
       const out=await decideApproval(it.id, decision, null, decision==="no"?"rejected via link":undefined);
-      if(decision==="no"){ res.statusCode=200; return res.end(htmlPage("Skipped",(it.smsLabel||"It")+" was skipped — nothing was sent to the guest.")); }
-      if(out&&out.ok&&out.decision==="approved"){ res.statusCode=200; return res.end(htmlPage("Sent ✓",(it.smsLabel||"Your reply")+" was sent to the guest and saved for next time.")); }
+      if(decision==="no"&&out&&out.ok){ res.statusCode=200; return res.end(htmlPage("Skipped",(it.smsLabel||"It")+" was closed. No additional reply was sent.")); }
+      if(out&&out.ok&&out.decision==="approved"){ res.statusCode=200; return res.end(htmlPage("Sent ✓",(it.smsLabel||"Your reply")+" was sent to the guest. Any new fact still requires review before future use.")); }
       res.statusCode=200; return res.end(htmlPage("Couldn’t send",((out&&out.error)||"Unknown error")+"."));
     }
     if(action==="state"){
@@ -3555,7 +3607,7 @@ if(action==="email_recipients"){
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
       const question=(b&&b.question)||""; const bookingId=(b&&b.booking_id)||null;
       const key=process.env.ANTHROPIC_API_KEY; if(!key) return res.status(200).json({needKey:true,error:"ANTHROPIC_API_KEY not set on the server yet"});
-      const st=await getState(); const kb=st.kb||KB_SEED; const enabled=!!st.messaging_enabled;
+      const st=await getState(); const kb=st.kb||KB_SEED;
       const facts=(kb.items||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
       const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). "
         +"You have NO knowledge except the KNOWN INFO list below. "
@@ -3575,13 +3627,11 @@ if(action==="email_recipients"){
         let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
         let inKb=false, answer="";
         try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); inKb=o.in_kb===true; answer=String(o.answer||"").trim(); }catch{ inKb=false; answer=""; }
-        if(!inKb || !answer){
-          const victorSms=await smsVictor(enabled, "Parkside escalation — guest asked: "+String(question).slice(0,300)+(bookingId?(" (booking "+bookingId+")"):""));
-          const guestSend=await sendGuestReply(enabled, {bookingId}, APOLOGY);
-          return res.status(200).json({escalate:true, escalatedTo:"Victor", draft:APOLOGY, victorSms, guestSend, sent:guestSend.sent===true});
-        }
-        const guestSend=await sendGuestReply(enabled, {bookingId}, answer);
-        return res.status(200).json({escalate:false, draft:answer, guestSend, sent:guestSend.sent===true});
+        // This is the UI's answer preview, never a live intake/send action. Even
+        // when a caller supplies booking IDs or Messaging is ON, only simulate.
+        const route=routeFor(await getNotifyConfig(),null,false);
+        const known=inKb&&!!answer;
+        return res.status(200).json({dryRun:true,sent:false,inKb:known,escalate:!known,draft:known?answer:APOLOGY,route});
       }
       catch(e){ return res.status(200).json({error:"request failed: "+String(e.message||e)}); }
     }
@@ -4275,14 +4325,14 @@ if(action==="email_recipients"){
             res.statusCode=200; return res.end(rejectPageHtml(_it, secret)); }
           const _reason=String((_lb&&_lb.reason)||q.reason||"").trim();
           const _o=await decideApproval(_id,"no",null,_reason);
-          if(_o.ok&&_o.decision==="rejected"){ res.statusCode=200; return res.end(htmlPage("Rejected","Nothing was sent to the guest."+(_reason?" Thanks for the reason — future drafts will learn from it.":""))); }
+          if(_o.ok&&_o.decision==="rejected"){ res.statusCode=200; return res.end(htmlPage("Rejected","This request was closed. No additional reply was sent."+(_reason?" Thanks for the reason — future drafts will learn from it.":""))); }
           if(_o.ok===false && /^already /i.test(String(_o.error||""))){ res.statusCode=200; return res.end(htmlPage("Already handled","This request was already handled. Nothing was sent to the guest twice.")); }
           res.statusCode=200; return res.end(htmlPage("Couldn't complete",(_o.error||"Unknown error")+"."));
         }
         const out=await decideApproval(String(q.id||""), String(q.decision||"").toLowerCase(), null);
         let title, msg;
-        if(out.ok && out.decision==="approved"){ title="Approved — reply sent"; msg="The guest reply was sent and saved to the knowledge base."; }
-        else if(out.ok && out.decision==="rejected"){ title="Rejected"; msg="This request was rejected. Nothing was sent to the guest."; }
+        if(out.ok && out.decision==="approved"){ title="Approved — reply sent"; msg="The guest reply was sent. Any new fact is queued for review before it is used in future replies."; }
+        else if(out.ok && out.decision==="rejected"){ title="Rejected"; msg="This request was rejected. No additional reply was sent."; }
         else if(out.ok===false && /^already /i.test(String(out.error||""))){ const st=((out.item&&out.item.status)||String(out.error||"").replace(/^already\s+/i,"")||"handled"); title="Already handled ✓"; msg="This guest message was already "+st+", most likely by the other recipient. Don’t worry — nothing was sent to the guest twice."; }
         else { title="Couldn't complete"; msg=(out.error||"Unknown error")+"."; }
         res.statusCode=200; return res.end(htmlPage(title,msg));
@@ -4524,10 +4574,14 @@ if(action==="email_recipients"){
       const lbl=target.smsLabel||"Q?";
       // SINGLE-RESOLUTION LOCK: if this Q# was already resolved by ANYONE — approved/sent, rejected, or CLOSED
       // because the front desk answered the guest directly in OwnerRez — do NOT act again (no re-draft, no send).
-      // Tell Victor it's handled. This is what guarantees one-and-only-one guest message per escalation.
+      // Tell Victor it is handled. Durable send receipts also guard retries after interrupted saves.
       if(target.status && target.status!=="pending" && target.status!=="escalated"){
         await ackBack(lbl+" was already handled ("+target.status+(target.closedExternally?", the front desk answered the guest directly":"")+"). Nothing more was sent to the guest.");
         return res.status(200).json({ok:true, already:target.status, label:lbl, closedExternally:!!target.closedExternally});
+      }
+      if(target.sendUncertain&&!isNo(rest)){
+        await ackBack(lbl+" send outcome is unconfirmed. Do not approve again. Check the conversation in OwnerRez, reply there if needed, then text "+lbl+" no to close. No additional reply was sent.");
+        return res.status(200).json({uncertain:true,retryable:false,label:lbl});
       }
       // Auto-message escalations: the holding message already went to the guest. Victor only ever
       // provides a FACT here — it is NEVER sent to the guest directly. We draft a reply from his
@@ -4561,14 +4615,18 @@ if(action==="email_recipients"){
         _dbgRec.matchedQ=lbl; _dbgRec.itemFound=true; _dbgRec.itemStatus=target.status; _dbgRec.draftBackSent=!!(_dbAck&&_dbAck.sent); await _dbg("escalated_draftback sent="+!!(_dbAck&&_dbAck.sent));
         return res.status(200).json({escalation_drafted:true, label:lbl, sentDraftBack:!!(_dbAck&&_dbAck.sent)});
       }
-      if((lm && rest==="")||isYes(rest)){
+      if(lm && rest===""){
+        await ackBack(lbl+" is waiting for approval. Reply \""+lbl+" yes\" to send the draft, or text a correction. Nothing was sent to the guest.");
+        return res.status(200).json({need_approval:true,label:lbl,sent:false});
+      }
+      if(isYes(rest)){
         const out=await decideApproval(target.id, "yes", null);
-        await ackBack(out && out.sent ? (lbl+" sent to the guest. ✅") : (lbl+" NOT sent: "+((out&&out.error)||"error")));
+        await ackBack(out && out.sent ? (lbl+" sent to the guest. ✅") : (lbl+" Approval not completed: "+((out&&out.error)||"error")));
         return res.status(200).json({decided:"yes", label:lbl, out});
       }
       if(isNo(rest)){
         const out=await decideApproval(target.id, "no", null, "rejected via text");
-        await ackBack(lbl+" skipped — nothing was sent to the guest.");
+        await ackBack(out&&out.ok ? (lbl+" closed. No additional reply was sent.") : (lbl+" Could not close: "+((out&&out.error)||"error")));
         return res.status(200).json({decided:"no", label:lbl, out});
       }
       let _draft2="";
@@ -4769,7 +4827,12 @@ if(action==="email_recipients"){
     // Config visibility for the SMS provider (password) — never reveals secrets.
     if(action==="sms_status"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
-      return res.status(200).json({provider:smsProvider(), configured:smsConfigured(), fromSet:!!smsFrom(), victorSet:!!victorNumber()});
+      const cfg=await getNotifyConfig();
+      const recipientSet=authorizedSmsNumbers(cfg).length>0;
+      const connectionSet=!!(cfg.smsUrl&&((cfg.smsUser&&cfg.smsPass)||cfg.smsHeaders));
+      // Guest-question notifications use the saved HTTP gateway, not the older
+      // SMS_PROVIDER/Twilio helper. This is configuration, not a delivery claim.
+      return res.status(200).json({provider:"gateway",configured:connectionSet&&recipientSet,connectionSet,recipientSet,victorSet:!!cfg.smsTo});
     }
 
     res.status(400).json({error:"unknown action"});

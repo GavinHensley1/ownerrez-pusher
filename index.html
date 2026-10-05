@@ -342,8 +342,8 @@
     <h2 class="groupHead" style="cursor:pointer;user-select:none;border-bottom:1px solid var(--line);padding-bottom:8px" onclick="toggleGroup('grpApprovals')">✅ Approvals &mdash; answer guest questions &amp; review decisions <span class="gcaret" style="color:var(--mut);font-weight:400;float:right">&#9656;</span></h2>
     <div class="groupBody" style="display:none;margin-top:12px">
   <div class="card">
-    <h2>Approval queue — guest questions awaiting Victor</h2>
-    <div class="legend">When a question isn’t confidently answered by the knowledge base, it’s queued here and (once the SMS number is live) texted to Victor for a YES/NO. You approve by <b>texting back</b> (reply the Q-label with yes/no); approving sends the answer to the guest <b>and</b> saves it to the knowledge base. This list is read-only. Anything left undecided for <b>24 hours</b> is automatically rejected (nothing is sent).</div>
+    <h2>Approval queue — guest questions awaiting your configured contact</h2>
+    <div class="legend">When a question needs approval, it is queued here and sent to your configured contact by email or text. Use the email approval link or text <b>Q# yes</b> to send the draft; <b>Q# no</b> rejects it. A question number alone does not approve. Staff facts are drafted for review before anything is sent to the guest. This list is read-only. Pending drafts left undecided for <b>24 hours</b> are automatically rejected (nothing is sent).</div>
     <div style="margin:8px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button onclick="loadApprovals()">Refresh queue</button>
       <button class="ghost" onclick="pruneLastApproved()" title="Delete the most recently approved answer from the approved bank + KB">🗑 Remove last approved answer</button>
@@ -3386,12 +3386,13 @@ async function aiPreview(){ const q=document.getElementById('aiQ').value.trim();
     if(j.needKey){ document.getElementById('aiOut').textContent="\u26a0\ufe0f Anthropic API key not set on the server yet. Paste ANTHROPIC_API_KEY in Vercel \u2192 Settings \u2192 Environment Variables, redeploy, then try again."; return; }
     if(j.error){ document.getElementById('aiOut').textContent="Error: "+j.error+(j.detail?(" \u2014 "+j.detail):""); return; }
     if(j.escalate){
-      const v=j.victorSms||{}; const vline=v.sent?"Victor notified by SMS ✅":(v.staged?("Victor SMS staged — "+(v.missing?("missing "+v.missing.join(", ")):v.reason)):"Victor SMS: "+(v.error||"?"));
-      document.getElementById('aiOut').textContent="⚠️ ESCALATED — not in the knowledge base (no guess).\n\nGuest receives:\n“"+(j.draft||"")+"”\n\n"+vline;
+      const route=j.route||{};
+      const destination=route.recipient?((route.channel==='sms'?'Text':'Email')+' → '+route.recipient):'No normal-question recipient configured';
+      document.getElementById('aiOut').textContent="PREVIEW ONLY — nothing sent or queued.\n\nNot fully covered by the saved facts.\nGuest holding reply:\n“"+(j.draft||"")+"”\n\nWould ask your normal-question contact for the missing fact:\n"+destination;
     } else {
-      const g=j.guestSend||{}; const gline=g.sent?"\n\n(sent to guest ✅)":(g.staged?("\n\n(not sent — "+g.reason+")"):"");
-      document.getElementById('aiOut').textContent=(j.draft||"")+gline;
+      document.getElementById('aiOut').textContent="PREVIEW ONLY — nothing sent or queued.\n\n"+(j.draft||"");
     } }
+
   catch(e){ document.getElementById('aiStatus').textContent=""; document.getElementById('aiOut').textContent="Error: "+e.message; }
 }
 async function confirmTest(){
@@ -3470,11 +3471,12 @@ async function loadApprovals(){
       return "<div style='border:1px solid var(--line);border-radius:6px;padding:10px;margin:8px 0'>"
       +"<div style='display:flex;justify-content:space-between;gap:8px;align-items:flex-start'><div><b>Q:</b> "+esc(it.question)+"</div>"+(lbl?("<span class='muted' style='white-space:nowrap;font-weight:600'>"+esc(lbl)+"</span>"):"")+"</div>"
       +"<div style='margin-top:6px'><b>Proposed answer:</b><div style='white-space:pre-wrap;background:#0f1720;border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:4px'>"+esc(it.proposed||"(none)")+"</div></div>"
+      +(it.sendUncertain?"<div role='status' style='margin-top:8px;color:#fbbf24'>Earlier send outcome unconfirmed. Do not approve again. Check the guest conversation in OwnerRez; reply there if needed, then use the email Reject link or text Q# no to close this request.</div>":"")
       +"<div class='muted' style='margin-top:6px;font-size:12px'>Awaiting approval from your configured contact"+(lbl?(" \u2014 for text, reply \u201c"+esc(lbl)+" yes\u201d or \u201c"+esc(lbl)+" no\u201d"):"")+". "+(age?("Received "+age+". "):"")+"Auto-rejected if undecided for 24h.</div>"
       +"</div>";
     }).join("");
   }catch(e){ el.textContent="Error: "+e.message; }
-  try{ const s=await fetch(api('sms_status'),{headers:{'x-app-password':PW}}); const sj=await s.json(); const a=document.getElementById('apSms'); if(a) a.textContent='SMS: '+(sj.configured?('live ('+sj.provider+')'):'staged — number not configured yet'); }catch(e){}
+  try{ const s=await fetch(api('sms_status'),{headers:{'x-app-password':PW}}); const sj=await s.json(); const a=document.getElementById('apSms'); if(a) a.textContent='SMS: '+(sj.configured?('configured ('+sj.provider+')'):'not configured'); }catch(e){}
 }
 async function decide(id,decision){
   const ans=document.getElementById('ans_'+id); const body={id:id,decision:decision}; if(ans&&decision==='yes') body.answer=ans.value;
