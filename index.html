@@ -417,7 +417,7 @@
         <button class="ghost" type="button" style="margin-top:8px" onclick="sendRouteTest('backup')">Send backup test</button>
       </fieldset>
       <label>Notify backup after (minutes without an answer)<br><input id="nEscMins" type="number" min="5" step="5" style="width:140px" placeholder="60"></label>
-      <button type="button" onclick="saveNotify()">Save routing settings</button>
+      <button type="button" onclick="saveRoutingSettings()">Save routing settings</button>
       <div class="muted" style="font-size:12px">Save settings before testing. Tests go only to the saved staff recipient, never a guest. Provider acceptance and delivery are shown separately.</div>
       <div id="routeTestStatus" class="legend" role="status" aria-live="polite"></div>
       <div id="routeTestHistory" style="overflow-wrap:anywhere"></div>
@@ -3537,6 +3537,12 @@ function genSecret(){
   for(const x of a) out+=("0"+x.toString(16)).slice(-2);
   document.getElementById('nSecret').value=out;
   const sS=document.getElementById('nSecState'); if(sS){ sS.textContent="\u270e unsaved — click Save settings"; sS.style.color="#f4b942"; }
+}
+async function saveRoutingSettings(){
+  const status=document.getElementById('routeTestStatus');
+  status.textContent='Saving routing settings…';
+  const saved=await saveNotify();
+  status.textContent=saved ? 'Routing settings saved. You can send a test now.' : document.getElementById('nMsg').textContent;
 }
 async function saveNotify(){
   const msg=document.getElementById('nMsg'); msg.textContent="Saving…";
