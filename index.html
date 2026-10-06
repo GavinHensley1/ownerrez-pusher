@@ -425,6 +425,29 @@
     <div style="display:grid;gap:12px;max-width:560px">
       <div style="padding-top:4px">
         <div style="font-weight:600;margin-bottom:6px">Text (SMS) alerts</div>
+        <fieldset style="min-width:0;margin:10px 0;padding:12px;border:1px solid var(--line)">
+          <legend>Text delivery service</legend>
+          <div id="smsActive" role="status" aria-live="polite">Loading active service…</div>
+          <label style="display:block;margin-top:10px">Service <select id="smsProviderChoice"><option value="gateway">SMS Gateway</option><option value="twilio">Twilio</option><option value="none">Disabled</option></select></label>
+          <details id="twilioSetup" style="margin-top:10px"><summary>Twilio connection and employee enrollment</summary>
+            <div style="display:grid;gap:10px;margin-top:10px">
+              <label>Account SID <input id="twAccount" style="width:100%;box-sizing:border-box" autocomplete="off"></label>
+              <label>Existing sender number <input id="twFrom" type="tel" style="width:100%;box-sizing:border-box" placeholder="+18653817523"></label>
+              <label>Messaging Service SID <input id="twService" style="width:100%;box-sizing:border-box" autocomplete="off"></label>
+              <label>Auth token <span id="twTokenState"></span><input id="twToken" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved token" style="width:100%;box-sizing:border-box"></label>
+              <div style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" onclick="saveTwilioConnection()">Save Twilio connection</button><button type="button" class="ghost" onclick="checkTwilio()">Check Twilio readiness</button><button type="button" class="ghost" onclick="connectTwilio()">Connect existing Twilio number</button></div>
+              <div id="twProof" role="status" aria-live="polite" style="white-space:pre-wrap;overflow-wrap:anywhere"></div>
+              <div class="muted">Each employee texts START to the sender number from their own phone. Management then verifies the employee’s identity. STOP turns off their texts; HELP requests program information.</div>
+              <div id="twConsent" style="overflow-wrap:anywhere"></div>
+            </div>
+          </details>
+          <button type="button" style="margin-top:12px" onclick="activateSmsProvider()">Activate selected service</button>
+          <button type="button" class="ghost" onclick="loadSmsTransport(true)">Refresh service status</button>
+          <div class="muted" style="margin-top:8px">Saving Twilio details does not change the active service. Twilio activation requires approval, a connected owned number and enrolled recipients. No automatic gateway fallback.</div>
+          <div id="smsTransportMsg" role="status" aria-live="polite" style="margin-top:8px;overflow-wrap:anywhere"></div>
+          <div id="smsUnconfirmed" role="status" style="margin-top:8px;color:#fbbf24;overflow-wrap:anywhere"></div>
+          <div id="smsRoundTrip" style="margin-top:8px;overflow-wrap:anywhere"></div>
+        </fieldset>
         <div id="smsFields" style="display:grid;gap:10px;margin-top:6px">
           <label class="muted" style="font-size:12px">SMS gateway URL <span style="color:#9fb0c0">(pre-filled for the SMS Gateway app)</span><br><input id="nSmsUrl" style="width:100%" placeholder="https://api.sms-gate.app/3rdparty/v1/messages"></label>
           <label class="muted" style="font-size:12px;margin-top:10px;display:block">General staff phone number (existing non-routing alerts)<br><input id="nSmsTo" style="width:100%" placeholder="+18655551234"></label>
@@ -3502,12 +3525,36 @@ async function loadInquiries(){
 }
 document.addEventListener('DOMContentLoaded', function(){ try{ loadBookings(); }catch(e){} });
 
+let SMS_TRANSPORT=null, SMS_CONNECTION_SAVED=null, SMS_BUSY=false;
+function smsConnectionInputs(){return {twilioAccountSid:document.getElementById('twAccount').value.trim(),twilioFrom:document.getElementById('twFrom').value.trim(),twilioMessagingServiceSid:document.getElementById('twService').value.trim()};}
+function smsInputsSaved(){return SMS_TRANSPORT && document.getElementById('smsProviderChoice').value===SMS_TRANSPORT.provider && JSON.stringify(smsConnectionInputs())===JSON.stringify(SMS_CONNECTION_SAVED) && !document.getElementById('twToken').value && document.getElementById('nSmsTo').value.trim()===SMS_TRANSPORT.generalRecipient;}
+async function smsRequest(action,body){const r=await fetch(api(action),{method:body?'POST':'GET',headers:{'Content-Type':'application/json','x-app-password':PW,'x-gavin-password':GPW||''},...(body?{body:JSON.stringify(body)}:{})});const j=await r.json();if(!r.ok||j.ok===false)throw Error(j.error||j.reason||'Request failed');return j;}
+async function loadSmsTransport(refresh=false){
+  try{const j=await smsRequest('sms_status');const first=!SMS_TRANSPORT;SMS_TRANSPORT=j;
+    document.getElementById('smsActive').textContent='Active text service: '+j.provider+(j.provider==='twilio'?' · '+j.twilio.from:'');
+    if(first){document.getElementById('smsProviderChoice').value=j.provider;document.getElementById('twAccount').value=j.twilio.accountSid||'';document.getElementById('twFrom').value=j.twilio.from||'';document.getElementById('twService').value=j.twilio.serviceSid||'';SMS_CONNECTION_SAVED=smsConnectionInputs();}
+    document.getElementById('twTokenState').textContent=j.twilio.authTokenSet?'(saved)':'(not set)';
+    document.getElementById('twConsent').innerHTML=(j.smsRecipients||[]).map(x=>'<div style="margin:8px 0;border-top:1px solid var(--line);padding-top:8px"><b>'+esc(x.phone)+'</b> · '+esc(x.consentStatus)+'<br>'+(x.optedInAt?'START received: '+esc(x.optedInAt)+'<br>':'')+'<button class="ghost" type="button" onclick="syncSmsConsent(\''+esc(x.phone)+'\')">Check enrollment</button> '+(!x.ready?'<button class="ghost" type="button" onclick="verifySmsConsent(\''+esc(x.phone)+'\')">Verify employee identity</button>':'')+'</div>').join('');
+    document.getElementById('smsUnconfirmed').textContent=(j.unconfirmedBackups||[]).map(x=>'Backup '+x.label+': send outcome unconfirmed; automatic resend held. Check Twilio logs before retrying. '+(x.messageIds||[]).join(', ')).join('\n');const round=j.roundTrip;document.getElementById('smsRoundTrip').textContent=round?('Latest reply test: '+round.provider+' · '+round.at+' · '+round.from+' · '+round.testText+' · acknowledgment '+(round.replyAccepted?'accepted':'not accepted')):'No two-way reply test recorded yet. After switching, text TEST VERIFY01 from the enrolled staff phone to the Twilio number, then refresh.';
+    if(refresh)document.getElementById('smsTransportMsg').textContent='Service status refreshed.';
+  }catch(e){document.getElementById('smsTransportMsg').textContent=e.message;}
+}
+async function smsUiWork(work){if(SMS_BUSY)return;SMS_BUSY=true;const buttons=[...document.querySelectorAll('#twilioSetup button, #smsActive ~ button')];buttons.forEach(b=>b.disabled=true);const el=document.getElementById('smsTransportMsg');el.textContent='Working…';try{el.textContent=await work();await loadSmsTransport();}catch(e){el.textContent=e.message;}finally{SMS_BUSY=false;buttons.forEach(b=>b.disabled=false);}}
+async function saveTwilioConnection(){return smsUiWork(async()=>{const body=smsConnectionInputs();const token=document.getElementById('twToken').value;if(token)body.twilioAuthToken=token;await smsRequest('set_notify_config',body);SMS_CONNECTION_SAVED=smsConnectionInputs();document.getElementById('twToken').value='';return 'Twilio details saved. Active text service is unchanged.';});}
+function showTwilioProof(p){document.getElementById('twProof').textContent='Campaign: '+p.campaignStatus+'\nOwned number: '+(p.numberOwned?'verified':'not verified')+'\nSender assigned: '+(p.senderRegistered?'yes':'no')+'\nInbound: '+(p.inboundUrl||'not connected')+'\nVoice: '+(p.voiceUrl||'not configured')+'\nReady: '+(p.ready?'yes':'not yet');}
+async function checkTwilio(){return smsUiWork(async()=>{if(JSON.stringify(smsConnectionInputs())!==JSON.stringify(SMS_CONNECTION_SAVED)||document.getElementById('twToken').value)throw Error('Save Twilio connection details before checking them.');const j=await smsRequest('sms_twilio_check');showTwilioProof(j.proof);return 'Twilio status checked. No settings changed.';});}
+async function connectTwilio(){return smsUiWork(async()=>{if(JSON.stringify(smsConnectionInputs())!==JSON.stringify(SMS_CONNECTION_SAVED)||document.getElementById('twToken').value)throw Error('Save Twilio connection details first.');const j=await smsRequest('sms_register_webhook',{provider:'twilio'});showTwilioProof(j.proof);return 'Existing number connected. Voice configuration preserved. Active text service is unchanged.';});}
+async function syncSmsConsent(phone){return smsUiWork(async()=>{await smsRequest('sms_consent_sync',{phone});return 'Enrollment evidence refreshed from Twilio.';});}
+async function verifySmsConsent(phone){return smsUiWork(async()=>{if(!GPW)throw Error('Unlock Gavin using the existing Gavin tab, then return here to verify the employee identity.');await smsRequest('sms_consent_verify',{phone});return 'Employee identity verified against the latest START from '+phone+'.';});}
+async function activateSmsProvider(){return smsUiWork(async()=>{if(JSON.stringify(smsConnectionInputs())!==JSON.stringify(SMS_CONNECTION_SAVED)||document.getElementById('twToken').value)throw Error('Save connection details first.');const provider=document.getElementById('smsProviderChoice').value;await smsRequest('set_notify_config',{smsProvider:provider});return 'Active text service changed to '+provider+'. Send a staff test and check delivery below.';});}
+
 // ===== Text-alert / messaging config (Victor's UI) =====
 let NOTIFY_SAVED_ROUTES=null;
 const DEFAULT_FROM="Parkside Tepees <notifications@send.parksidetepees.com>";
 async function loadNotifyStatus(){
   const el=document.getElementById('nStatus'); if(!el) return;
   try{ const r=await fetch(api('notify_status')+'&cb='+Date.now()); const j=await r.json();
+    await loadSmsTransport();
     const sU=document.getElementById('nSmsUrl'); if(sU && !sU.value) sU.value=j.smsUrl||"";
     const sT=document.getElementById('nSmsTo'); if(sT && !sT.value) sT.value=j.smsTo||"";
     const sB=document.getElementById('nSmsBody'); if(sB && !sB.value) sB.value=j.smsBody||"";
@@ -3528,7 +3575,7 @@ async function loadNotifyStatus(){
     if(sS){ if(j.approveSecretSet){ sS.textContent="\u2705 Saved"; sS.style.color="#2ecc71"; if(sIn&&!sIn.value) sIn.placeholder="\u2022\u2022\u2022\u2022\u2022\u2022 saved — Generate or type to replace"; } else { sS.textContent="\u2014 not set"; sS.style.color="#9fb0c0"; } }
     if(j.webhook){ const wu=document.getElementById('whUrl'), wus=document.getElementById('whUser'), wp=document.getElementById('whPass');
       if(wu) wu.value=j.webhook.url||""; if(wus) wus.value=j.webhook.user||""; if(wp) wp.value=j.webhook.password||""; }
-    el.textContent="SMS connection "+yn(j.smsUrl&&((j.smsUser&&j.smsPassSet)||j.smsHeaders))+" · Email connection "+yn(j.resendKey&&j.resendFromSet)+" · OwnerRez "+yn(j.ownerrez_oauth_set)+" · Backup after "+j.escalateMins+" minutes";
+    el.textContent="SMS connection "+yn(j.smsConfigured)+" · Email connection "+yn(j.resendKey&&j.resendFromSet)+" · OwnerRez "+yn(j.ownerrez_oauth_set)+" · Backup after "+j.escalateMins+" minutes";
 
   }catch(e){ el.textContent="Status error: "+e.message; }
 }
@@ -3576,15 +3623,15 @@ function readRouteInputs(){ return Object.fromEntries(['normal','complaint','bac
 function updateRouteInput(key){ const type=document.getElementById('route_'+key+'_channel').value; const input=document.getElementById('route_'+key+'_recipient'); input.type=type==='sms'?'tel':'email'; input.placeholder=type==='sms'?'+18655551234':'staff@example.com'; }
 function renderRouteTests(tests){ const el=document.getElementById('routeTestHistory'); if(!el)return; el.innerHTML=tests.slice(0,6).map(t=>'<div style="border-top:1px solid var(--line);padding:8px 0;font-size:12px"><b>'+esc(t.route)+' test · '+esc(t.channel)+'</b> → '+esc(t.to)+'<br>'+esc(t.at)+'<br>'+(t.accepted?'Provider accepted':'Not accepted')+' · Status: '+esc(t.status)+(t.messageId?'<br>Message ID: '+esc(t.messageId):'')+(t.error?'<br>'+esc(t.error):'')+(t.checkError?'<br>'+esc(t.checkError):'')+(t.checkedAt?'<br>Checked: '+esc(t.checkedAt):'')+' <button type="button" class="ghost" onclick="checkRouteTest(\''+esc(t.id)+'\')">Check status</button></div>').join(''); }
 async function loadRouteTests(){ try{const r=await fetch(api('notification_test_status'),{headers:{'x-app-password':PW}}); const j=await r.json(); renderRouteTests(j.tests||[]);}catch(e){} }
-async function sendRouteTest(route){ const el=document.getElementById('routeTestStatus'); if(!NOTIFY_SAVED_ROUTES || JSON.stringify(readRouteInputs())!==JSON.stringify(NOTIFY_SAVED_ROUTES)){el.textContent='Save your routing settings before sending a test.';return;} el.textContent='Sending '+route+' test to saved recipient…'; try{const r=await fetch(api('test_notification_route'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({route})}); const j=await r.json(); el.textContent=j.ok?'Provider accepted the test. Use Check status to verify delivery.':('Test failed: '+(j.error||(j.test&&j.test.error)||'unknown error')); await loadRouteTests();}catch(e){el.textContent='Test failed: '+e.message;} }
+async function sendRouteTest(route){ const el=document.getElementById('routeTestStatus'); if(!smsInputsSaved() || !NOTIFY_SAVED_ROUTES || JSON.stringify(readRouteInputs())!==JSON.stringify(NOTIFY_SAVED_ROUTES)){el.textContent='Save your routing settings before sending a test.';return;} el.textContent='Sending '+route+' test to saved recipient…'; try{const r=await fetch(api('test_notification_route'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({route})}); const j=await r.json(); el.textContent=j.ok?'Provider accepted the test. Use Check status to verify delivery.':('Test failed: '+(j.error||(j.test&&j.test.error)||'unknown error')); await loadRouteTests();}catch(e){el.textContent='Test failed: '+e.message;} }
 async function checkRouteTest(id){const el=document.getElementById('routeTestStatus'); el.textContent='Checking provider status…'; try{const r=await fetch(api('notification_test_status'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({id})});const j=await r.json();el.textContent=j.test?('Provider status: '+j.test.status+(j.test.checkError?' — '+j.test.checkError:'')):(j.error||'Test not found');await loadRouteTests();}catch(e){el.textContent='Status check failed: '+e.message;} }
 async function sendTestSms(){
-  const msg=document.getElementById('nSmsMsg'); if(msg){ msg.style.color=''; msg.textContent='Saving & sending\u2026'; }
-  if(!await saveNotify()) return;
+  const msg=document.getElementById('nSmsMsg'); if(msg){ msg.style.color=''; msg.textContent='Sending to saved staff recipient…'; }
+  if(!smsInputsSaved()){if(msg)msg.textContent="Save changed SMS settings before testing.";return;}
   try{
     const r=await fetch(api('send_test_sms'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:'{}'});
     const j=await r.json().catch(()=>({}));
-    if(msg){ if(j.ok){ msg.style.color='#2ecc71'; msg.textContent='Sent \u2713 to '+(j.to||'your phone')+' \u2014 check your texts.'; }
+    if(msg){ if(j.ok){ msg.style.color='#2ecc71'; msg.textContent='Provider accepted test to '+(j.to||'your phone')+'. Check the test history for delivery.';loadRouteTests(); }
       else { msg.style.color='#f4b942'; msg.textContent='Failed: '+(j.error||j.reason||'unknown'); } }
   }catch(e){ if(msg){ msg.style.color='#f4b942'; msg.textContent='Failed: '+e.message; } }
 }

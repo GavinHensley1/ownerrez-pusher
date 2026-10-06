@@ -9,6 +9,16 @@
 //     Then a GENTLE per-unit nudge (~20%, capped +/-$25) for unit-level scarcity vs the resort.
 //   Overrides pin a night. No occupancy data at all -> price at market.
 let redis=null; try{ const {Redis}=require("@upstash/redis"); redis=new Redis({url:process.env.KV_REST_API_URL,token:process.env.KV_REST_API_TOKEN}); }catch{ redis=null; }
+const staffSms = require("./staff-sms.cjs");
+const _smsMemory=new Map();
+const employeeSms=staffSms.create({
+ get:async k=>redis?await redis.get(k):_smsMemory.get(k),
+ set:async(k,v)=>{if(redis)await redis.set(k,v);else _smsMemory.set(k,v);},
+ cas:async(k,revision,next)=>{
+   if(redis)return Number(await redis.eval("local raw=redis.call('get',KEYS[1]);local old={};if raw then old=cjson.decode(raw) end;if (old.revision or '')~=ARGV[1] then return 0 end;redis.call('set',KEYS[1],ARGV[2]);return 1",[k],[revision,JSON.stringify(next)]))===1;
+   if(((_smsMemory.get(k)||{}).revision||'')!==revision)return false;_smsMemory.set(k,next);return true;
+ }
+});
 const certifiedCncCam = require("./cnc-certified-library.cjs");
 const { loadCertifiedLibrary: loadCertifiedCncLibrary, certifiedLibraryProvider: certifiedCncLibraryProvider } = certifiedCncCam;
 // Stage-chain and blank-thickness gates, shared verbatim with the Mac bridge.
@@ -526,7 +536,7 @@ async function sendGuestReply(enabled, ids, body){
   body=scrubContact(body); // defense-in-depth: strip any phone/email the channel would block, on EVERY guest send
   if(isInternalArtifact(body)){
     const rec={sent:false, blocked:true, staged:false, reason:"BLOCKED: body looked like an internal approval/label, not a guest reply \u2014 nothing was sent to the guest"};
-    try{ if(cfg.smsUrl&&cfg.smsTo) await sendSmsGateway(cfg, "\u26A0\uFE0F Blocked a guest send that looked like an internal label/command. Nothing went to the guest."); }catch(e){}
+    try{ if(cfg.smsUrl&&cfg.smsTo) await sendStaffSms(cfg, "\u26A0\uFE0F Blocked a guest send that looked like an internal label/command. Nothing went to the guest."); }catch(e){}
     try{ if(redis) await redis.set("parkside:last_send", {ranAt:new Date().toISOString(), ...rec}); else _memLastSend={ranAt:new Date().toISOString(), ...rec}; }catch(e){}
     return rec;
   }
@@ -553,35 +563,16 @@ async function sendGuestReply(enabled, ids, body){
   try{ if(result&&result.sent){ await appendThreadLog(threadId, bookingId, "out", body, ""); } }catch(e){}
   return result;
 }
-// ===== Configurable SMS provider (replaces the old hardcoded Twilio / "Willow" path) =====
-// Fully env-driven so the owner can drop in the NEW number + ANY provider with no code change:
-//   SMS_PROVIDER      "twilio" | "none"   (default "none" => staged; nothing is actually sent)
-//   SMS_FROM_NUMBER   new outbound number, E.164   (falls back to legacy TWILIO_FROM)
-//   SMS_VICTOR_NUMBER Victor's approval number, E.164  (falls back to legacy VICTOR_PHONE)
-//   twilio creds:     SMS_TWILIO_SID + SMS_TWILIO_TOKEN  (fall back to TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN)
-// Add another provider by extending the switch below — the rest of the app calls sendSms().
-function smsProvider(){ return String(process.env.SMS_PROVIDER||"none").toLowerCase().trim(); }
-function smsFrom(){ return process.env.SMS_FROM_NUMBER||process.env.TWILIO_FROM||""; }
-function victorNumber(){ return process.env.SMS_VICTOR_NUMBER||process.env.VICTOR_PHONE||""; }
-function smsConfigured(){ const p=smsProvider(); if(p==="none"||!p) return false; if(!smsFrom()) return false;
-  if(p==="twilio") return !!((process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID)&&(process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN));
-  return false; }
-async function sendSms(to, body){
-  const provider=smsProvider(), from=smsFrom();
-  if(provider==="none"||!provider) return {sent:false, staged:true, reason:"SMS_PROVIDER not set (configure SMS_PROVIDER + SMS_FROM_NUMBER + creds to go live)"};
-  if(!to) return {sent:false, staged:true, reason:"no destination number"};
-  if(!from) return {sent:false, staged:true, reason:"SMS_FROM_NUMBER not set"};
-  if(provider==="twilio"){
-    const sid=process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID, auth=process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN;
-    if(!sid||!auth) return {sent:false, staged:true, reason:"twilio creds missing (SMS_TWILIO_SID/SMS_TWILIO_TOKEN)"};
-    try{ const r=await fetch("https://api.twilio.com/2010-04-01/Accounts/"+sid+"/Messages.json",{method:"POST",
-        headers:{Authorization:"Basic "+Buffer.from(sid+":"+auth).toString("base64"),"Content-Type":"application/x-www-form-urlencoded"},
-        body:new URLSearchParams({From:from,To:to,Body:body})});
-      return {sent:r.ok, status:r.status, provider:"twilio"}; }
-    catch(e){ return {sent:false, error:String(e.message||e)}; }
-  }
-  return {sent:false, staged:true, reason:"unknown SMS_PROVIDER '"+provider+"'"};
+// Saved UI provider is authoritative; deploying never switches away from the existing gateway.
+async function sendSms(to, body){const cfg=await getNotifyConfig();return sendStaffSms({...cfg,smsTo:to||cfg.smsTo},body);}
+async function sendStaffSms(cfg,text){
+  if(cfg.smsProvider==="twilio")return employeeSms.send(cfg,text);
+  if(cfg.smsProvider!=="gateway")return {sent:false,staged:true,reason:"SMS is disabled",provider:cfg.smsProvider};
+  return sendSmsGateway(cfg,text);
 }
+function smsConnection(cfg){return cfg.smsProvider==="twilio"?staffSms.connection(cfg):cfg.smsProvider==="gateway"&&!!(cfg.smsUrl&&((cfg.smsUser&&cfg.smsPass)||cfg.smsHeaders));}
+function staffRecipients(cfg){return [...new Set([cfg.smsTo,...Object.values(cfg.routes||{}).filter(r=>r.channel==="sms").map(r=>r.recipient)].filter(Boolean))];}
+async function smsReadiness(cfg){const recipients=[];for(const phone of staffRecipients(cfg)){const c=await employeeSms.consent(cfg,phone);recipients.push({phone,consentStatus:c.status||"unknown",optedInAt:c.optedInAt||null,optedInSid:c.optedInSid||null,verifiedAt:c.verifiedAt||null,ready:await employeeSms.ready(cfg,phone)});}return {smsProvider:cfg.smsProvider,smsConfigured:smsConnection(cfg),twilio:{accountSid:cfg.twilioAccountSid,authTokenSet:!!cfg.twilioAuthToken,from:cfg.twilioFrom,serviceSid:cfg.twilioMessagingServiceSid,inboundUrl:staffSms.inboundUrl()},smsRecipients:recipients};}
 // Text Victor for approvals/escalations (staged until the provider is configured).
 // Generic HTTP SMS gateway (e.g. an Android SMS-gateway app that exposes an HTTP send endpoint). Template uses {to}/{text}.
 function fillSmsBody(tmpl, to, text){
@@ -603,7 +594,7 @@ async function sendSmsGateway(cfg, text){
 }
 async function smsVictor(enabled, text){
   if(!enabled) return {sent:false, staged:true, reason:"messaging toggle OFF (preview/test mode)"};
-  return sendSms(victorNumber(), text);
+  const cfg=await getNotifyConfig(); return sendStaffSms(cfg,text);
 }
 
 // ===== Email approval channel (Resend) — interim channel before SMS is live =====
@@ -612,7 +603,7 @@ let _memNotify=null;
 async function getNotifyRaw(){ return (redis?(await redis.get(NCKEY)):_memNotify)||{}; }
 async function setNotifyRaw(c){ if(redis) await redis.set(NCKEY,c); else _memNotify=c; return c; }
 // Merged notify config: Redis (set via Victor's UI) wins, env vars are the fallback.
-async function getNotifyConfig(){ const c=await getNotifyRaw(); const cfg={
+async function getNotifyConfig(rawOverride){ const c=rawOverride||await getNotifyRaw(); const cfg={
   apiKey: (c.resendApiKey||process.env.RESEND_API_KEY||"").trim(),
   from:   (c.from||process.env.RESEND_FROM||"").trim(),
   to:     (c.victorEmail||process.env.VICTOR_EMAIL||"").trim(),
@@ -624,6 +615,11 @@ async function getNotifyConfig(){ const c=await getNotifyRaw(); const cfg={
   webhookUser: (c.webhook_user||process.env.OR_WEBHOOK_USER||"").trim(),
   webhookPass: (c.webhook_pass||process.env.OR_WEBHOOK_PASS||"").trim(),
   primaryChannel: ((c.primaryChannel||"email")==="sms")?"sms":"email",
+  smsProvider: (c.smsProvider||"gateway"),
+  twilioAccountSid: (c.twilioAccountSid||process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID||"").trim(),
+  twilioAuthToken: (c.twilioAuthToken||process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN||""),
+  twilioFrom: (c.twilioFrom||process.env.SMS_FROM_NUMBER||process.env.TWILIO_FROM||"").trim(),
+  twilioMessagingServiceSid: (c.twilioMessagingServiceSid||process.env.TWILIO_MESSAGING_SERVICE_SID||"").trim(),
   smsUrl: (c.smsGatewayUrl||process.env.SMS_GATEWAY_URL||"https://api.sms-gate.app/3rdparty/v1/messages").trim(),
   smsTo:  (c.smsTo||process.env.SMS_VICTOR_NUMBER||process.env.VICTOR_PHONE||"").trim(),
   smsBody: (c.smsBody||process.env.SMS_BODY_TEMPLATE||'{"textMessage":{"text":"{text}"},"phoneNumbers":["{to}"]}'),
@@ -730,7 +726,7 @@ async function sendVictorApprovalEmail(req, item, ctx){
   // Text route: preserve the existing labeled approval workflow.
   if(cfg.smsUrl && cfg.smsTo){
     const _lbl=item.smsLabel||"Q?"; const _ctx=[unit,guestName].filter(Boolean).join(" - "); const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-8); const _convo=_hist.length?_hist.map(m=>(m.d==="out"?"You: ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim().slice(0,150)).join("\n\n"):("Guest: "+String(item.question||"").replace(/\s+/g," ").trim().slice(0,160)); const smsText=_lbl+(_ctx?(" - "+_ctx):"")+"\n"+_convo+"\n\nDraft: "+String(proposed||"(none)").replace(/\s+/g," ").trim().slice(0,300)+"\n\nReply: "+_lbl+" yes  |  "+_lbl+" no";
-    const result=await sendSmsGateway(cfg, smsText);
+    const result=await sendStaffSms(cfg, smsText);
     return {...result, channel:"sms", to:cfg.smsTo||null, subject:"(SMS)"};
   }
   return {sent:false, staged:true, reason:"SMS not configured", channel:"none"};
@@ -788,7 +784,7 @@ async function escalateStaleApprovals(req){
       // (1) HARD RECENCY GUARD: anything older than maxAge is BACKLOG — NEVER escalate. Mark it permanently
       // ineligible so the old backlog (days-old, already-handled records) can never blast the backup again.
       if((now-t) > maxAgeMs){ if(!it.backupAskSent){ it.backupAskSent=true; it.backupSkippedStale=true; changed=true; neutralized++; } continue; }
-      if(it.backupAskSent) continue;                         // already asked once (permanent)
+      if(it.backupAskSent||it.backupAskUncertain) continue;                         // already asked once (permanent)
       if(t > cutoff) continue;                               // not past the answer timer yet
       // (2) 'ALREADY HANDLED' IS DETERMINED SOLELY BY ITEM STATUS via the single-resolution lock — NOT by the
       // presence of any outbound on the thread. Our own holding note, OwnerRez booking/confirmation automations,
@@ -800,10 +796,11 @@ async function escalateStaleApprovals(req){
       // ATOMIC one-shot across concurrent sweeps (inbound webhooks + cron + dashboard load), 30-day expiry.
       let _first=true;
       try{ if(redis){ const _r=await redis.set("parkside:backup_ask:"+it.id, new Date().toISOString(), {nx:true, ex:30*24*3600}); _first=(_r!==null && _r!==false); } }catch(e){}
-      if(!_first){ it.backupAskSent=true; changed=true; continue; }
+      if(!_first){ continue; }
       const r=await sendVictorEscalationSms(req, it, {backup:true});   // clean "Guest question needs info" subject (first & only email)
       it.backupAskSent=!!(r&&r.sent===true); it.escalatedTo2=it.backupAskSent; it.escalatedTo2At=new Date().toISOString(); it.escalatedTo2Sent=it.backupAskSent;
-      if(!it.backupAskSent && redis) await redis.del("parkside:backup_ask:"+it.id);
+      if(r&&r.uncertain){it.backupAskUncertain=true;it.backupAskError=r.error||r.reason;it.backupAskMessageIds=r.messageIds||[];}
+      if(!it.backupAskSent && !(r&&r.uncertain) && redis) await redis.del("parkside:backup_ask:"+it.id);
       changed=true; done.push({id:it.id, sent:!!(r&&r.sent===true), to:backup.recipient, channel:backup.channel});
     }
     if(changed) await setApprovals(list);
@@ -1567,7 +1564,7 @@ async function sendVictorEscalationSms(req, item, ctx){
   const baseCfg=await getNotifyConfig(); const route=routeFor(baseCfg,{...item,complaint:!!(ctx.complaint||item.complaint)},ctx.backup);
   if(route.channel==="email") return {...await sendApprovalEmail(req,item,route.recipient,!!ctx.backup),channel:"email"};
   const cfg=routedSmsConfig(baseCfg,route);
-  if(!(cfg.smsUrl&&cfg.smsTo)) return {sent:false, reason:"SMS not configured"};
+  if(!(smsConnection(cfg)&&cfg.smsTo)) return {sent:false, reason:"SMS not configured"};
   const unit=ctx.unit||item.unit||""; const guestName=ctx.guestName||item.guest_name||"";
   const lbl=item.smsLabel||"Q?";
   const _hist=(await getThreadLog(item.thread_id, item.booking_id)).filter(m=>m&&m.b).slice(-5);
@@ -1580,13 +1577,13 @@ async function sendVictorEscalationSms(req, item, ctx){
   if(ctx.followup){
     const _nm=String(ctx.newMsg||item.question||"").replace(/\s+/g," ").trim();
     const _ft=lbl+(_ctx?(" - "+_ctx):"")+" \u2014 the guest sent ANOTHER message:\n\""+_nm+"\"\n\nFull recent conversation:\n"+_convo+(item.complaint?"\n\nPlease reply directly in OwnerRez.":"\n\nTo answer, text: "+lbl+" then the fact.");
-    try{ return await sendSmsGateway(cfg, _ft); }catch(e){ return {sent:false, error:String(e.message||e)}; }
+    try{ return await sendStaffSms(cfg, _ft); }catch(e){ return {sent:false, error:String(e.message||e)}; }
   }
   const _isComp=!!(ctx.complaint||item.complaint);
   const _mid=_isComp?(item.holdingSent===true?"I told the guest I'm sorry and a manager will follow up.":"This complaint needs your personal response."):(ctx.partial?"I answered what I could and told the guest I'd confirm the rest.":"I told the guest I'd check with a manager.");
   const _tag=_isComp?" (COMPLAINT)":(ctx.partial?" (partial \u2014 needs the rest)":" (escalated)");
   const text=(_isComp?"\u26A0 COMPLAINT \u2014 a manager should reply personally.\n":"")+lbl+(_ctx?(" - "+_ctx):"")+_tag+"\n"+_convo+"\n\n"+_mid+(_isComp?" Please reply directly in OwnerRez. Text "+lbl+" no to close this alert.":" To answer, text: "+lbl+" then the fact.");
-  try{ return await sendSmsGateway(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
+  try{ return await sendStaffSms(cfg, text); }catch(e){ return {sent:false, error:String(e.message||e)}; }
 }
 
 function scrubContact(text){
@@ -4501,15 +4498,39 @@ if(action==="email_recipients"){
       const pl=(b&&b.payload)?b.payload:b;
       const from=String(pl.phoneNumber||pl.from||b.From||b.from||b.source||"").trim();
       const bodyRaw=String(pl.message||pl.text||b.Body||b.body||b.text||b.message||"").trim();
-      const tok=(req.query&&req.query.token)||"";
-      if(cfg.secret && tok && tok!==cfg.secret) return res.status(200).json({ignored:true, reason:"bad token"});
+      const isTwilio=!!((req.headers||{})["x-twilio-signature"]||b.AccountSid||b.MessageSid);
+      if(isTwilio){
+        if(!staffSms.validate(req,b,cfg))return res.status(403).json({error:"Invalid Twilio webhook"});
+        const jsonResponse=res.json.bind(res);
+        res.json=function(value){if(this.statusCode>=400)return jsonResponse(value);this.setHeader("Content-Type","text/xml");return this.end("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response/>");};
+        if(!staffRecipients(cfg).includes(from))return res.status(200).json({ignored:true});
+        const kw=staffSms.keyword(bodyRaw), opt=String(b.OptOutType||"");
+        if(opt && !["START","STOP","HELP"].includes(opt))return res.status(400).json({error:"Unknown OptOutType"});
+        if(kw||opt){
+          if(["START","STOP"].includes(opt||kw))await employeeSms.receive(cfg,from,opt||kw,b.MessageSid);
+          return res.status(200).json({ok:true,keyword:opt||kw});
+        }
+        if(cfg.smsProvider!=="twilio"||!await employeeSms.ready(cfg,from))return res.status(200).json({ignored:true});
+      }else{
+        if(cfg.smsProvider==="twilio")return res.status(403).json({error:"Gateway callbacks are disabled"});
+        const tok=(req.query&&req.query.token)||"";
+        if(!cfg.secret||tok!==cfg.secret)return res.status(403).json({error:"Invalid gateway webhook token"});
+        if(!authorizedSmsNumbers(cfg).includes(phoneDigits(from)))return res.status(200).json({ignored:true});
+        if(staffSms.keyword(bodyRaw))return res.status(200).json({ignored:true,reason:"Reserved SMS keyword"});
+      }
       // Duplicate-webhook guard: Twilio can POST the same MMS twice (the number AND its Messaging Service). Dedup by MessageSid.
       const _msgSid=String(pl.MessageSid||b.MessageSid||pl.SmsMessageSid||b.SmsMessageSid||pl.SmsSid||b.SmsSid||pl.messageId||b.messageId||"").trim();
       // ===== inbound-SMS DIAGNOSTIC: record each inbound + the branch/outcome to parkside:sms_debug (read via action=sms_debug) =====
       const _dbgRec={ at:new Date().toISOString(), from:String(from), fromL10:String(from).replace(/\D/g,"").slice(-10), smsToL10:String(cfg.smsTo||"").replace(/\D/g,"").slice(-10), bodyRaw:String(bodyRaw).slice(0,240), sid:_msgSid, numMedia:(parseInt(pl.NumMedia||b.NumMedia||b.num_media||0,10)||0), bKeys:(b&&typeof b==="object")?Object.keys(b).slice(0,30):[], plKeys:(pl&&typeof pl==="object"&&pl!==b)?Object.keys(pl).slice(0,30):[], outcome:"received" };
       const _dbg=async(oc)=>{ try{ if(redis){ _dbgRec.outcome=oc||_dbgRec.outcome; _dbgRec.tsOut=new Date().toISOString(); let _a=(await redis.get("parkside:sms_debug"))||[]; if(!Array.isArray(_a)) _a=[]; _a.push(Object.assign({},_dbgRec)); await redis.set("parkside:sms_debug", _a.slice(-20)); } }catch(e){} };
-      if(_msgSid && redis){ try{ const _fresh=await redis.set("parkside:mms_seen:"+_msgSid,"1",{nx:true,ex:900}); if(_fresh===null||_fresh===false){ await _dbg("dedup"); return res.status(200).json({ok:true,dedup:true,reason:"duplicate webhook",sid:_msgSid}); } }catch(e){} }
-      // ROBUST MMS/media intake \u2014 runs BEFORE the sender filter so a receipt photo from ANY number (incl. Gavin's own tests) is captured into the Fraud tab.
+      if(_msgSid && redis){ try{ const _fresh=await redis.set("parkside:mms_seen:"+_msgSid,"1",{nx:true,ex:900}); if(_fresh===null||_fresh===false){ await _dbg("dedup"); return res.status(200).json({ok:true,dedup:true,reason:"duplicate webhook",sid:_msgSid}); } }catch(e){if(isTwilio)throw e;} }
+      if(/^TEST [A-Z0-9]{6,24}$/i.test(bodyRaw)){
+        const reply=await sendStaffSms({...cfg,smsTo:from},"Two-way test received: "+bodyRaw+". No guest message was sent.");
+        const record={at:new Date().toISOString(),from,inboundSid:b.MessageSid||null,provider:cfg.smsProvider,replySid:reply.messageId||null,replyAccepted:!!reply.sent,testText:bodyRaw};
+        if(redis)await redis.set("parkside:sms_roundtrip",record);else _smsMemory.set("parkside:sms_roundtrip",record);
+        return res.status(200).json({ok:true});
+      }
+      // ROBUST MMS/media intake \u2014 runs only AFTER transport authentication and configured-sender authorization.
       { const media=[]; const seen={};
         const isImg=x=>typeof x==="string"&&x.length<4000&&(/^https?:\/\/[^\s]+\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?)(\?|#|$)/i.test(x)||/^data:image\//i.test(x)||/^https?:\/\/[^\s]*(mediaurl|media\/|\/mms|attachment|\/image|\/photo|cloudinary|amazonaws|blob)/i.test(x));
         const push=u=>{ u=String(u); if(u&&!seen[u]){ seen[u]=1; media.push(u); } };
@@ -4519,7 +4540,7 @@ if(action==="email_recipients"){
           try{ if(redis){ let blob=(await redis.get("parkside:fraud"))||{accounts:{},checks:[],receipts:[],alerts:[]}; blob.receipts=blob.receipts||[]; const now=new Date().toISOString();
             for(const mu of media){ blob.receipts.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,7), source:"mms", vendor:"", amount:"", date:etDate(now), ref:"", note:bodyRaw||"", media:mu, from, sid:_msgSid||"", status:"unreviewed", at:now }); }
             blob.receipts=blob.receipts.slice(0,2000); await redis.set("parkside:fraud",blob); } }catch(e){}
-          try{ await sendSmsGateway(cfg, "\uD83E\uDDFE Receipt received ("+media.length+" image"+(media.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
+          try{ await sendStaffSms({...cfg,smsTo:from}, "\uD83E\uDDFE Receipt received ("+media.length+" image"+(media.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
           await _dbg("media_receipt:"+media.length); return res.status(200).json({receipt:true, count:media.length, via:"robust"});
         }
       }
@@ -4534,11 +4555,11 @@ if(action==="email_recipients"){
         try{ if(redis){ let blob=(await redis.get("parkside:fraud"))||{accounts:{},checks:[],receipts:[],alerts:[]}; blob.receipts=blob.receipts||[]; const now=new Date().toISOString();
           for(const mu of mediaUrls){ blob.receipts.unshift({ id:Date.now().toString(36)+Math.random().toString(36).slice(2,7), source:"mms", vendor:"", amount:"", date:etDate(now), ref:"", note:bodyRaw||"", media:mu, sid:_msgSid||"", status:"unreviewed", at:now }); }
           blob.receipts=blob.receipts.slice(0,2000); await redis.set("parkside:fraud",blob); } }catch(e){}
-        try{ await sendSmsGateway(cfg, "\uD83E\uDDFE Receipt received ("+mediaUrls.length+" image"+(mediaUrls.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
+        try{ await sendStaffSms({...cfg,smsTo:from}, "\uD83E\uDDFE Receipt received ("+mediaUrls.length+" image"+(mediaUrls.length>1?"s":"")+") \u2014 saved to the fraud log. Thanks!"); }catch(e){}
         return res.status(200).json({receipt:true, count:mediaUrls.length});
       }
       if(!bodyRaw){ await _dbg("empty_body"); return res.status(200).json({ignored:true, reason:"empty"}); }
-      const ackBack=async(t)=>{ if(!(cfg.smsUrl&&from)) return {sent:false}; let _r=null; for(let _i=0;_i<3;_i++){ try{ _r=await sendSmsGateway({...cfg,smsTo:from}, t); if(_r && _r.sent) return _r; }catch(e){ _r={sent:false, error:String(e.message||e)}; } if(_i<2) await new Promise(function(res){setTimeout(res,1200);}); } return _r||{sent:false}; };
+      const ackBack=async(t)=>{ if(!from) return {sent:false}; let _r=null; for(let _i=0;_i<(cfg.smsProvider==="twilio"?1:3);_i++){ try{ _r=await sendStaffSms({...cfg,smsTo:from}, t); if(_r && _r.sent) return _r; }catch(e){ _r={sent:false, error:String(e.message||e)}; } if(_i<2) await new Promise(function(res){setTimeout(res,1200);}); } return _r||{sent:false}; };
       // TAPBACK/REACTION GUARD: a reaction (or emoji-only) inbound is NOT a reply. Ignore it entirely — no prompt,
       // no processing, and there is NO path from here to a guest message (guest sends only happen on decideApproval
       // via an explicit "Q# yes"). Silently drop.
@@ -4709,14 +4730,40 @@ if(action==="email_recipients"){
       if(typeof b.smsUser==="string"){ const t=b.smsUser.trim(); if(t!=="") next.smsUser=t; else delete next.smsUser; }
       if(typeof b.smsPass==="string" && b.smsPass!=="") next.smsPass=b.smsPass; else if(b.smsPass==="") delete next.smsPass;
       if(typeof b.scoreAlertEmails==="string"){ const t=b.scoreAlertEmails.trim(); if(t!=="") next.scoreAlertEmails=t; else delete next.scoreAlertEmails; }
+      for(const k of ["twilioAccountSid","twilioAuthToken","twilioFrom","twilioMessagingServiceSid"])setIf(k,b[k]);
+      if(b.smsProvider!==undefined){if(!["gateway","twilio","none"].includes(b.smsProvider))return res.status(400).json({error:"Choose a supported SMS provider"});next.smsProvider=b.smsProvider;}
+      const preview=await getNotifyConfig(next);
+      if(b.twilioAccountSid && twilioCredentials().sid && b.twilioAccountSid!==twilioCredentials().sid)return res.status(400).json({error:"Keep the existing Twilio voice account; a different SMS account is not supported."});
+      if(preview.twilioAccountSid&&!staffSms.sid(preview.twilioAccountSid,"AC"))return res.status(400).json({error:"Invalid Twilio Account SID"});
+      if(preview.twilioMessagingServiceSid&&!staffSms.sid(preview.twilioMessagingServiceSid,"MG"))return res.status(400).json({error:"Invalid Messaging Service SID"});
+      if(preview.twilioFrom&&!staffSms.e164(preview.twilioFrom))return res.status(400).json({error:"Invalid Twilio sender number"});
+      if(preview.smsProvider==="twilio"){
+        if(!staffSms.connection(preview))return res.status(400).json({error:"Twilio connection is incomplete; save connection settings before activating."});
+        for(const phone of staffRecipients(preview))if(!await employeeSms.ready(preview,phone))return res.status(400).json({error:"Text recipient "+phone+" needs an actual START and management verification before activating Twilio."});
+        const proof=await staffSms.inspect(preview);if(!proof.ready)return res.status(400).json({error:"Twilio campaign, owned sender and inbound connection must verify before activation.",proof});
+      }
       await setNotifyRaw(next);
       const cfg=await getNotifyConfig();
       return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth, primaryChannel:cfg.primaryChannel, smsUrlSet:!!cfg.smsUrl, smsToSet:!!cfg.smsTo, routes:cfg.routes }});
     }
     // Send ONE sample approval email to the configured Victor address (password).
+    if(action==="sms_twilio_check"||action==="sms_consent_sync"||action==="sms_consent_verify"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__unset"))return res.status(401).json({error:"unauthorized"});
+      const cfg=await getNotifyConfig(),b=hookBody(req.body);
+      if(action==="sms_twilio_check")return res.status(200).json({ok:true,proof:await staffSms.inspect(cfg)});
+      if(req.method!=="POST")return res.status(405).json({error:"POST required"});
+      const phone=String(b.phone||"");if(!staffRecipients(cfg).includes(phone))return res.status(400).json({error:"Save this phone as a staff recipient first"});
+      if(action==="sms_consent_verify"&&(req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__unset"))return res.status(401).json({error:"Unlock Gavin to verify employee identity"});
+      const consent=action==="sms_consent_verify"?await employeeSms.verify(cfg,phone):await employeeSms.sync(cfg,phone);
+      return res.status(200).json({ok:true,consent});
+    }
     if(action==="sms_register_webhook"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       const cfg=await getNotifyConfig();
+      if(hookBody(req.body).provider==="twilio"||cfg.smsProvider==="twilio"){
+        if(req.method!=="POST")return res.status(405).json({error:"POST required"});
+        return res.status(200).json({ok:true,proof:await staffSms.connect(cfg),callback:staffSms.inboundUrl()});
+      }
       if(!cfg.smsUrl||!cfg.smsUser) return res.status(200).json({ ok:false, reason:"Set the SMS gateway URL + username/password and Save first." });
       const base=String(cfg.smsUrl).replace(/\/messages\/?$/,"");
       const hooksUrl=base+"/webhooks";
@@ -4743,13 +4790,17 @@ if(action==="email_recipients"){
         const testSmsCfg=routedSmsConfig(cfg,route);
         // Delivery reports are opt-in for this staff-only test, without changing the saved gateway template.
         if(/^https:\/\/api\.sms-gate\.app\//.test(cfg.smsUrl)){ try{ const template=JSON.parse(testSmsCfg.smsBody); template.withDeliveryReport=true; testSmsCfg.smsBody=JSON.stringify(template); }catch(e){} }
-        const result=route.channel==="sms" ? await sendSmsGateway(testSmsCfg,text) : await resendSend({apiKey:cfg.apiKey,from:cfg.from,to:route.recipient,subject:"Parkside routing TEST — "+key,html:"<p>"+escHtml(text)+"</p>"});
-        const record={id:Date.now().toString(36)+Math.random().toString(36).slice(2,8),at:new Date().toISOString(),route:key,channel:route.channel,to:route.recipient,accepted:!!result.sent,messageId:result.messageId||null,status:result.deliveryStatus||(result.sent?"accepted":"failed"),httpStatus:result.status||null,error:result.sent?null:(result.reason||result.error||"Provider rejected the test")};
+        const result=route.channel==="sms" ? await sendStaffSms(testSmsCfg,text) : await resendSend({apiKey:cfg.apiKey,from:cfg.from,to:route.recipient,subject:"Parkside routing TEST — "+key,html:"<p>"+escHtml(text)+"</p>"});
+        const record={id:Date.now().toString(36)+Math.random().toString(36).slice(2,8),at:new Date().toISOString(),route:key,channel:route.channel,provider:route.channel==="sms"?(result.provider||cfg.smsProvider):"resend",to:route.recipient,accepted:!!result.sent,messageId:result.messageId||null,messageIds:result.messageIds||[],status:result.deliveryStatus||(result.sent?"accepted":"failed"),httpStatus:result.status||null,error:result.sent?null:(result.reason||result.error||"Provider rejected the test")};
         const tests=await getRouteTests(); tests.push(record); await saveRouteTests(tests); return res.status(200).json({ok:record.accepted,test:record});
       }
       const tests=await getRouteTests(); const record=tests.find(x=>x.id===String(b.id||req.query.id||""));
       if(!record) return res.status(200).json({ok:true,tests:tests.slice().reverse()});
       if(record.messageId){
+        if(record.provider==="twilio"){
+          try{const parts=await Promise.all((record.messageIds?.length?record.messageIds:[record.messageId]).map(id=>employeeSms.status(cfg,id)));record.parts=parts;record.status=parts.every(p=>p.status==='delivered')?'delivered':(parts.find(p=>['failed','undelivered','canceled'].includes(p.status))?.status||parts.find(p=>p.status!=='delivered')?.status||'unknown');record.errorCode=parts.find(p=>p.errorCode)?.errorCode||null;record.checkedAt=new Date().toISOString();delete record.checkError;}catch(e){record.checkError=e.message;}
+          await saveRouteTests(tests);return res.status(200).json({ok:true,test:record});
+        }
         try{
           let url,headers;
           if(record.channel==="email"){ url="https://api.resend.com/emails/"+encodeURIComponent(record.messageId); headers={Authorization:"Bearer "+cfg.apiKey}; }
@@ -4764,14 +4815,15 @@ if(action==="email_recipients"){
     if(action==="send_test_sms"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       const cfg=await getNotifyConfig();
-      if(!cfg.smsUrl) return res.status(200).json({ ok:false, reason:"No SMS gateway URL set \u2014 fill the SMS fields and Save first." });
+      if(!smsConnection(cfg)) return res.status(200).json({ ok:false, reason:"SMS connection is incomplete \u2014 fill the SMS fields and Save first." });
       if(!cfg.smsTo)  return res.status(200).json({ ok:false, reason:"No phone number set \u2014 fill \u2018Your phone number\u2019 and Save first." });
       const sample="Parkside test \u2705 your SMS approval alerts are working. (Sent from your control panel \u2014 no guest involved.)";
-      const r=await sendSmsGateway(cfg, sample);
+      const r=await sendStaffSms(cfg, sample);
       const ok=r.sent===true;
-      return res.status(200).json({ ok, sent:ok, to:cfg.smsTo, status:(r.status||null),
+      const tests=await getRouteTests();tests.push({id:Date.now().toString(36),at:new Date().toISOString(),route:"general",channel:"sms",provider:r.provider||cfg.smsProvider,to:cfg.smsTo,accepted:ok,messageId:r.messageId||null,messageIds:r.messageIds||[],status:r.deliveryStatus||(ok?"accepted":"failed"),error:r.reason||r.error||null});await saveRouteTests(tests);
+      return res.status(200).json({ ok, sent:ok, to:cfg.smsTo, provider:r.provider,messageId:r.messageId, status:(r.deliveryStatus||null),
         error: ok?null:(r.error||r.body||r.reason||("HTTP "+(r.status||"?"))),
-        note: ok?("Test text sent to "+cfg.smsTo+" \u2014 check your phone."):"Gateway did not accept it \u2014 check the username/password and URL." });
+        note: ok?("Test text sent to "+cfg.smsTo+" \u2014 check your phone."):"Provider did not confirm acceptance; check the error and test history." });
     }
     // Config visibility for the email/notify channel. Booleans only (no secrets);
     // if a Resend key is present, also lists the account's verified sender domains.
@@ -4809,7 +4861,7 @@ if(action==="email_recipients"){
       const polledNow=await maybePollMessages(req);
       const escNow=await escalateStaleApprovals(req);
       const stN=await getState(); const apprN=await getApprovals();
-      const out={ resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, escalation:escNow, approveSecretSet:!!cfg.secret,
+      const out={ smsProvider:cfg.smsProvider,smsConfigured:smsConnection(cfg), resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, escalation:escNow, approveSecretSet:!!cfg.secret,
         resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, ownerrezOauthLen:(cfg.ownerrezOauth||"").length, oauthProbe, sendProbe, lastDecided, lastSend, webhook, _diag,
         messaging_enabled:!!stN.messaging_enabled,
         counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
@@ -4828,11 +4880,8 @@ if(action==="email_recipients"){
     if(action==="sms_status"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       const cfg=await getNotifyConfig();
-      const recipientSet=authorizedSmsNumbers(cfg).length>0;
-      const connectionSet=!!(cfg.smsUrl&&((cfg.smsUser&&cfg.smsPass)||cfg.smsHeaders));
-      // Guest-question notifications use the saved HTTP gateway, not the older
-      // SMS_PROVIDER/Twilio helper. This is configuration, not a delivery claim.
-      return res.status(200).json({provider:"gateway",configured:connectionSet&&recipientSet,connectionSet,recipientSet,victorSet:!!cfg.smsTo});
+      const readiness=await smsReadiness(cfg);const recipientSet=staffRecipients(cfg).length>0;
+      return res.status(200).json({...readiness,unconfirmedBackups:(await getApprovals()).filter(x=>x.backupAskUncertain).map(x=>({label:x.smsLabel||x.id,at:x.escalatedTo2At,error:x.backupAskError,messageIds:x.backupAskMessageIds||[]})),generalRecipient:cfg.smsTo,provider:cfg.smsProvider,configured:readiness.smsConfigured&&recipientSet,connectionSet:readiness.smsConfigured,recipientSet,victorSet:!!cfg.smsTo,roundTrip:(redis?await redis.get("parkside:sms_roundtrip"):_smsMemory.get("parkside:sms_roundtrip"))||null});
     }
 
     res.status(400).json({error:"unknown action"});
@@ -4840,10 +4889,12 @@ if(action==="email_recipients"){
 };
 
 module.exports.__model={compute,paceMult,scarMult,gapGm,deriveLearned,interp,SENS,MODEL,UNIT_PREM,GAP_SEED,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
-module.exports.__msg={kbAutoMatch,normQ,smsProvider,smsConfigured,sendSms,decideApproval};
+module.exports.__msg={kbAutoMatch,normQ,sendSms,decideApproval};
 module.exports.__calls={hookBody,phoneDigits,recordingSidOf};
 // item MW-12: expose pure helpers for unit tests (attaches to the handler export).
 module.exports.onDutyActivePct=onDutyActivePct;
 module.exports.timeOffForDate=timeOffForDate;
 
 module.exports.__routing={notificationRoutes,validateNotificationRoutes,routeFor,getNotifyConfig,setNotifyRaw,getNotifyRaw,sendVictorApprovalEmail,sendVictorEscalationSms,sendApprovalEmail,escalateStaleApprovals,setApprovals,getApprovals,authorizedSmsNumbers};
+
+module.exports.__staffSms={employeeSms,staffSms,sendStaffSms,smsReadiness,staffRecipients};
