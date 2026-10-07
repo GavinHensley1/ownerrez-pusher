@@ -10,6 +10,7 @@
 //   Overrides pin a night. No occupancy data at all -> price at market.
 let redis=null; try{ const {Redis}=require("@upstash/redis"); redis=new Redis({url:process.env.KV_REST_API_URL,token:process.env.KV_REST_API_TOKEN}); }catch{ redis=null; }
 const staffSms = require("./staff-sms.cjs");
+const guestFacts = require("./guest-facts.cjs");
 const _smsMemory=new Map();
 const employeeSms=staffSms.create({
  get:async k=>redis?await redis.get(k):_smsMemory.get(k),
@@ -119,8 +120,25 @@ const OWNERREZ_ICAL={486910:"https://app.ownerrez.com/feeds/ical/8f39d35971614fe
 const SKEY="parkside:state";
 
 let _memState=null;
-async function getState(){ if(!redis) return {...JSON.parse(JSON.stringify(DEFAULTS)),...(_memState||{})}; const s=await redis.get(SKEY); return {...JSON.parse(JSON.stringify(DEFAULTS)),...(s||{})}; }
-async function setState(p){ const cur=await getState(); const next={...cur,...p}; delete next.icals; if(redis) await redis.set(SKEY,next); else _memState={...(_memState||{}),...p}; return next; }
+async function getState(){ if(!redis) return {...JSON.parse(JSON.stringify(DEFAULTS)),...JSON.parse(JSON.stringify(_memState||{}))}; const s=await redis.get(SKEY); return {...JSON.parse(JSON.stringify(DEFAULTS)),...(s||{})}; }
+async function setState(p){
+  const cur=await getState();const patch={...p};delete patch.icals;
+  const expected=String((cur.kb&&cur.kb.revision)||"");
+  if(p.kb){
+    if((p.kb.revision||"legacy")!==(expected||"legacy"))throw Error("Facts changed in another session. Reload before saving.");
+    patch.kb={...guestFacts.normalize(p.kb),revision:require("crypto").randomUUID()};
+  }
+  if(redis){
+    // Canonical state CAS: merge ONLY supplied keys into the latest state, so
+    // unrelated pricing writes cannot resurrect old facts during a review.
+    const result=await redis.eval("-- canonical-state-cas\nlocal raw=redis.call('get',KEYS[1]);local cur={};if raw then cur=cjson.decode(raw) end;local p=cjson.decode(ARGV[1]);if p.kb then local rev='';if cur.kb then rev=cur.kb.revision or '' end;if rev~=ARGV[2] then return 0 end end;for k,v in pairs(p) do cur[k]=v end;cur.icals=nil;redis.call('set',KEYS[1],cjson.encode(cur));return 1",[SKEY],[JSON.stringify(patch),expected]);
+    if(Number(result)!==1)throw Error("Facts changed in another session. Reload before saving.");
+  }else{
+    if(p.kb&&String((_memState&&_memState.kb&&_memState.kb.revision)||"")!==expected)throw Error("Facts changed in another session. Reload before saving.");
+    _memState={...(_memState||{}),...patch};
+  }
+  return {...cur,...patch};
+}
 const isWe=d=>KNOBS.weekendDays.includes(d.getUTCDay());
 function targetFor(d,t){ const m=t[d.getUTCMonth()+1]; return isWe(d)?m.we:m.wd; }
 function monthLead(ds,today){ const first=new Date(ds.slice(0,7)+"-01T00:00:00Z"); const t=new Date(today+"T00:00:00Z"); return Math.max(0,Math.round((first-t)/86400000)); }
@@ -1266,7 +1284,7 @@ const TOPIC_SYNONYMS=[
   {topic:"Emergency / who to contact", kw:["emergency","who do i contact","help line","phone number to call"]},
 ];
 function kbAutoMatch(kb, question){
-  const q=" "+normQ(question)+" "; const items=(kb&&kb.items)||[];
+  const q=" "+normQ(question)+" "; const items=guestFacts.select(kb,arguments[2]||{}).filter(i=>i.kind==="fact");
   const findItem=t=>items.find(i=>normQ(i.topic)===normQ(t));
   for(const m of TOPIC_SYNONYMS){
     for(const k of m.kw){ const re=new RegExp("\\b"+k.replace(/\s+/g,"\\s+")+"\\b","i");
@@ -1291,12 +1309,8 @@ function _toks(s){ return normQ(s).split(" ").filter(w=>w&&!_STOP.has(w)); }
 function _jaccard(a,b){ const A=new Set(a),B=new Set(b); if(!A.size||!B.size) return 0; let i=0; for(const x of A) if(B.has(x)) i++; return i/(A.size+B.size-i); }
 const APPROVED_THRESHOLD=0.82; // auto-send only at/above this similarity to an approved Q
 async function approvedBankMatch(question){
-  const bank=await getApprovedBank(); const qn=normQ(question); const qt=_toks(question);
-  let best=null;
-  for(const e of bank){ if(!e||!String(e.a||"").trim()) continue;
-    const conf = (normQ(e.q)===qn) ? 1.0 : _jaccard(qt,_toks(e.q));
-    if(!best||conf>best.confidence) best={answer:String(e.a).trim(), matchedQuestion:e.q, confidence:conf}; }
-  return best;
+  // Retained diagnostic name for compatibility; legacy answer bank is not authority.
+  const st=await getState(); return kbAutoMatch(st.kb,question);
 }
 async function upsertApprovedBank(question, answer){
   const bank=await getApprovedBank(); const qn=normQ(question);
@@ -1458,7 +1472,7 @@ async function processGuestQuestion(req, p){
   // NO escalation (logged above for the record). Deterministic so the clear cases never vary. Also stops us
   // from forwarding a bare "thanks" to Victor when an escalation is open.
   if(isObviousPleasantry(question)){ return {no_response_needed:true, pleasantry:true, question}; }
-  const draft=await aiDraftAnswer(kb, question, guestName, await getApprovedBank(), history);
+  const draft=await aiDraftAnswer(kb, question, guestName, null, history, {unit:canonicalUnit(unit),booking:bookingId,thread:threadId});
   // Skip messages the AI classifies as pure acknowledgment (no question / no actionable content).
   if(draft && draft.needs_response===false){ return {no_response_needed:true, question}; }
   // If this thread already has an OPEN escalation (a manager is already handling it), do NOT
@@ -1500,12 +1514,17 @@ async function processGuestQuestion(req, p){
       return {forwarded_to_manager:true, no_guest_reply:true, id:_open.id, victorSms:vsms, question};
     }
   }
+  // A fact edit during the model request invalidates that draft before it can
+  // enter any automatic full/partial send path. Preserve the question for the
+  // existing human fact workflow instead of sending stale source material.
+  const currentFacts=await getState();
+  if(guestFacts.normalize(currentFacts.kb).revision!==guestFacts.normalize(kb).revision){draft.known="none";draft.answer=holdingMessage(guestName,!!draft.complaint,hasHistory);draft.factsChanged=true;}
   const knownFull=(draft.known==="full");
   const isComplaint=!!(draft&&draft.complaint);
   let proposed=isComplaint?holdingMessage(guestName,true,hasHistory):(draft.answer||holdingMessage(guestName,false,hasHistory));
   const list=await getApprovals();
   const _lbl=await nextSmsLabel();
-  const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, escalate:(!knownFull||isComplaint), complaint:isComplaint,
+  const item={ id:Date.now().toString(36)+Math.random().toString(36).slice(2,6), question, proposed, factRevision:guestFacts.normalize(kb).revision, escalate:(!knownFull||isComplaint), complaint:isComplaint,
     unit, guest_name:guestName, booking_id:bookingId, thread_id:threadId, source:p.source||"manual", ts:new Date().toISOString(),
     smsLabel:_lbl, smsCode:mkSmsCode(), firstProposed:proposed, primaryNotifiedAt:new Date().toISOString() };
   if(!auto){
@@ -1650,22 +1669,17 @@ function cleanVictorFact(s){
 }
 // KB-grounded draft. Returns {known:"full"|"partial"|"none", answer}. NEVER fabricates:
 // unknown parts -> say we will confirm with the manager and follow up (no guessing).
-async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
+function canonicalUnit(value){ const u=UNITS.find(u=>String(u.orp)===String(value)||u.name.toLowerCase()===String(value).toLowerCase()); return u?String(u.orp):String(value||""); }
+async function aiDraftAnswer(kb, question, guestName, approvedBank, history, context={}){
   const _hasHist=(Array.isArray(history)?history:[]).some(function(m){ return m && m.d==="out"; }); // already messaged this guest?
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return {known:"none", answer:holdingMessage(guestName), noKey:true};
-  const kbFacts=((kb&&kb.items)||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a);
-  const bankFacts=((approvedBank)||[]).filter(e=>e&&String(e.a||"").trim()).map(e=>"- "+(e.q?("(previously asked: "+String(e.q).slice(0,70)+") "):"")+String(e.a).trim());
-  const facts=[...kbFacts, ...bankFacts].join("\n");
-  let _learn="";
-  try{ const _corr=(await getCorrections()).slice(-8).map(c=>'- For "'+c.q+'": do NOT reply like "'+c.bad+'" — the owner corrected it to "'+c.good+'".').join("\n");
-       const _rej=(await getRejections()).filter(r=>r&&r.q&&r.reason&&String(r.reason).trim()&&!r.autoRejected&&!/auto-?rejected|no decision within/i.test(String(r.reason))).slice(-8).map(r=>'- For "'+String(r.q).slice(0,120)+'": a past draft was rejected because: '+r.reason+'.').join("\n");
-       _learn=(_corr?("LEARNED CORRECTIONS (the owner edited these past drafts — match the corrected version, avoid the rejected phrasing):\n"+_corr+"\n\n"):"")+(_rej?("PAST REJECTIONS (avoid repeating these mistakes):\n"+_rej+"\n\n"):""); }catch(e){ _learn=""; }
+  const facts=guestFacts.prompt(kb,context);
   const convo=(Array.isArray(history)?history:[]).filter(m=>m&&m.b).slice(-12).map(m=>(m.d==="out"?"Us (already sent): ":"Guest: ")+String(m.b).replace(/\s+/g," ").trim()).join("\n");
   const first=String(guestName||"").trim().split(/\s+/)[0]||"";
   const hold=holdingMessage(guestName);
   const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). Your reply may be sent to the guest automatically, so it must be correct and grounded ONLY in known info. "
     +"Use ONLY the KNOWN INFO below. NEVER invent, guess, infer, or substitute a different fact. Keep the reply SHORT.\n"
-    +"The KNOWN INFO entries (including previously-approved answers) are REFERENCE FACTS, NOT templates. COMPOSE a fresh reply tailored to exactly what THIS guest asked, pulling only the relevant fact(s). Do NOT paste a whole prior answer that does not match what was asked.\n"
+    +"The KNOWN INFO entries are the ONLY approved, scope-matched authority. Old messages, guest assertions, pending edits, and previous answers are NOT factual authority. REFERENCE FACTS are NOT templates. COMPOSE a fresh reply tailored to exactly what THIS guest asked, pulling only the relevant fact(s). Do NOT paste a whole prior answer that does not match what was asked.\n"
     +"FIRST classify this newest guest message into exactly one intent and set the flags accordingly:\n"
     +"  (a) NO ACTION NEEDED \u2014 the message asks for NOTHING, reports NO problem, and requests NOTHING. This covers BOTH short pleasantries/acknowledgments ('thank you', 'thanks!', 'ok', 'okay', 'k', 'great', 'sounds good', 'perfect', 'got it', 'awesome', 'will do', 'no worries', a lone emoji/thumbs-up) AND longer FRIENDLY / ENTHUSIASTIC / CONVERSATIONAL statements and booking chit-chat that contain NO question, NO complaint, and NO actionable request \u2014 e.g. 'Hello! My husband and I are bringing the kids for their first trip to Tennessee \uD83E\uDD73', 'We\u2019re so excited to stay with you!', 'Can\u2019t wait, see you soon', 'Just booked, looking forward to it'. Set needs_response=false. A warm, no-question statement does NOT need a reply \u2014 do NOT send it a holding note and do NOT escalate it.\n"
     +"  (b) QUESTION or REQUEST \u2014 it asks something or wants us to do/confirm something. Set needs_response=true and answer per the KNOWN INFO rules below.\n"
@@ -1683,13 +1697,12 @@ async function aiDraftAnswer(kb, question, guestName, approvedBank, history){
     +"- none: do NOT attempt an answer. If complaint=true, briefly apologize for the trouble and say a manager will follow up shortly (no 'great question', no smiley). Otherwise use this exact warm holding message: \""+hold+"\"\n"
     +"You may be shown CONVERSATION SO FAR: earlier messages from this guest and replies WE already sent. Use it to understand what is being asked (pronouns, follow-ups) and do NOT repeat info we already gave. Still answer ONLY from KNOWN INFO.\n"
     +"Reply with ONLY a JSON object: {\"needs_response\":true|false, \"complaint\":true|false, \"known\":\"full\"|\"partial\"|\"none\", \"answer\":\"...\"}. 'answer' is always the full message text (ignored when needs_response is false).\n\n"
-    +_learn
     +"KNOWN INFO:\n"+(facts||"(none saved yet)");
   const userMsg=(first?("Guest first name: "+first+"\n"):"")+(convo?("CONVERSATION SO FAR (oldest first):\n"+convo+"\n\n"):"")+"Newest guest message (reply to THIS): "+String(question);
   try{ const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:350,temperature:0.2,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return {known:"none", answer:holdingMessage(guestName), error:JSON.stringify(j).slice(0,200)};
     let text=((j.content&&j.content[0]&&j.content[0].text)||"").trim();
-    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; const needs_response=(o.needs_response===false)?false:true; const complaint=(o.complaint===true); let answer=tidyQuotes(scrubContact(String(o.answer||"").trim())); if(!answer) answer=holdingMessage(guestName, complaint, _hasHist); else if(_hasHist && (known==="full"||known==="partial")) answer=stripLeadGreeting(answer); return {known, answer, needs_response, complaint}; }
+    try{ const m=text.match(/\{[\s\S]*\}/); const o=JSON.parse(m?m[0]:text); const known=(o.known==="full"||o.known==="partial")?o.known:"none"; const needs_response=(o.needs_response===false)?false:true; const complaint=(o.complaint===true); let answer=tidyQuotes(scrubContact(String(o.answer||"").trim())); if(!answer) answer=holdingMessage(guestName, complaint, _hasHist); else if(_hasHist && (known==="full"||known==="partial")) answer=stripLeadGreeting(answer); return {known, answer, needs_response, complaint,availableFactIds:guestFacts.select(kb,context).filter(i=>i.kind==="fact").map(i=>i.id)}; }
     catch{ return {known:"none", answer:holdingMessage(guestName)}; }
   }catch(e){ return {known:"none", answer:holdingMessage(guestName), error:String(e.message||e)}; }
 }
@@ -1752,6 +1765,7 @@ async function decideApprovalLocked(id, decision, overrideAnswer, reason){
     if(it.complaint){ return {ok:false, error:"complaint is human-only — no reply was sent to the guest", complaint:true, humanOnly:true}; }
     if(journal&&(journal.state==="sending"||journal.state==="uncertain")) return {ok:false,sent:false,retryable:false,uncertain:true,error:"The earlier send outcome is unconfirmed. Do not approve again. Check this guest conversation in OwnerRez; if needed, reply there manually, then use Reject (or Q# no) to close this request. No additional reply was sent."};
     const isOverride=!!(overrideAnswer&&overrideAnswer.trim());
+    if(!isOverride&&!it.factFromVictor&&it.factRevision!==guestFacts.normalize(st.kb).revision)return {ok:false,sent:false,error:"The facts changed after this draft (or it predates fact versioning). Review and explicitly submit the corrected reply with Edit & send, or supply a fresh fact. Nothing was sent."};
     let answer=(isOverride?overrideAnswer.trim():"")||it.proposed||"";
     if(!answer) return {ok:false, error:"no answer to send (proposed was empty — supply an answer)"};
     if(/^\s*(q\s*\d+|y|yes|n|no|ok|okay|send|approve|approved|reject|skip)\s*$/i.test(answer)) return {ok:false, error:"refused: that looks like a command, not a guest reply — nothing was sent"};
@@ -1834,17 +1848,19 @@ function directReplyFromFact(guestName, fact, hasHistory){
   var fx=tidyQuotes(scrubContact(String(fact||"").trim())); if(!fx) return "";
   var body=fx.charAt(0).toUpperCase()+fx.slice(1); if(!/[.!?]$/.test(body)) body+=".";
   var hi = hasHistory ? "" : (f?("Hi "+f+"! "):"Hi there! ");
-  return (hi+body+" Let me know if there’s anything else I can help with!").trim();
+  return (hi+body).trim();
 }
 // item: FOCUSED composer — always answers the ORIGINAL question USING the manager's supplied fact. Unlike the
 // general aiDraftAnswer classifier (which can decide known=none and punt to the holding), this never punts.
-async function composeReplyFromFact(question, fact, guestName, history){
+async function composeReplyFromFact(question, fact, guestName, history,context={}){
   const key=process.env.ANTHROPIC_API_KEY; if(!key) return "";
   const first=String(guestName||"").trim().split(/\s+/)[0]||"";
   const hasHist=(Array.isArray(history)?history:[]).some(function(m){ return m && m.d==="out"; });
+  const current=await getState();
+  const instructions=guestFacts.select(current.kb,context).filter(i=>i.kind==="instruction").map(i=>i.a).join("\n");
   const sys="You write ONE short guest-facing reply for Parkside Tepees (glamping tepees). A manager has ALREADY supplied the answer/fact to the guest's question below. Compose a warm, natural reply that ANSWERS the question using ONLY that fact. Do NOT invent extra details. Do NOT include a phone number, email, or link, and never say 'call/text/email us'. "
     + (hasHist ? "This is an ONGOING conversation, so do NOT open with a greeting like 'Hi there'. " : "")
-    + "Keep it to 1-2 sentences plus a brief friendly closing. Reply with ONLY the message text — no JSON, no quotes, no preamble. NEVER say you are checking with a manager or will follow up — the manager already answered, so give the answer now.";
+    + "Keep it to 1-2 sentences. Do not add an unnecessary closing or new question. Reply with ONLY the message text — no JSON, no quotes, no preamble. NEVER say you are checking with a manager or will follow up — the manager already answered, so give the answer now.\nApproved behavior instructions (never new factual authority):\n"+instructions;
   const userMsg="Guest's original question: "+String(question||"").slice(0,600)+"\nManager's supplied fact/answer (use this to answer): "+String(fact||"").slice(0,900)+(first?("\nGuest first name: "+first):"");
   try{ let _sig=undefined; try{ if(typeof AbortSignal!=="undefined"&&AbortSignal.timeout) _sig=AbortSignal.timeout(9000); }catch(e){} const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",signal:_sig,headers:{"x-api-key":key,"anthropic-version":"2023-06-01","content-type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:250,temperature:0.3,system:sys,messages:[{role:"user",content:userMsg}]})});
     const j=await r.json(); if(!r.ok) return "";
@@ -1868,7 +1884,7 @@ async function reviseFromSms(req, item, extraInfo){
   let proposed="", known="full";
   let _history=[]; try{ _history=await getThreadLog(item.thread_id, item.booking_id); }catch(e){}
   const _q=item.firstQuestion||item.question||"";
-  try{ proposed=await composeReplyFromFact(_q, extraInfo, item.guest_name, _history); }catch(e){}
+  try{ proposed=await composeReplyFromFact(_q, extraInfo, item.guest_name, _history,{unit:canonicalUnit(item.unit),booking:item.booking_id,thread:item.thread_id}); }catch(e){}
   // ROBUSTNESS: if the model returned nothing OR something holding-like, build a deterministic reply straight from
   // the fact. reviseFromSms must NEVER return the holding note as the "answer".
   if(!proposed || isHoldingLike(proposed)){ const _hasHist=(_history||[]).some(function(m){ return m && m.d==="out"; }); proposed=directReplyFromFact(item.guest_name, extraInfo, _hasHist); }
@@ -3340,14 +3356,14 @@ if(action==="email_recipients"){
       if(req.method==="GET"){ const s=await getState(); const icalCount={}; for(const u of UNITS) icalCount[u.orp]=OWNERREZ_ICAL[u.orp]?1:0;
         const gapEnabled=redis?(Number(await redis.get("parkside:gap_enabled"))===1):false;
         const lastRun=redis?(await redis.get("parkside:last_run")):null;
-        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,pricing_model:s.pricing_model||'legacy',learning_enabled:s.learning_enabled!==false,overrides:s.overrides||{},icalCount,occupancySource:'ownerrez',kb:s.kb||KB_SEED,messaging_enabled:!!s.messaging_enabled,gap_enabled:gapEnabled,last_run:lastRun}); }
+        return res.status(200).json({targets:s.targets,knobs:KNOBS,auto_sync:s.auto_sync,pricing_model:s.pricing_model||'legacy',learning_enabled:s.learning_enabled!==false,overrides:s.overrides||{},icalCount,occupancySource:'ownerrez',kb:((req.headers["x-app-password"]||"")===(process.env.APP_PASSWORD||"__y")?guestFacts.normalize(s.kb||KB_SEED):{items:[],format:""}),messaging_enabled:!!s.messaging_enabled,gap_enabled:gapEnabled,last_run:lastRun}); }
       if(req.method==="POST"){ if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
         let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{return res.status(400).json({error:"bad json"});}}
         const cur=await getState(); const p={};
-        if(b&&b.targets)p.targets=b.targets; if(b&&typeof b.auto_sync==="boolean")p.auto_sync=b.auto_sync; if(b&&b.kb)p.kb=b.kb; if(b&&typeof b.messaging_enabled==="boolean")p.messaging_enabled=b.messaging_enabled; if(b&&(b.pricing_model==="glide"||b.pricing_model==="legacy"))p.pricing_model=b.pricing_model; if(b&&typeof b.learning_enabled==="boolean")p.learning_enabled=b.learning_enabled;
+        if(b&&b.targets)p.targets=b.targets; if(b&&typeof b.auto_sync==="boolean")p.auto_sync=b.auto_sync; if(b&&b.kb)p.kb=guestFacts.mergeSave(cur.kb||KB_SEED,b.kb); if(b&&typeof b.messaging_enabled==="boolean")p.messaging_enabled=b.messaging_enabled; if(b&&(b.pricing_model==="glide"||b.pricing_model==="legacy"))p.pricing_model=b.pricing_model; if(b&&typeof b.learning_enabled==="boolean")p.learning_enabled=b.learning_enabled;
         if(b&&b.overrideSet){ const o={...(cur.overrides||{})}; o[b.overrideSet.property_id+"|"+b.overrideSet.date]=Math.round(Math.max(OV_MIN,Math.min(OV_MAX,Number(b.overrideSet.amount)))); p.overrides=o; }
         if(b&&b.overrideClear){ const o={...(cur.overrides||{})}; delete o[b.overrideClear.property_id+"|"+b.overrideClear.date]; p.overrides=o; }
-        const n=await setState(p); if(redis) await redis.del("parkside:booked2"); return res.status(200).json({ok:true,auto_sync:n.auto_sync,messaging_enabled:!!n.messaging_enabled}); }
+        const n=await setState(p); if(redis) await redis.del("parkside:booked2"); return res.status(200).json({ok:true,auto_sync:n.auto_sync,messaging_enabled:!!n.messaging_enabled,...(p.kb?{kb:n.kb}:{})}); }
       return res.status(405).json({error:"GET or POST"});
     }
     if(action==="occupancy"){
@@ -3605,7 +3621,7 @@ if(action==="email_recipients"){
       const question=(b&&b.question)||""; const bookingId=(b&&b.booking_id)||null;
       const key=process.env.ANTHROPIC_API_KEY; if(!key) return res.status(200).json({needKey:true,error:"ANTHROPIC_API_KEY not set on the server yet"});
       const st=await getState(); const kb=st.kb||KB_SEED;
-      const facts=(kb.items||[]).filter(i=>i&&i.a&&String(i.a).trim()).map(i=>"- "+i.topic+": "+i.a).join("\n");
+      const facts=guestFacts.prompt(kb,{unit:canonicalUnit(b.unit||b.property_id),booking:bookingId,thread:b.thread_id});
       const sys="You are the guest-messaging assistant for Parkside Tepees (glamping tepees at Parkside Resort, Pigeon Forge TN). "
         +"You have NO knowledge except the KNOWN INFO list below. "
         +"Decide if KNOWN INFO DIRECTLY and FULLY answers the guest's question. "
@@ -3628,7 +3644,7 @@ if(action==="email_recipients"){
         // when a caller supplies booking IDs or Messaging is ON, only simulate.
         const route=routeFor(await getNotifyConfig(),null,false);
         const known=inKb&&!!answer;
-        return res.status(200).json({dryRun:true,sent:false,inKb:known,escalate:!known,draft:known?answer:APOLOGY,route});
+        return res.status(200).json({dryRun:true,sent:false,inKb:known,escalate:!known,draft:known?answer:APOLOGY,route,availableFactIds:guestFacts.select(kb,{unit:canonicalUnit(b.unit||b.property_id),booking:bookingId,thread:b.thread_id}).filter(i=>i.kind==="fact").map(i=>i.id)});
       }
       catch(e){ return res.status(200).json({error:"request failed: "+String(e.message||e)}); }
     }
@@ -3695,14 +3711,21 @@ if(action==="email_recipients"){
       let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}}
       const st=await getState(); const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
       const norm=x=>String(x||"").toLowerCase().replace(/[^a-z0-9]+/g," ").trim();
-      function upsert(topic,answer,src){ topic=String(topic||"").trim(); answer=String(answer||"").trim(); if(!answer) return null;
-        const nt=norm(topic); let it=nt?kb.items.find(x=>norm(x.topic)===nt):null;
-        if(it){ const changed=(it.a||"")!==answer; it.a=answer; if(src)it.src=src; return changed?"updated":"unchanged"; }
-        kb.items.push({topic:topic||answer.slice(0,40),a:answer,src:src||"learned"}); return "added"; }
+      function upsert(topic,answer,src,entry){ topic=String(topic||"").trim(); answer=String(answer||"").trim(); if(!answer) return null;
+        const nt=norm(topic); const index=kb.items.findIndex(x=>entry.id?x.id===entry.id:(norm(x.topic)===nt&&guestFacts.scopeKey(x.scope)===guestFacts.scopeKey(entry.scope)));
+        const prior=index>=0?kb.items[index]:null;
+        // Imports must explicitly supply canonical approval metadata. A changed
+        // legacy/learned answer cannot silently inherit an old fact's approval.
+        const metadata={...entry,topic:topic||answer.slice(0,40),a:answer,src:src||"learned"};
+        if(prior&&prior.a!==answer&&entry.status==null){metadata.status="needs_review";metadata.reusable=false;}
+        const saved=guestFacts.mergeSave({items:prior?[prior]:[]},{items:[metadata]}).items[0];
+        if(prior){kb.items[index]=saved;return prior.a!==answer?"updated":"unchanged";}
+        kb.items.push(saved);return "added";
+      }
       // Accept: {entries:[{topic|question, a|answer, src}]} OR a single {topic|question, a|answer} OR {question,answer} (Victor flow)
       const list = Array.isArray(b&&b.entries)?b.entries : ((b&&(b.topic||b.question))?[b]:[]);
       let added=0,updated=0,unchanged=0;
-      for(const e of list){ const r=upsert(e.topic||e.question, (e.a!=null?e.a:e.answer), e.src); if(r==="added")added++; else if(r==="updated")updated++; else if(r==="unchanged")unchanged++; }
+      for(const e of list){ const r=upsert(e.topic||e.question, (e.a!=null?e.a:e.answer), e.src,e); if(r==="added")added++; else if(r==="updated")updated++; else if(r==="unchanged")unchanged++; }
       if(b&&typeof b.format==="string"&&b.format.trim()) kb.format=b.format;
       await setState({kb});
       return res.status(200).json({ok:true,added,updated,unchanged,total:kb.items.length});
@@ -4124,13 +4147,8 @@ if(action==="email_recipients"){
       if(idx<0) return res.status(200).json({ok:false, error:"no matching approved entry", approvedBankCount:bank.length});
       const removed=bank.splice(idx,1)[0];
       await setApprovedBank(bank);
-      // Also remove the mirrored editable-KB item (topic = question.slice(0,60)).
-      let kbRemoved=0;
-      try{ const st=await getState(); const kb=st.kb||{items:[]}; kb.items=kb.items||[];
-        const target=normQ(String(removed.q||"").slice(0,60));
-        const before=kb.items.length;
-        kb.items=kb.items.filter(x=>normQ(String(x.topic||""))!==target);
-        kbRemoved=before-kb.items.length; if(kbRemoved) await setState({kb}); }catch(e){}
+      // Historical answer deletion cannot revoke an independent canonical fact.
+      const kbRemoved=0;
       return res.status(200).json({ok:true, deleted:{id:removed.id||null, ts:removed.ts||null, qPreview:String(removed.q||"").slice(0,80)}, kbMirrorRemoved:kbRemoved, approvedBankCount:bank.length});
     }
 
@@ -4237,7 +4255,7 @@ if(action==="email_recipients"){
         if(it.status!=="pending"){ res.statusCode=200; return res.end(htmlPage("Already "+it.status+" ✓", "This request was already "+it.status+", most likely by the other recipient. The guest was not messaged twice — nothing was changed.")); }
         if(!answer){ res.statusCode=200; return res.end(editPageHtml(it, tok, it.unit, it.guest_name, "Please enter a reply before sending.")); }
         const out=await decideApproval(id, "yes", answer); // sends owner's edited text + learns it into the approved bank/KB
-        if(out.ok && out.decision==="approved"){ res.statusCode=200; return res.end(htmlPage("Sent \u2713", "Your reply was sent to the guest and saved so similar questions suggest it next time.")); }
+        if(out.ok && out.decision==="approved"){ res.statusCode=200; return res.end(htmlPage("Sent \u2713", "Your reply was sent to the guest. Any new reusable fact still needs separate review and approval.")); }
         res.statusCode=200; return res.end(htmlPage("Couldn\u2019t send", (out.error||"Unknown error")+".")); }
       // GET -> render editor
       if(!it){ res.statusCode=200; return res.end(htmlPage("Not found","This request was not found (it may already be handled).")); }
@@ -4668,6 +4686,24 @@ if(action==="email_recipients"){
       if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch(e){b={};}} b=b||{}; const raw=await getNotifyRaw(); raw.autoMessage=!!b.enabled; await setNotifyRaw(raw); return res.status(200).json({ok:true, enabled:!!b.enabled}); }
       return res.status(200).json({enabled: await autoMessageOn()});
     }
+    if(action==="facts_preview"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
+      const b=hookBody(req.body),st=await getState();
+      const context={unit:canonicalUnit(b.unit||b.property_id),booking:b.booking_id,thread:b.thread_id};
+      const history=await getThreadLog(b.thread_id,b.booking_id);
+      const draft=await aiDraftAnswer(st.kb,String(b.question||""),String(b.guest_name||""),null,history,context);
+      return res.status(200).json({...draft,dryRun:true,sent:false,availableFactIds:guestFacts.select(st.kb,context).filter(i=>i.kind==="fact").map(i=>i.id)});
+    }
+    if(action==="facts_status"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
+      const st=await getState(),cfg=await getNotifyConfig(),items=guestFacts.normalize(st.kb).items;
+      return res.status(200).json({readOnly:true,messaging_enabled:!!st.messaging_enabled,auto_message:await autoMessageOn(),smsProvider:cfg.smsProvider,routes:cfg.routes,escalateMins:cfg.escalateMins,revision:st.kb.revision||"legacy",factCount:items.length,approved:items.filter(i=>i.status==="approved"&&i.reusable).length,availableFactIds:guestFacts.select(st.kb).filter(i=>i.kind==="fact").map(i=>i.id),pendingFacts:(await getPendingFacts()).length,approvalCount:(await getApprovals()).length});
+    }
+    // Read-only extraction: owner-authored notes only, never the rejected draft.
+    if(action==="fact_corrections"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
+      return res.status(200).json({candidates:guestFacts.recover(await getRejections()),authoritative:false});
+    }
     // ===== Pending "learned facts" review (app-gated) =====
     if(action==="pending_facts"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
@@ -4686,8 +4722,12 @@ if(action==="email_recipients"){
         const topic=(typeof b.topic==="string"&&b.topic.trim())?b.topic.trim().slice(0,80):String(rec.topic||rec.q||"").slice(0,80);
         const a=(typeof b.a==="string"&&b.a.trim())?b.a.trim().slice(0,1500):String(rec.a||"").slice(0,1500);
         const st=await getState(); const kb=st.kb||JSON.parse(JSON.stringify(KB_SEED)); kb.items=kb.items||[];
-        const nt=normQ(topic); const ex=nt?kb.items.find(x=>normQ(x.topic)===nt):null;
-        if(ex) ex.a=a; else kb.items.push({topic, a, src:"approved-fact"});
+        const nt=normQ(topic); const ex=nt?kb.items.find(x=>normQ(x.topic)===nt&&guestFacts.scopeKey(x.scope)===guestFacts.scopeKey(b.scope)):null;
+        if(!b.scope||!['property','unit','booking','thread'].includes(b.scope.type)||
+          (b.scope.type!=='property'&&!String(b.scope.value||'').trim())) return res.status(400).json({ok:false,error:"Choose where this fact applies before approving it for reuse."});
+        const canonical=guestFacts.normalizeItem({...ex,topic,a,src:"approved-fact",status:"approved",reusable:true,scope:b.scope,
+          provenance:[...((ex&&ex.provenance)||[]),{type:"explicit-fact-approval",id:rec.id,at:new Date().toISOString(),source:rec.source||""}]});
+        if(ex)Object.assign(ex,canonical);else kb.items.push(canonical);
         await setState({kb});
         const kept=list.filter(x=>x.id!==id); await setPendingFacts(kept);
         return res.status(200).json({ok:true, approved:true, kbSize:kb.items.length});
@@ -4696,10 +4736,11 @@ if(action==="email_recipients"){
     }
     // Queryable KB so future response generation can pull approved answers.
     if(action==="kb_query"){
-
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__y")) return res.status(401).json({error:"unauthorized"});
       const st=await getState(); const kb=st.kb||KB_SEED; const q=(req.query&&req.query.q)||"";
-      const m=kbAutoMatch(kb, q);
-      return res.status(200).json({query:q, match:m, knownTopics:(kb.items||[]).filter(i=>String(i.a||"").trim()).map(i=>i.topic)});
+      const ctx={unit:canonicalUnit(req.query.unit||req.query.property_id),booking:req.query.booking_id,thread:req.query.thread_id};
+      const m=kbAutoMatch(kb, q,ctx);
+      return res.status(200).json({query:q, match:m, knownTopics:guestFacts.select(kb,ctx).map(i=>i.topic)});
     }
     // Save email-notification config from Victor's UI (password). Stored in Redis,
     // read first by the email flow (env vars remain the fallback). Blank/omitted
@@ -4885,11 +4926,11 @@ if(action==="email_recipients"){
     }
 
     res.status(400).json({error:"unknown action"});
-  }catch(e){ try{ console.error("[handler-500] action="+((req.query&&req.query.action)||"")+" err="+String((e&&e.stack)||(e&&e.message)||e)); }catch(_){} res.status(500).json({error:String(e.message||e)}); }
+  }catch(e){ if(/^Facts changed in another session/.test(String(e.message||e)))return res.status(409).json({ok:false,error:String(e.message),conflict:true});try{ console.error("[handler-500] action="+((req.query&&req.query.action)||"")+" err="+String((e&&e.stack)||(e&&e.message)||e)); }catch(_){} res.status(500).json({error:String(e.message||e)}); }
 };
 
 module.exports.__model={compute,paceMult,scarMult,gapGm,deriveLearned,interp,SENS,MODEL,UNIT_PREM,GAP_SEED,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
-module.exports.__msg={kbAutoMatch,normQ,sendSms,decideApproval};
+module.exports.__msg={kbAutoMatch,normQ,sendSms,decideApproval,aiDraftAnswer,guestFacts};
 module.exports.__calls={hookBody,phoneDigits,recordingSidOf};
 // item MW-12: expose pure helpers for unit tests (attaches to the handler export).
 module.exports.onDutyActivePct=onDutyActivePct;

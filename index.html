@@ -370,11 +370,13 @@
   <!-- item MSG-1: Facts is its OWN standalone card, separated out of the Setup group -->
   <div class="card">
     <h2>📋 Facts — the only info the assistant may use</h2>
-    <div class="legend" style="margin-bottom:8px">The assistant answers guests <b>only</b> from these facts and never makes anything up; if a question isn&rsquo;t covered here it escalates to you. Edit any answer and Save.</div>
-    <div id="kbList"></div>
+    <div class="legend" style="margin-bottom:8px">Only facts marked <b>Approved for reuse</b> apply, within their saved scope. Legacy entries need review. Sending a reply once does not approve it as a general fact. Edit and Save; missing facts still go to a person.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"><label>Show <select id="kbFilter" onchange="drawKb()"><option value="approved">Approved</option><option value="needs_review">Needs review</option><option value="retired">Retired</option><option value="all">All facts</option></select></label><label>Search <input id="kbSearch" type="search" oninput="drawKb()" placeholder="Topic or fact text"></label></div><div id="kbList"></div><div id="factCorrections"></div>
     <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
       <button class="ghost" onclick="addKbItem()">+ Add topic</button>
+      <button class="ghost" onclick="loadFactCorrections()">Review saved corrections</button>
       <button onclick="saveKB()">Save knowledge base</button>
+      <button class="ghost" onclick="reloadFactsKeepingDraft()">Reload saved facts</button><button class="ghost" onclick="restoreFactDraft()">Compare unsaved edits</button>
       <span id="kbStatus" class="muted" style="align-self:center"></span>
     </div>
   </div>
@@ -1254,7 +1256,7 @@ const api=a=>'/api/app?action='+a;
 
 function unlock(){
   const v=document.getElementById('pw').value;
-  fetch(api('state')).then(r=>r.json()).then(s=>{ PW=v; STATE=s;
+  fetch(api('state'),{headers:{'x-app-password':v}}).then(r=>r.json()).then(s=>{ PW=v; STATE=s;
     return fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:'{}'});
   }).then(r=>{
     if(r.status===401){ document.getElementById('gateErr').textContent="Wrong password"; return; }
@@ -1410,6 +1412,7 @@ async function loadPendingFacts(){
         +"<div class='muted' style='font-size:11px;margin-bottom:4px'>Your response (edit before saving):</div>"
         +"<textarea id='pfa_"+f.id+"' style='width:100%;min-height:60px;box-sizing:border-box;background:#0e151d;border:1px solid #26354a;border-radius:6px;padding:7px 9px;color:#e6edf6' placeholder='Answer'>"+esc(f.a||"")+"</textarea>"
         +"<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>"
+        +"<label>Applies to <select id='pfScope_"+f.id+"'><option value=''>Choose scope…</option><option value='property'>Entire property</option><option value='unit'>One unit</option><option value='booking'>One booking</option><option value='thread'>One conversation</option></select></label><input aria-label='Scoped ID' id='pfScopeValue_"+f.id+"' placeholder='Unit / booking / conversation ID'>"
         +"<button onclick=\"approvePendingFact('"+f.id+"')\">Approve &amp; save</button>"
         +"<button class='seg-x' style='width:auto;padding:2px 12px' onclick=\"rejectPendingFact('"+f.id+"')\">Reject</button>"
         +"<span class='muted' id='pfs_"+f.id+"'></span>"
@@ -1423,7 +1426,7 @@ async function pfDecide(id, action){
   var fact=(PF||[]).filter(function(x){return String(x.id)===String(id);})[0]||{};
   const topic=(fact.topic||fact.q||""), a=aEl?aEl.value:"";
   const s=document.getElementById('pfs_'+id); if(s) s.textContent="…";
-  try{ const r=await fetch(api('pending_fact'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({id:id,action:action,topic:topic,a:a})}); const j=await r.json();
+  try{ const r=await fetch(api('pending_fact'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({id:id,action:action,topic:topic,a:a,scope:{type:(document.getElementById('pfScope_'+id)||{}).value,value:(document.getElementById('pfScopeValue_'+id)||{}).value}})}); const j=await r.json();
     if(j.ok){ if(action==='edit'){ if(s) s.textContent="saved"; } else { loadPendingFacts(); } }
     else if(s){ s.textContent=(j.error||"error"); }
   }catch(e){ if(s) s.textContent="error"; }
@@ -1471,7 +1474,7 @@ async function saveTargets(){
   else document.getElementById('tStatus').textContent="Save failed";
 }
 async function loadGoLiveStatus(){
-  try{ const j=await (await fetch(api('state'))).json();
+  try{ const j=await (await fetch(api('state'),{headers:{'x-app-password':PW}})).json();
     const pm=j.pricing_model||'legacy'; const as=!!j.auto_sync; const le=(j.learning_enabled!==false);
     // keep STATE in sync so the status card reflects live server state
     STATE.pricing_model=pm; STATE.auto_sync=as; STATE.gap_enabled=!!j.gap_enabled; STATE.last_run=j.last_run; updateStatusCard();
@@ -1519,7 +1522,7 @@ async function syncNow(){
   const r=await fetch(api('run'),{headers:{'x-app-password':PW}}); const j=await r.json();
   document.getElementById('syncNow').textContent="Sync now";
   alert(j.mode==='LIVE_SYNC'?`Pushed ${j.sent} rates to OwnerRez (HTTP ${j.status}). ${j.overrides} pinned${j.gapNights?(', '+j.gapNights+' gap nights'):''}.`:(j.note||JSON.stringify(j)));
-  if(STATE){ try{ const s=await (await fetch(api('state'))).json(); STATE.last_run=s.last_run; updateStatusCard(); }catch(e){} }
+  if(STATE){ try{ const s=await (await fetch(api('state'),{headers:{'x-app-password':PW}})).json(); STATE.last_run=s.last_run; updateStatusCard(); }catch(e){} }
 }
 function isBooked(unit,ds){ return !!(OCC&&OCC.byUnit&&OCC.byUnit[unit]&&OCC.byUnit[unit].booked&&OCC.byUnit[unit].booked.includes(ds)); }
 let BD={unit:null,date:null};
@@ -3395,13 +3398,40 @@ function renderTimeline(j){ var el=document.getElementById('gvTimeline'); if(!el
 function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function renderMessaging(){ KB=JSON.parse(JSON.stringify(STATE.kb||{format:"",items:[]})); document.getElementById('kbFormat').value=KB.format||""; drawKb(); setMsgUI();
   const cu=document.getElementById('ctUnit'); if(cu&&!cu.options.length) cu.innerHTML=UNITS.map(function(u){return '<option value="'+u[1]+'">'+u[1]+'</option>';}).join(""); }
-function drawKb(){ const el=document.getElementById('kbList'); el.innerHTML=(KB.items||[]).map((it,i)=>`<div class='kbitem'><input class='topic' value="${esc(it.topic).replace(/\"/g,'&quot;')}" oninput="KB.items[${i}].topic=this.value"><textarea oninput="KB.items[${i}].a=this.value" placeholder="(answer — leave blank if unknown)">${esc(it.a)}</textarea><button class='seg-x' title='remove' onclick="removeKbItem(${i})">&#10005;</button></div>`).join(""); }
-function addKbItem(){ KB.items=KB.items||[]; KB.items.push({topic:"",a:""}); drawKb(); }
+function kbAttr(v){return esc(v).replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function drawKb(){ const el=document.getElementById('kbList'); el.innerHTML=(KB.items||[]).map((it,i)=>{
+  it.scope=it.scope||{type:'property'}; const value=it.scope.value||'';const filter=(document.getElementById('kbFilter')||{}).value||'all',search=String((document.getElementById('kbSearch')||{}).value||'').toLowerCase();if(filter!=='all'&&(it.status||'needs_review')!==filter)return '';if(search&&!String(it.topic+' '+it.a).toLowerCase().includes(search))return '';
+  const options=(values,current)=>values.map(([v,label])=>`<option value="${v}" ${v===current?'selected':''}>${label}</option>`).join('');
+  return `<div style="border:1px solid var(--line);padding:10px;margin:8px 0;border-radius:8px"><div class='kbitem'><input aria-label="Fact topic ${i+1}" class='topic' value="${kbAttr(it.topic)}" oninput="KB.items[${i}].topic=this.value"><textarea aria-label="Fact answer ${i+1}" oninput="KB.items[${i}].a=this.value" placeholder="(answer — leave blank if unknown)">${esc(it.a)}</textarea><button class='seg-x' aria-label="Remove fact ${i+1}" onclick="removeKbItem(${i})">&#10005;</button></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+  <label>Type <select onchange="KB.items[${i}].kind=this.value">${options([['fact','Fact'],['instruction','Owner instruction']],it.kind||'fact')}</select></label>
+  <label>Status <select onchange="KB.items[${i}].status=this.value;KB.items[${i}].reusable=this.value==='approved'">${options([['needs_review','Needs review'],['approved','Approved for reuse'],['retired','Retired']],it.status||'needs_review')}</select></label>
+  <label>Applies to <select onchange="KB.items[${i}].scope.type=this.value;KB.items[${i}].scope.value='';drawKb()">${options([['property','Entire property'],['unit','One unit'],['booking','One booking'],['thread','One conversation'],['internal','Internal only']],it.scope.type)}</select></label>
+  ${it.scope.type==='unit'?`<label>Unit <select onchange="KB.items[${i}].scope.value=this.value"><option value="">Choose unit…</option>${UNITS.map(u=>`<option value="${u[0]}" ${String(u[0])===String(value)?'selected':''}>${esc(u[1])}</option>`).join('')}</select></label>`:(it.scope.type==='booking'||it.scope.type==='thread'?`<label>${it.scope.type==='booking'?'Booking':'Conversation'} ID <input style="max-width:170px" value="${kbAttr(value)}" oninput="KB.items[${i}].scope.value=this.value"></label>`:'')}
+  <label>Valid from <input type="date" value="${kbAttr(it.scope.validFrom||'')}" onchange="KB.items[${i}].scope.validFrom=this.value"></label>
+  <label>Valid through <input type="date" value="${kbAttr(it.scope.validUntil||'')}" onchange="KB.items[${i}].scope.validUntil=this.value"></label>
+  </div>${it.supersededBy?`<p class="muted">Superseded by ${esc(it.supersededBy)} — excluded even if marked approved. <button onclick="delete KB.items[${i}].supersededBy;KB.items[${i}].status='needs_review';KB.items[${i}].reusable=false;drawKb()">Reopen for review</button></p>`:''}<div class="muted" style="font-size:11px;margin-top:6px">${esc(it.id||'New fact')} · ${esc((it.provenance||[]).map(p=>p.type+(p.id?' '+p.id:'')).join('; ')||it.src||'Manual entry')}</div></div>`;
+}).join(''); }
+function addKbItem(){ document.getElementById('kbFilter').value='all';document.getElementById('kbSearch').value='';KB.items=KB.items||[]; KB.items.push({topic:"",a:"",status:'needs_review',reusable:false,scope:{type:'property'},provenance:[{type:'manual-entry'}]}); drawKb(); }
 function removeKbItem(i){ KB.items.splice(i,1); drawKb(); }
-async function saveKB(){ KB.format=document.getElementById('kbFormat').value; document.getElementById('kbStatus').textContent="Saving…";
-  const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({kb:KB})});
-  if(r.ok){ STATE.kb=JSON.parse(JSON.stringify(KB)); document.getElementById('kbStatus').textContent="Saved \u2713 ("+(KB.items||[]).filter(i=>i.a&&i.a.trim()).length+" answers filled)"; }
-  else document.getElementById('kbStatus').textContent="Save failed"; }
+let KB_BUSY=false;
+async function saveKB(){ if(KB_BUSY)return;KB_BUSY=true;const controls=[...document.getElementById('kbList').closest('.card').querySelectorAll('input,textarea,select,button'),document.getElementById('kbFormat')];const disabled=controls.map(x=>x.disabled);controls.forEach(x=>x.disabled=true);KB.format=document.getElementById('kbFormat').value; const status=document.getElementById('kbStatus');status.textContent="Saving…";
+  try{const r=await fetch(api('state'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({kb:KB})}); const j=await r.json();
+    if(!r.ok||!j.ok)throw Error(j.error||'Save failed');
+    KB=j.kb||KB;STATE.kb=JSON.parse(JSON.stringify(KB));drawKb();status.textContent="Saved ✓ — "+KB.items.filter(i=>i.status==='approved'&&i.reusable&&i.a.trim()).length+" approved facts";
+  }catch(e){status.textContent=e.message+' — your edits are retained. If another session changed facts, use Reload saved facts, then Compare unsaved edits.';}finally{KB_BUSY=false;controls.forEach((x,i)=>x.disabled=disabled[i]);}
+}
+async function reloadFactsKeepingDraft(){if(KB_BUSY)return;try{localStorage.setItem('parkside-facts-unsaved',JSON.stringify(KB));const r=await fetch(api('state'),{headers:{'x-app-password':PW}});const j=await r.json();if(!r.ok)throw Error('Reload failed');KB=j.kb;STATE.kb=j.kb;drawKb();document.getElementById('kbStatus').textContent='Current facts loaded. Your unsaved draft is retained locally; restore it to compare before saving.';}catch(e){document.getElementById('kbStatus').textContent=e.message;}}
+let FACT_DRAFT_DIFF=[];
+function restoreFactDraft(){try{const saved=JSON.parse(localStorage.getItem('parkside-facts-unsaved')||'null');if(!saved)return;FACT_DRAFT_DIFF=(saved.items||[]).filter(old=>JSON.stringify(old)!==JSON.stringify(KB.items.find(x=>x.id===old.id)));const el=document.getElementById('factCorrections');el.innerHTML='<h3>Compare retained draft with current facts</h3><p>Nothing is applied automatically. Select the draft entries you explicitly want to restore, then review status and scope before Save. Current entries not selected remain unchanged.</p>'+FACT_DRAFT_DIFF.map((f,i)=>{const current=KB.items.find(x=>x.id===f.id);return '<div style="border:1px solid var(--line);margin:8px 0;padding:8px"><label><input type="checkbox" id="factDraft_'+i+'"> Use draft: '+esc(f.topic)+'</label><p><b>Draft:</b> '+esc(f.a)+' · '+esc(f.status)+' · '+esc(JSON.stringify(f.scope))+'</p><p><b>Current:</b> '+esc(current?current.a+' · '+current.status+' · '+JSON.stringify(current.scope):'Deleted / absent — selecting restores this entry')+'</p></div>';}).join('')+'<button onclick="applyFactDraftSelections()">Apply selected draft entries for review</button>';}catch(e){document.getElementById('kbStatus').textContent=e.message;}}
+function applyFactDraftSelections(){FACT_DRAFT_DIFF.forEach((f,i)=>{if(!(document.getElementById('factDraft_'+i)||{}).checked)return;const index=KB.items.findIndex(x=>x.id===f.id);if(index<0)KB.items.push(JSON.parse(JSON.stringify(f)));else KB.items[index]=JSON.parse(JSON.stringify(f));});document.getElementById('kbFilter').value='all';drawKb();document.getElementById('kbStatus').textContent='Selected draft edits restored to the current version for review. Save when ready.';}
+let FACT_CORRECTIONS=[];
+async function loadFactCorrections(){const el=document.getElementById('factCorrections');el.textContent='Loading saved owner notes…';
+ try{const r=await fetch(api('fact_corrections'),{headers:{'x-app-password':PW}});const j=await r.json();if(!r.ok)throw Error(j.error||'Could not load');
+ FACT_CORRECTIONS=j.candidates||[];
+ el.innerHTML='<h3>Owner notes for reconciliation</h3><p class="muted">These notes are not facts yet. Add a relevant note, extract its actual factual correction, choose its scope, and mark it approved before saving. Do not approve guest-specific promises as property policy.</p>'+FACT_CORRECTIONS.map((f,i)=>'<div style="border:1px solid var(--line);padding:10px;margin-bottom:8px"><b>'+esc(f.topic)+'</b><p>'+esc(f.a)+'</p><small>'+esc(f.provenance[0].id)+' · '+esc(f.provenance[0].at)+'</small> <button onclick="addCorrectionForReview('+i+')">Add to facts for review</button></div>').join('');
+ }catch(e){el.textContent=e.message;}}
+function addCorrectionForReview(i){document.getElementById('kbFilter').value='all';document.getElementById('kbSearch').value='';const f=FACT_CORRECTIONS[i];if(!f)return;if(KB.items.some(x=>x.id===f.id))return;KB.items.push(JSON.parse(JSON.stringify(f)));drawKb();document.getElementById('kbStatus').textContent='Correction added as Needs review; edit and scope it before approving and saving.';}
 async function aiPreview(){ const q=document.getElementById('aiQ').value.trim(); if(!q) return;
   document.getElementById('aiStatus').textContent="Thinking…"; document.getElementById('aiOut').textContent="";
   try{ const r=await fetch(api('ai_draft'),{method:'POST',headers:{'Content-Type':'application/json','x-app-password':PW},body:JSON.stringify({question:q})}); const j=await r.json();

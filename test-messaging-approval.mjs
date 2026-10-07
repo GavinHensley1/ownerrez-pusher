@@ -12,7 +12,7 @@ let failListWrite=false,failReceiptWrite=false;
 class FakeRedis{
   async get(k){ return storage.has(k)?structuredClone(storage.get(k)):null; }
   async mget(...keys){return Promise.all(keys.map(k=>this.get(k)));}
-  async eval(_script,keys,args){if(storage.get(keys[0])===args[0]) return this.del(keys[0]);return 0;}
+  async eval(_script,keys,args){if(_script.includes('canonical-state-cas')){const p=JSON.parse(args[0]),cur=storage.get(keys[0])||{};if(p.kb&&String(cur.kb?.revision||'')!==args[1])return 0;storage.set(keys[0],{...cur,...p});return 1;}if(storage.get(keys[0])===args[0]) return this.del(keys[0]);return 0;}
   async set(k,v,opts={}){ if(k==='parkside:approvals'&&failListWrite){failListWrite=false;throw Error('simulated list failure');} if(k.startsWith('parkside:approval_send:')&&v.state==='sent'&&failReceiptWrite){failReceiptWrite=false;throw Error('simulated receipt failure');} if(opts.nx&&storage.has(k)) return null; storage.set(k,structuredClone(v)); return 'OK'; }
   async del(k){return storage.delete(k)?1:0;}
 }
@@ -52,7 +52,7 @@ for(const backend of ['memory','redis']){
   smsStatus=await action('sms_status');assert.equal(smsStatus.result.configured,true);assert.equal(smsStatus.result.recipientSet,true);
   assert.doesNotMatch(JSON.stringify(smsStatus.result),/offline-user|offline-password|mock\.invalid/,'status exposes no connection secrets');
   await action('state',{messaging_enabled:true});
-  const item={id:'offline-q501',smsLabel:'Q501',status:'pending',thread_id:123,question:'When does the pool close?',proposed:'The pool closes at 10pm.',ts:new Date().toISOString()};
+  const item={factRevision:'legacy',id:'offline-q501',smsLabel:'Q501',status:'pending',thread_id:123,question:'When does the pool close?',proposed:'The pool closes at 10pm.',ts:new Date().toISOString()};
   await r.setApprovals([{...item}]);
   let out=await action('sms_inbound',{from:'+15555550100',text:'Q501'},{token:'offline'});
   assert.equal(out.result.need_approval,true);assert.equal(guestCalls,0);assert.equal((await r.getApprovals())[0].status,'pending');
