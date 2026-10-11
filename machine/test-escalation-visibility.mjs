@@ -1,10 +1,7 @@
 // Still-open escalation reporting + the bounded daily "still waiting" digest.
 //
-// Why this file exists: on 2026-10-11 `notify_status` reported `escalated: 0` while five
-// guest questions were genuinely open — the oldest 7.4 days, three of them prospective
-// bookings worth real money. The in-window sweep was working as designed; the gap was that
-// nothing reported past its recency guard and nothing ever followed up after the single
-// one-shot backup. These tests pin both halves.
+// Open records remain visible without assuming every record is unanswered.
+// Only recent, mature records enter the one-per-local-day staff review digest.
 //
 // Every assertion runs in-process with no Redis and no EXTERNAL network. Most tests route
 // the digest to an email recipient with no Resend key, so resendSend returns staged/not-sent
@@ -68,7 +65,7 @@ const test = async (name, fn) => {
   console.log("  ok  " + name);
 };
 
-const hoursAgo = (h) => new Date(Date.now() - h * 3600e3).toISOString();
+const hoursAgo = (h) => new Date(IN_WINDOW.getTime() - h * 3600e3).toISOString();
 const item = (label, h, extra = {}) => ({
   id: "id-" + label,
   smsLabel: label,
@@ -132,7 +129,7 @@ await test("reports escalated items of ANY age, oldest first", async () => {
     { id: "done", smsLabel: "Q500", status: "approved", ts: hoursAgo(1) },
     { id: "pend", smsLabel: "Q501", status: "pending", ts: hoursAgo(1) },
   ];
-  const s = openEscalationSummary(list);
+  const s = openEscalationSummary(list, IN_WINDOW);
   assert.equal(s.count, 4, "only escalated items count");
   assert.equal(s.oldestAgeH, 178, "a 7-day-old item must still be reported");
   assert.equal(s.neverNotified, 1, "Q999 has not had its one-shot yet");
@@ -188,7 +185,7 @@ await test("digest stays silent when nothing is open", async () => {
   await setApprovals([{ id: "a", smsLabel: "Q1", status: "approved", ts: hoursAgo(2) }]);
   const r = await remindOpenEscalations({ headers: {} }, { now: IN_WINDOW });
   assert.equal(r.sent, false);
-  assert.equal(r.reason, "nothing still open");
+  assert.equal(r.reason, "no recent records due for review");
 });
 
 await test("digest ignores items that have not had their one-shot yet", async () => {
@@ -196,7 +193,7 @@ await test("digest ignores items that have not had their one-shot yet", async ()
   await setApprovals([item("Q999", 0.08)]);
   const r = await remindOpenEscalations({ headers: {} }, { now: IN_WINDOW });
   assert.equal(r.sent, false);
-  assert.equal(r.reason, "nothing still open", "the one-shot sweep still owns fresh items");
+  assert.equal(r.reason, "no recent records due for review", "the one-shot sweep still owns fresh items");
 });
 
 await test("digest includes items the recency guard neutralised — the whole point", async () => {
@@ -211,7 +208,7 @@ await test("digest includes items the recency guard neutralised — the whole po
 await test("digest caps itemised entries and counts the remainder", async () => {
   await stagedRoute();
   const many = [];
-  for (let i = 0; i < ESC_DIGEST_MAX_ITEMS + 5; i++) many.push(item("Q" + (600 + i), 10 + i, { backupAskSent: true }));
+  for (let i = 0; i < ESC_DIGEST_MAX_ITEMS + 5; i++) many.push(item("Q" + (600 + i), 30 + i, { backupAskSent: true }));
   await setApprovals(many);
   const r = await remindOpenEscalations({ headers: {} }, { now: IN_WINDOW });
   assert.equal(r.count, ESC_DIGEST_MAX_ITEMS + 5);
@@ -280,7 +277,7 @@ await test("the message staff receive is capped, oldest-first, and counts the re
     await smsBackupRoute(url);
     const many = [];
     for (let i = 0; i < ESC_DIGEST_MAX_ITEMS + 5; i++) {
-      many.push(item("Q" + (700 + i), 10 + i, { backupAskSent: true }));
+      many.push(item("Q" + (700 + i), 30 + i, { backupAskSent: true }));
     }
     await setApprovals(many);
 
@@ -292,11 +289,12 @@ await test("the message staff receive is capped, oldest-first, and counts the re
     const lines = text.split("\n").map((l) => l.trim());
     const itemised = lines.filter((l) => /^Q\d+\b/.test(l));
     assert.equal(itemised.length, ESC_DIGEST_MAX_ITEMS, "never itemise more than the cap");
-    assert.match(text, /Still waiting for an answer \(13\)/, "the real total is stated");
+    assert.match(text, /Open guest records to review \(13, last 7 days\)/, "the real total is stated");
     assert.match(text, /\+5 more/, "the uncapped remainder is summarised");
     assert.match(itemised[0], /^Q712\b/, "oldest first");
     assert.equal(itemised.some((l) => /^Q700\b/.test(l)), false, "the newest falls past the cap");
-    assert.match(text, /text the Q number/, "staff are told how to answer");
+    assert.match(text, /Review OwnerRez before replying/, "records are not assumed unanswered");
+    assert.match(text, /https:\/\/app.ownerrez.com\/inbox/, "staff have a working conversation entry point");
   });
 });
 
@@ -320,7 +318,7 @@ await test("an overnight run stays quiet WITHOUT burning the day", async () => {
   // reminder would be swallowed and never arrive at all.
   await withStubGateway(async (url, seen) => {
     await smsBackupRoute(url);
-    await setApprovals([item("Q386", 26, { backupAskSent: true })]);
+    await setApprovals([item("Q386", 40, { backupAskSent: true })]);
 
     const night = await remindOpenEscalations({ headers: {} }, { now: new Date("2026-10-12T06:30:00Z") });
     assert.equal(night.sent, false);

@@ -385,7 +385,7 @@
     </div>
   </div>
   <div class="group" id="grpSetup" style="margin-top:20px">
-    <h2 class="groupHead" style="cursor:pointer;user-select:none;border-bottom:1px solid var(--line);padding-bottom:8px" onclick="toggleGroup('grpSetup')">⚙ Setup &mdash; style, testing &amp; connection <span class="gcaret" style="color:var(--mut);font-weight:400;float:right">&#9656;</span></h2>
+    <h2 class="groupHead" role="button" tabindex="0" aria-expanded="false" style="cursor:pointer;user-select:none;border-bottom:1px solid var(--line);padding-bottom:8px" onclick="toggleGroup('grpSetup')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleGroup('grpSetup');}">⚙ Setup &mdash; style, testing &amp; connection <span class="gcaret" style="color:var(--mut);font-weight:400;float:right">&#9656;</span></h2>
     <div class="groupBody" style="display:none;margin-top:12px">
   <div class="card">
     <h2>Message formatting / style</h2>
@@ -423,6 +423,9 @@
         <button class="ghost" type="button" style="margin-top:8px" onclick="sendRouteTest('backup')">Send backup test</button>
       </fieldset>
       <label>Notify backup after (minutes without an answer)<br><input id="nEscMins" type="number" min="5" step="5" style="width:140px" placeholder="60"></label>
+      <label style="display:flex;gap:8px;align-items:flex-start"><input id="nEscDigest" type="checkbox" disabled onchange="digestSettingChanged()"> Daily review reminder to the saved backup contact</label>
+      <div class="muted" style="font-size:12px">One reminder per Eastern day, 8am–9:59pm, for open records active within 7 days and at least 24 hours after the backup. Older records stay visible below; open does not necessarily mean unanswered.</div>
+      <div id="nEscDigestState" class="legend" role="status">Loading saved reminder setting…</div>
       <button type="button" onclick="saveRoutingSettings()">Save routing settings</button>
       <div class="muted" style="font-size:12px">Save settings before testing. Tests go only to the saved staff recipient, never a guest. Provider acceptance and delivery are shown separately.</div>
       <div id="routeTestStatus" class="legend" role="status" aria-live="polite"></div>
@@ -434,7 +437,7 @@
         <fieldset style="min-width:0;margin:10px 0;padding:12px;border:1px solid var(--line)">
           <legend>Text delivery service</legend>
           <div id="smsActive" role="status" aria-live="polite">Loading active service…</div>
-          <label style="display:block;margin-top:10px">Service <select id="smsProviderChoice"><option value="gateway">SMS Gateway</option><option value="twilio">Twilio</option><option value="none">Disabled</option></select></label>
+          <label style="display:block;margin-top:10px">Service <select id="smsProviderChoice" onchange="smsProviderChoiceChanged()"><option value="gateway">SMS Gateway</option><option value="twilio">Twilio</option><option value="none">Disabled</option></select></label>
           <details id="twilioSetup" style="margin-top:10px"><summary>Twilio connection and employee enrollment</summary>
             <div style="display:grid;gap:10px;margin-top:10px">
               <label>Account SID <input id="twAccount" style="width:100%;box-sizing:border-box" autocomplete="off"></label>
@@ -452,7 +455,9 @@
           <div class="muted" style="margin-top:8px">Saving Twilio details does not change the active service. Twilio activation requires approval, a connected owned number and enrolled recipients. No automatic gateway fallback.</div>
           <div id="smsTransportMsg" role="status" aria-live="polite" style="margin-top:8px;overflow-wrap:anywhere"></div>
           <div id="smsUnconfirmed" role="status" style="margin-top:8px;color:#fbbf24;overflow-wrap:anywhere"></div>
-          <div id="smsOpenEsc" role="status" aria-live="polite" style="margin-top:8px;overflow-wrap:anywhere;white-space:pre-wrap"></div>
+          <div id="smsOpenEsc" style="margin-top:8px;overflow-wrap:anywhere"></div>
+          <div id="smsOpenEscMsg" role="status" aria-live="polite"></div>
+          <div id="smsDigestLast" class="muted" style="margin-top:8px;overflow-wrap:anywhere"></div>
           <div id="smsRoundTrip" style="margin-top:8px;overflow-wrap:anywhere"></div>
         </fieldset>
         <div id="smsFields" style="display:grid;gap:10px;margin-top:6px">
@@ -1324,7 +1329,7 @@ function updateStatusCard(){
 function toggleAdv(){ const b=document.getElementById('advBody'); const c=document.getElementById('advCaret'); const open=b.style.display!=='none'; b.style.display=open?'none':'block'; c.textContent=open?'▸':'▾'; }
 function toggleGroup(id){ var g=document.getElementById(id); if(!g) return;
   var b=g.querySelector('.groupBody'), c=g.querySelector('.gcaret');
-  var open=b.style.display!=='none'; b.style.display=open?'none':''; if(c) c.innerHTML=open?'&#9656;':'&#9662;'; }
+  var open=b.style.display!=='none'; b.style.display=open?'none':''; if(c) c.innerHTML=open?'&#9656;':'&#9662;'; var h=g.querySelector('.groupHead');if(h)h.setAttribute('aria-expanded',String(!open)); }
 function makeCollapsible(scope){
   document.querySelectorAll(scope+' .card > h2').forEach(function(h){
     if(h.dataset.col) return; h.dataset.col='1';
@@ -3629,33 +3634,43 @@ async function loadInquiries(){
 }
 document.addEventListener('DOMContentLoaded', function(){ try{ loadBookings(); }catch(e){} });
 
-let SMS_TRANSPORT=null, SMS_CONNECTION_SAVED=null, SMS_BUSY=false;
+let SMS_TRANSPORT=null, SMS_CONNECTION_SAVED=null, SMS_BUSY=false, SMS_PROVIDER_SYNCED=null, SMS_PROVIDER_DIRTY=false, SMS_PROVIDER_CHOICE_REVISION=0, SMS_REVIEW_BUSY=false;
+function smsProviderChoiceChanged(){SMS_PROVIDER_DIRTY=true;SMS_PROVIDER_CHOICE_REVISION++;}
+function syncSmsProviderChoice(provider){const sel=document.getElementById('smsProviderChoice');if(!SMS_PROVIDER_DIRTY){if(SMS_PROVIDER_SYNCED===null||sel.value===SMS_PROVIDER_SYNCED)sel.value=provider;else SMS_PROVIDER_DIRTY=true;}SMS_PROVIDER_SYNCED=provider;}
+function renderOpenEscalations(summary){
+  const el=document.getElementById('smsOpenEsc');if(!el)return;
+  const s=summary||{count:0,recent:[],historical:[],items:[]};
+  if(!s.count){el.textContent='No open escalation records.';return;}
+  const card=x=>{const index=(s.items||[]).findIndex(it=>it.id===x.id);return '<div style="border-top:1px solid var(--line);padding:10px 0"><b>'+esc(x.label)+'</b>'+esc([x.unit,x.guest].filter(Boolean).length?' — '+[x.unit,x.guest].filter(Boolean).join(' · '):'')+'<div class="muted">Last activity: '+esc(x.ageH==null?'unknown':x.ageH+'h ago')+'</div><div style="white-space:pre-wrap;margin:6px 0">'+esc(x.question||'Review the conversation for context.')+'</div><a target="_blank" rel="noopener" href="'+esc(x.ownerRezUrl||'https://app.ownerrez.com/inbox')+'">Review in OwnerRez</a> <button type="button" class="ghost" onclick="markOpenEscalationHandled('+index+')">Mark handled — no reply</button></div>';};
+  el.innerHTML='<b>Open records to review: '+s.count+'</b><div class="muted">Some may already be handled in OwnerRez. Closing a record here sends nothing.</div><div style="margin-top:10px"><b>Recent · last '+(s.recentDays||7)+' days ('+(s.recentCount||0)+')</b>'+(s.recent||[]).map(card).join('')+(!(s.recent||[]).length?'<div class="muted">No recent open records.</div>':'')+'</div><details style="margin-top:12px"><summary>Historical / unknown date ('+(s.historicalCount||0)+') — not reminded</summary>'+(s.historical||[]).map(card).join('')+'</details>';
+}
+async function markOpenEscalationHandled(index){
+  if(SMS_REVIEW_BUSY)return;
+  const item=SMS_TRANSPORT&&SMS_TRANSPORT.openEscalations&&(SMS_TRANSPORT.openEscalations.items||[])[index];
+  if(!item)return;
+  if(!confirm('Mark '+item.label+' handled? Confirm you reviewed its OwnerRez conversation. This closes only this record, sends no guest reply, and does not add anything to the knowledge base.'))return;
+  SMS_REVIEW_BUSY=true;const el=document.getElementById('smsOpenEscMsg');el.textContent='Saving review…';
+  try{await smsRequest('mark_escalation_handled',{id:item.id,reviewVersion:item.reviewVersion});await loadSmsTransport();el.textContent=item.label+' marked handled. Nothing sent; knowledge base unchanged.';}
+  catch(e){el.textContent=e.message;}
+  finally{SMS_REVIEW_BUSY=false;}
+}
 function smsConnectionInputs(){return {twilioAccountSid:document.getElementById('twAccount').value.trim(),twilioFrom:document.getElementById('twFrom').value.trim(),twilioMessagingServiceSid:document.getElementById('twService').value.trim()};}
 function smsInputsSaved(){return SMS_TRANSPORT && document.getElementById('smsProviderChoice').value===SMS_TRANSPORT.provider && JSON.stringify(smsConnectionInputs())===JSON.stringify(SMS_CONNECTION_SAVED) && !document.getElementById('twToken').value && document.getElementById('nSmsTo').value.trim()===SMS_TRANSPORT.generalRecipient;}
 async function smsRequest(action,body){const r=await fetch(api(action),{method:body?'POST':'GET',headers:{'Content-Type':'application/json','x-app-password':PW,'x-gavin-password':GPW||''},...(body?{body:JSON.stringify(body)}:{})});const j=await r.json();if(!r.ok||j.ok===false)throw Error(j.error||j.reason||'Request failed');return j;}
 async function loadSmsTransport(refresh=false){
-  try{const j=await smsRequest('sms_status');const first=!SMS_TRANSPORT;const prevProvider=SMS_TRANSPORT?SMS_TRANSPORT.provider:null;SMS_TRANSPORT=j;
+  try{const j=await smsRequest('sms_status');const first=!SMS_TRANSPORT;SMS_TRANSPORT=j;
     document.getElementById('smsActive').textContent='Active text service: '+j.provider+(j.provider==='twilio'?' · '+j.twilio.from:'');
-    if(first){document.getElementById('smsProviderChoice').value=j.provider;document.getElementById('twAccount').value=j.twilio.accountSid||'';document.getElementById('twFrom').value=j.twilio.from||'';document.getElementById('twService').value=j.twilio.serviceSid||'';SMS_CONNECTION_SAVED=smsConnectionInputs();}
-    // The dropdown used to sync on first load ONLY, so a tab opened before a provider
-    // switch kept showing the old service for the rest of its life — it read "SMS Gateway"
-    // after the 2026-10-11 Twilio cutover and looked like the switch had failed. Resync it
-    // whenever the operator has not deliberately picked something else. Never while
-    // SMS_BUSY: the post-activation refresh runs inside smsUiWork, and the select stays
-    // enabled, so resyncing there would overwrite a choice made mid-request.
-    else if(!SMS_BUSY){const _sel=document.getElementById('smsProviderChoice');if(_sel&&_sel.value===prevProvider)_sel.value=j.provider;}
+    if(first){document.getElementById('twAccount').value=j.twilio.accountSid||'';document.getElementById('twFrom').value=j.twilio.from||'';document.getElementById('twService').value=j.twilio.serviceSid||'';SMS_CONNECTION_SAVED=smsConnectionInputs();}
+    // Compare with the last server-synced choice even during work, preserving a
+    // deliberate unsaved choice without stranding a pre-cutover tab on Gateway.
+    syncSmsProviderChoice(j.provider);
+    syncDigestSetting(j.escalationDigest!==false);
     document.getElementById('twTokenState').textContent=j.twilio.authTokenSet?'(saved)':'(not set)';
     document.getElementById('twConsent').innerHTML=(j.smsRecipients||[]).map(x=>'<div style="margin:8px 0;border-top:1px solid var(--line);padding-top:8px"><b>'+esc(x.phone)+'</b> · '+esc(x.consentStatus)+'<br>'+(x.optedInAt?'START received: '+esc(x.optedInAt)+'<br>':'')+'<button class="ghost" type="button" onclick="syncSmsConsent(\''+esc(x.phone)+'\')">Check enrollment</button> '+(!x.ready?'<button class="ghost" type="button" onclick="verifySmsConsent(\''+esc(x.phone)+'\')">Verify employee identity</button>':'')+'</div>').join('');
     document.getElementById('smsUnconfirmed').textContent=(j.unconfirmedBackups||[]).map(x=>'Backup '+x.label+': send outcome unconfirmed; automatic resend held. Check Twilio logs before retrying. '+(x.messageIds||[]).join(', ')).join('\n');
-    // Age-unbounded open count. The in-window escalation sweep reads 0 once items pass its
-    // recency guard, which is how five unanswered guests stayed invisible for up to 7 days.
-    (function(){const _oe=j.openEscalations||{count:0,items:[]};const _el=document.getElementById('smsOpenEsc');if(!_el)return;
-      if(!_oe.count){_el.style.color='';_el.textContent='No guest questions are waiting for an answer.';return;}
-      _el.style.color='#fbbf24';
-      _el.textContent='Still waiting for an answer: '+_oe.count+(_oe.oldestAgeH!=null?(' · oldest '+_oe.oldestAgeH+'h'):'')+'\n'
-        +(_oe.items||[]).slice(0,8).map(x=>'  '+x.label+([x.unit,x.guest].filter(Boolean).length?(' - '+[x.unit,x.guest].filter(Boolean).join(' - ')):'')+' — '+(x.ageH!=null?x.ageH+'h':'age unknown')+(x.complaint?' (complaint)':'')).join('\n')
-        +((_oe.items||[]).length>8?('\n  +'+((_oe.items||[]).length-8)+' more'):'')
-        +(j.escalationDigest===false?'\n(Daily reminder is turned off.)':'');})();const round=j.roundTrip;document.getElementById('smsRoundTrip').textContent=round?('Latest reply test: '+round.provider+' · '+round.at+' · '+round.from+' · '+round.testText+' · acknowledgment '+(round.replyAccepted?'accepted':'not accepted')):'No two-way reply test recorded yet. After switching, text TEST VERIFY01 from the enrolled staff phone to the Twilio number, then refresh.';
+    renderOpenEscalations(j.openEscalations);
+    const digest=j.digestLast;document.getElementById('smsDigestLast').textContent=digest?('Last daily reminder: '+digest.at+' · '+digest.provider+' · '+(digest.uncertain?'outcome unconfirmed':digest.accepted?'provider accepted (delivery not verified)':'not accepted')+(digest.messageIds&&digest.messageIds.length?' · IDs '+digest.messageIds.join(', '):digest.messageId?' · ID '+digest.messageId:'')+(digest.error?' · '+digest.error:'')):'No daily reminder attempt recorded.';
+    const round=j.roundTrip;document.getElementById('smsRoundTrip').textContent=round?('Latest reply test: '+round.provider+' · '+round.at+' · '+round.from+' · '+round.testText+' · acknowledgment '+(round.replyAccepted?'accepted':'not accepted')):'No two-way reply test recorded yet. After switching, text TEST VERIFY01 from the enrolled staff phone to the Twilio number, then refresh.';
     if(refresh)document.getElementById('smsTransportMsg').textContent='Service status refreshed.';
   }catch(e){document.getElementById('smsTransportMsg').textContent=e.message;}
 }
@@ -3666,10 +3681,14 @@ async function checkTwilio(){return smsUiWork(async()=>{if(JSON.stringify(smsCon
 async function connectTwilio(){return smsUiWork(async()=>{if(JSON.stringify(smsConnectionInputs())!==JSON.stringify(SMS_CONNECTION_SAVED)||document.getElementById('twToken').value)throw Error('Save Twilio connection details first.');const j=await smsRequest('sms_register_webhook',{provider:'twilio'});showTwilioProof(j.proof);return 'Existing number connected. Voice configuration preserved. Active text service is unchanged.';});}
 async function syncSmsConsent(phone){return smsUiWork(async()=>{await smsRequest('sms_consent_sync',{phone});return 'Enrollment evidence refreshed from Twilio.';});}
 async function verifySmsConsent(phone){return smsUiWork(async()=>{if(!GPW)throw Error('Unlock Gavin using the existing Gavin tab, then return here to verify the employee identity.');await smsRequest('sms_consent_verify',{phone});return 'Employee identity verified against the latest START from '+phone+'.';});}
-async function activateSmsProvider(){return smsUiWork(async()=>{if(JSON.stringify(smsConnectionInputs())!==JSON.stringify(SMS_CONNECTION_SAVED)||document.getElementById('twToken').value)throw Error('Save connection details first.');const provider=document.getElementById('smsProviderChoice').value;await smsRequest('set_notify_config',{smsProvider:provider});return 'Active text service changed to '+provider+'. Send a staff test and check delivery below.';});}
+async function activateSmsProvider(){return smsUiWork(async()=>{if(JSON.stringify(smsConnectionInputs())!==JSON.stringify(SMS_CONNECTION_SAVED)||document.getElementById('twToken').value)throw Error('Save connection details first.');const provider=document.getElementById('smsProviderChoice').value,revision=SMS_PROVIDER_CHOICE_REVISION;await smsRequest('set_notify_config',{smsProvider:provider});if(revision===SMS_PROVIDER_CHOICE_REVISION&&document.getElementById('smsProviderChoice').value===provider){SMS_PROVIDER_DIRTY=false;SMS_PROVIDER_SYNCED=provider;}return 'Active text service changed to '+provider+'. Send a staff test and check delivery below.';});}
 
 // ===== Text-alert / messaging config (Victor's UI) =====
 let NOTIFY_SAVED_ROUTES=null;
+let NOTIFY_DIGEST_SAVED=null, NOTIFY_DIGEST_DIRTY=false, NOTIFY_DIGEST_CHOICE_REVISION=0;
+function digestSettingChanged(){NOTIFY_DIGEST_DIRTY=true;NOTIFY_DIGEST_CHOICE_REVISION++;renderDigestSetting();}
+function syncDigestSetting(saved){const el=document.getElementById('nEscDigest');if(!el)return;if(!NOTIFY_DIGEST_DIRTY)el.checked=saved;NOTIFY_DIGEST_SAVED=saved;el.disabled=false;renderDigestSetting();}
+function renderDigestSetting(){const el=document.getElementById('nEscDigest'),status=document.getElementById('nEscDigestState');if(!el||!status)return;status.textContent=NOTIFY_DIGEST_SAVED===null?'Loading saved reminder setting…':'Saved daily reminder: '+(NOTIFY_DIGEST_SAVED?'ON':'OFF')+(el.checked!==NOTIFY_DIGEST_SAVED?' · Unsaved change — click Save routing settings.':'');}
 const DEFAULT_FROM="Parkside Tepees <notifications@send.parksidetepees.com>";
 async function loadNotifyStatus(){
   const el=document.getElementById('nStatus'); if(!el) return;
@@ -3719,6 +3738,7 @@ async function saveNotify(){
   if(NOTIFY_SAVED_ROUTES) body.routes=readRouteInputs();
   const t2=document.getElementById('nTo2'); if(t2) body.victorEmail2=t2.value.trim();
   const em=document.getElementById('nEscMins'); if(em) body.escalateMins=em.value.trim();
+  const digest=document.getElementById('nEscDigest'),digestRevision=NOTIFY_DIGEST_CHOICE_REVISION;if(digest&&NOTIFY_DIGEST_SAVED!==null)body.escalationDigest=digest.checked;
   const fr=document.getElementById('nFrom'); if(fr) body.from=fr.value.trim();
   const key=document.getElementById('nKey'); if(key && key.value.trim()) body.resendApiKey=key.value.trim();
   const ortk=document.getElementById('nOrToken').value.trim(); if(ortk) body.ownerrez_oauth_token=ortk;
@@ -3735,6 +3755,7 @@ async function saveNotify(){
       msg.textContent="Saved \u2713"+(sv.ownerrezOauthSet?" — OwnerRez token stored":"");
       const _k=document.getElementById('nKey'); if(_k) _k.value=""; document.getElementById('nOrToken').value="";
       if(body.routes) NOTIFY_SAVED_ROUTES=JSON.parse(JSON.stringify(body.routes));
+      if(typeof body.escalationDigest==='boolean'){NOTIFY_DIGEST_SAVED=body.escalationDigest;if(digestRevision===NOTIFY_DIGEST_CHOICE_REVISION&&digest.checked===body.escalationDigest)NOTIFY_DIGEST_DIRTY=false;renderDigestSetting();}
       loadNotifyStatus(); return true;
     } else { msg.textContent="Save failed: "+(j.error||r.status); return false; }
   }catch(e){ msg.textContent="Save failed: "+e.message; return false; }

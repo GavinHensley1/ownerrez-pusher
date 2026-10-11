@@ -585,7 +585,13 @@ async function sendGuestReply(enabled, ids, body){
 // Saved UI provider is authoritative; deploying never switches away from the existing gateway.
 async function sendSms(to, body){const cfg=await getNotifyConfig();return sendStaffSms({...cfg,smsTo:to||cfg.smsTo},body);}
 async function sendStaffSms(cfg,text){
-  if(cfg.smsProvider==="twilio")return employeeSms.send(cfg,text);
+  if(cfg.smsProvider==="twilio"){
+    const r=await employeeSms.send(cfg,text);
+    // A local readiness/opt-out refusal with no accepted parts is definitely unsent.
+    // Transport errors and partial multipart sends remain uncertain.
+    if(r&&!r.sent&&r.reason&&!r.error&&!r.uncertain&&!r.partial&&!r.status&&!(r.messageIds||[]).length) return {...r,staged:true};
+    return r;
+  }
   if(cfg.smsProvider!=="gateway")return {sent:false,staged:true,reason:"SMS is disabled",provider:cfg.smsProvider};
   return sendSmsGateway(cfg,text);
 }
@@ -629,7 +635,7 @@ async function getNotifyConfig(rawOverride){ const c=rawOverride||await getNotif
   to2:    (c.victorEmail2||process.env.VICTOR_EMAIL_2||"").trim(),
   scoreAlertEmails: (c.scoreAlertEmails||process.env.SCORE_ALERT_EMAILS||"").trim(),
   escalateMins: (function(){ var m=Number(c.escalateMins||process.env.ESCALATE_MINS||60); return (isFinite(m)&&m>0)?m:60; })(),
-  // Daily "still waiting" digest for already-flagged, still-unanswered items. Default ON;
+  // Daily review digest for recent open records. Open does not prove unanswered. Default ON;
   // set false to silence it without a redeploy.
   escalationDigest: (c.escalationDigest===false)?false:true,
   secret: (c.approveSecret||process.env.APPROVE_LINK_SECRET||"").trim(),
@@ -831,41 +837,65 @@ async function escalateStaleApprovals(req){
 }
 
 // ===== STILL-OPEN ESCALATIONS =====
-// escalateStaleApprovals reports ONLY what it acted on inside its recency window, so a
-// question left unanswered past that window vanishes from every status read. On
-// 2026-10-11 notify_status reported `escalated: 0` while five items were genuinely open
-// — the oldest 7.4 days, three of them prospective bookings. These helpers are
-// age-unbounded on purpose: they report, they never send, and they never touch the
-// one-shot guard or the no-backlog-blast rule above.
-function openEscalationList(list){
-  const now=Date.now();
+// Reporting is age-unbounded; reminders are not. An open record may already have
+// been handled in OwnerRez, so do not present database state as an unanswered guest.
+const ESC_DIGEST_RECENT_DAYS=7, ESC_DIGEST_COOLDOWN_MS=24*3600000;
+function escalationActivityAt(x){return x.lastGuestMsgAt||x.primaryNotifiedAt||x.ts||null;}
+const ESC_REVIEW_FIELDS=["status","question","firstQuestion","ts","primaryNotifiedAt","lastGuestMsgAt","revisedAt","thread_id","booking_id"];
+function escalationReviewSnapshot(x){return Object.fromEntries(ESC_REVIEW_FIELDS.map(k=>[k,x[k]==null?null:x[k]]));}
+function escalationReviewVersion(x){return require("crypto").createHash("sha256").update(JSON.stringify(escalationReviewSnapshot(x))).digest("hex");}
+function openEscalationList(list, nowRef){
+  const now=Number(new Date(nowRef==null?Date.now():nowRef));
   // Array.isArray, not `list||[]`: a bare object (a single record passed by mistake, or a
   // store read that returned `{}` instead of a list) made `.filter` throw and took the whole
   // status endpoint down with it. Reporting must never be the thing that breaks.
   return (Array.isArray(list)?list:[]).filter(x=>x&&x.status==="escalated").map(function(x){
-    const t=Date.parse(x.primaryNotifiedAt||x.ts||"");
+    const t=Date.parse(escalationActivityAt(x)||"");
+    const ageMs=isFinite(t)&&isFinite(now)?now-t:null;
     return { id:x.id, label:x.smsLabel||x.id, unit:x.unit||"", guest:x.guest_name||"",
       complaint:!!x.complaint, ts:x.ts||null, threadId:x.thread_id||null,
-      ageH:isFinite(t)?Math.round((now-t)/360000)/10:null,
+      question:String(x.question||"").slice(-2000), activityAt:escalationActivityAt(x), ageMs,
+      reviewVersion:escalationReviewVersion(x),
+      ownerRezUrl:"https://app.ownerrez.com/inbox"+(/^\d{1,20}$/.test(String(x.thread_id||""))?"/"+encodeURIComponent(x.thread_id):""),
+      ageH:ageMs==null?null:Math.round(ageMs/360000)/10,
       backupAskSent:!!x.backupAskSent, escalatedTo2At:x.escalatedTo2At||null,
       backupSkippedStale:!!x.backupSkippedStale, backupAskUncertain:!!x.backupAskUncertain,
       partialAnswered:!!x.partialAnswered, answeredToGuest:!!x.answeredToGuest };
   }).sort((a,b)=>(b.ageH||0)-(a.ageH||0));
 }
-function openEscalationSummary(list){
-  const items=openEscalationList(list);
+function openEscalationSummary(list, nowRef){
+  const items=openEscalationList(list,nowRef);
+  const recent=items.filter(x=>x.ageMs!=null&&x.ageMs>=0&&x.ageMs<=ESC_DIGEST_RECENT_DAYS*86400000);
+  const historical=items.filter(x=>!recent.includes(x));
   // neverNotified = no notification attempt of any kind yet, so `backupAskUncertain` is
   // excluded: those may already have reached staff and must not be reported as untouched.
   return { count:items.length, oldestAgeH:items.length?items[0].ageH:null,
-    neverNotified:items.filter(x=>!x.backupAskSent&&!x.backupSkippedStale&&!x.backupAskUncertain).length, items:items };
+    neverNotified:items.filter(x=>!x.backupAskSent&&!x.backupSkippedStale&&!x.backupAskUncertain).length,
+    recentDays:ESC_DIGEST_RECENT_DAYS, recentCount:recent.length, historicalCount:historical.length,
+    recent, historical, items };
 }
 
-// Bounded daily reminder for items that ALREADY had their one-shot backup and are still
-// unanswered. Deliberately ONE digest, never one message per item, and at most once per
+function escalationDigestItems(list,cfg,nowRef){
+  const now=Number(new Date(nowRef==null?Date.now():nowRef));
+  return openEscalationSummary(list,now).recent.filter(x=>{
+    if(x.backupAskUncertain||!(x.backupAskSent||x.backupSkippedStale)) return false;
+    // Never send the digest alongside the first backup, nor after a fresh follow-up.
+    const backupAt=Date.parse(x.escalatedTo2At||"");
+    const activityAt=Date.parse(x.activityAt||"");
+    const fallbackAt=activityAt+(cfg.escalateMins||60)*60000;
+    const lastNoticeAt=isFinite(backupAt)?Math.max(backupAt,activityAt):fallbackAt;
+    return isFinite(lastNoticeAt)&&now-lastNoticeAt>=ESC_DIGEST_COOLDOWN_MS;
+  });
+}
+
+// Bounded daily review reminder for RECENT open records, at least 24h after backup.
+// Deliberately ONE digest, never one message per item, and at most once per
 // calendar day behind an NX key. The one-shot guard and the recency guard are untouched.
 // Driven by the project's own Vercel cron (run_escalations) — nothing outside the project
 // schedules this.
 const ESC_DIGEST_MAX_ITEMS=8;
+// Keep a review text readable and below one staff-SMS application chunk.
+const ESC_DIGEST_MAX_TEXT=1300;
 // The once-a-day marker is keyed to the PROPERTY'S calendar day, not to UTC. A UTC key
 // rolls over at 8pm Eastern, so two digests could land ~60 seconds apart on the same
 // evening and read as a duplicate nag: 2026-10-11T23:59:30Z and 2026-10-12T00:00:30Z are
@@ -901,6 +931,9 @@ function escalationDigestWindowOpen(now){
   return h==null?true:(h>=ESC_DIGEST_HOUR_MIN&&h<=ESC_DIGEST_HOUR_MAX);
 }
 let _memEscDigestDay=null;
+let _memEscDigestLast=null;
+async function getEscalationDigestLast(){return redis?await redis.get("parkside:esc_digest_last"):_memEscDigestLast;}
+async function saveEscalationDigestLast(record){if(redis)await redis.set("parkside:esc_digest_last",record);else _memEscDigestLast=record;}
 // Test seam. The in-memory day marker is module-private, and a suite that exercises both the
 // "marker held" and "marker released" paths has to start each case from a known state.
 // Memory only: this never touches a real KV key, so it cannot clear a production marker.
@@ -913,8 +946,8 @@ async function remindOpenEscalations(req, opts){
     if(cfg.escalationDigest===false) return {sent:false, reason:"digest turned off"};
     const route=cfg.routes.backup;
     if(!route||!route.recipient) return {sent:false, reason:"no backup recipient set"};
-    const open=openEscalationList(await getApprovals()).filter(x=>x.backupAskSent||x.backupSkippedStale);
-    if(!open.length) return {sent:false, reason:"nothing still open"};
+    const open=escalationDigestItems(await getApprovals(),cfg,nowRef);
+    if(!open.length) return {sent:false, reason:"no recent records due for review"};
     const day=escalationDigestDayKey(nowRef);
     // Checked BEFORE the lock on purpose: taking the marker here would burn the day and the
     // reminder would never arrive.
@@ -927,7 +960,7 @@ async function remindOpenEscalations(req, opts){
     // a missed reminder is recoverable, a duplicate nag to staff every 5 minutes is not.
     let _first=false, _lockErr=null;
     try{
-      if(redis){ const _r=await redis.set(key, new Date().toISOString(), {nx:true, ex:7*24*3600}); _first=(_r!==null&&_r!==false); }
+      if(redis){ const _r=await redis.set(key, new Date().toISOString(), {nx:true, ex:7*24*3600}); _first=(_r==="OK"||_r===true); }
       // No Redis: the guard is per-process only, so a serverless cold start could repeat the
       // digest. Acceptable as a local/dev fallback; production runs with KV configured, which
       // is what makes the NX key a real cross-invocation lock.
@@ -935,23 +968,33 @@ async function remindOpenEscalations(req, opts){
     }catch(e){ _lockErr=String(e&&e.message||e); }
     if(_lockErr) return {sent:false, reason:"could not take the daily lock", error:_lockErr, day:day, count:open.length};
     if(!_first) return {sent:false, reason:"already sent today", day:day, count:open.length};
+    const lineFor=function(x){
+      const who=[x.unit,x.guest].filter(Boolean).join(" - ").slice(0,90);
+      return String(x.label).slice(0,32)+(who?(" - "+who):"")+" — last activity "+(x.ageH!=null?(x.ageH+"h ago"):"unknown")+(x.complaint?" (human review)":"")
+        +"\n"+String(x.question||"Open record; review the conversation.").replace(/\s+/g," ").slice(0,240)+"\n"+x.ownerRezUrl;
+    };
     const shown=open.slice(0,ESC_DIGEST_MAX_ITEMS);
-    const lines=shown.map(function(x){
-      const who=[x.unit,x.guest].filter(Boolean).join(" - ");
-      return x.label+(who?(" - "+who):"")+" — "+(x.ageH!=null?(x.ageH+"h"):"age unknown")+" waiting"+(x.complaint?" (COMPLAINT)":"");
-    });
+    const renderText=()=>"Open guest records to review ("+open.length+", last "+ESC_DIGEST_RECENT_DAYS+" days):\n"+shown.map(lineFor).join("\n\n")+(open.length>shown.length?("\n+"+(open.length-shown.length)+" more in the Messaging panel"):"")
+      +"\n\nThese records are still open in the project; some may already be handled. Review OwnerRez before replying. Mark handled in the Messaging panel if no reply is needed. Older records remain in the panel history.";
+    let text=renderText();
+    while(route.channel==="sms"&&text.length>ESC_DIGEST_MAX_TEXT&&shown.length>1){shown.pop();text=renderText();}
     const extra=open.length-shown.length;
-    const text="Still waiting for an answer ("+open.length+"):\n"+lines.join("\n")+(extra>0?("\n+"+extra+" more"):"")
-      +"\n\nThese were already flagged once and are still open. Please answer in OwnerRez, or text the Q number followed by the fact.";
     let r;
     if(route.channel==="email"){
       r=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:route.recipient,
-        subject:"Still waiting: "+open.length+" guest question"+(open.length===1?"":"s"),
+        subject:"Review "+open.length+" open guest record"+(open.length===1?"":"s"),
         html:"<pre style=\"font:14px/1.5 system-ui,sans-serif;white-space:pre-wrap\">"+escHtml(text)+"</pre>"});
     } else {
       r=await sendStaffSms(routedSmsConfig(cfg,route), text);
     }
     const sent=!!(r&&r.sent===true);
+    const receipt={at:new Date(nowRef).toISOString(),day,count:open.length,shown:shown.length,channel:route.channel,
+      provider:r&&r.provider|| (route.channel==="email"?"resend":cfg.smsProvider),to:route.recipient,
+      accepted:sent,deliveryStatus:r&&r.deliveryStatus||(sent?"accepted":"not accepted"),
+      messageId:r&&r.messageId||null,messageIds:r&&r.messageIds||[],
+      uncertain:!!(r&&r.uncertain)||(!sent&&!(r&&(r.staged===true||typeof r.status==="number"))),
+      error:r&&(r.error||r.reason)||null};
+    await saveEscalationDigestLast(receipt);
     // Release the day marker ONLY when we know for certain nothing went out. `staged` means
     // the transport refused before sending (missing key/recipient), and a numeric `status`
     // means the provider answered and rejected it. A bare `{sent:false, error}` is the
@@ -968,7 +1011,7 @@ async function remindOpenEscalations(req, opts){
     }
     return {sent:sent, count:open.length, shown:shown.length, more:extra>0?extra:0,
       channel:route.channel, to:route.recipient, day:day, retryable:!sent&&definitelyNotSent,
-      uncertain:!!(r&&r.uncertain)||(!sent&&!definitelyNotSent), error:(r&&(r.error||r.reason))||null};
+      uncertain:!!(r&&r.uncertain)||(!sent&&!definitelyNotSent), error:(r&&(r.error||r.reason))||null,receipt};
   }catch(e){ return {error:String(e.message||e)}; }
 }
 // Auto-resolve: any approval still pending after 24h becomes Rejected (nothing sent to guest).
@@ -1393,6 +1436,8 @@ async function approvalSendRecord(id){ return redis?await redis.get(approvalSend
 async function saveApprovalSend(id,record){ if(redis) await redis.set(approvalSendKey(id),record); else approvalSendMemory.set(id,record); }
 function overlayApprovalSend(it,record){
   if(!record) return it;
+  if(record.state==="handled") return escalationReviewVersion(it)===record.reviewedVersion
+    ?{...it,status:"closed",decidedAt:record.at,closedBy:"staff",closedReason:"Marked handled without sending"}:it;
   if(record.state==="sent") return {...it,status:"approved",answer:record.answer,decidedAt:record.at,sendUncertain:false};
   if(record.state==="closed") return {...it,status:"rejected",decidedAt:record.at,rejectReason:record.reason,sendUncertain:!!record.uncertain};
   if(record.state==="sending"||record.state==="uncertain") return {...it,status:"pending",proposed:record.answer,sendUncertain:true};
@@ -1558,6 +1603,9 @@ async function processGuestQuestion(req, p){
   const history=await getThreadLog(threadId, bookingId);
   const hasHistory=(history||[]).some(function(m){ return m && m.d==="out"; }); // have we already messaged this guest?
   await appendThreadLog(threadId, bookingId, "in", question, guestName);
+  // Log acknowledgments, but never reopen/re-arm a complaint for a bare thank-you.
+  // This must precede the complaint mute: muted threads otherwise bypass the detector.
+  if(isObviousPleasantry(question)){ return {no_response_needed:true, pleasantry:true, question}; }
   // COMPLAINT HANDOFF MUTE: once a complaint has handed this thread to a human, the engine sends NO further
   // auto-response TO THE GUEST for ANY subsequent message on the thread (the inbound is logged above for the
   // human's context; no holding, no composed reply, no pleasantry logic). BUT the human is STILL alerted on
@@ -1614,10 +1662,6 @@ async function processGuestQuestion(req, p){
       }
     }
   }catch(e){}
-  // item B: obvious pleasantry/acknowledgment ("ok", "thanks", "sounds good", a thumbs-up, ...) -> NO reply,
-  // NO escalation (logged above for the record). Deterministic so the clear cases never vary. Also stops us
-  // from forwarding a bare "thanks" to Victor when an escalation is open.
-  if(isObviousPleasantry(question)){ return {no_response_needed:true, pleasantry:true, question}; }
   const draft=await aiDraftAnswer(kb, question, guestName, null, history, {unit:canonicalUnit(unit),booking:bookingId,thread:threadId});
   // Skip messages the AI classifies as pure acknowledgment (no question / no actionable content).
   if(draft && draft.needs_response===false){ return {no_response_needed:true, question}; }
@@ -1787,6 +1831,9 @@ function isObviousPleasantry(text){
   var letters=raw.toLowerCase().replace(/[^a-z\s]/g," ").replace(/\s+/g," ").trim();
   if(!letters){ return /[\u{1F000}-\u{1FAFF}\u2600-\u27BF\u2764\uFE0F\u{1F44D}]/u.test(raw) || /^[\s\p{P}]+$/u.test(raw); } // emoji/punctuation only (e.g. a thumbs-up)
   var words=letters.split(" ").filter(Boolean);
+  // Fully anchored checkout courtesy, not a bag of "positive" words. Any extra
+  // request/problem/question fails this match and continues through normal intake.
+  if(/^(?:thank you|thanks)(?: so much)?(?: (?:we )?(?:really )?enjoyed(?: (?:our|the) stay| ourselves| it)?)?(?: see you next time)?(?: we have left| we left| we have checked out| we checked out)?$/.test(letters)) return true;
   if(words.length>4) return false;                        // keep it to short acknowledgments only
   if(/\b(cancel|refund|leak|leaking|broke|broken|late|early|help|need|issue|problem|dirty|bug|bugs|smell|cold|hot|lost|stuck|emergency|complain|wrong|not|isn|doesn|won|cant|cannot)\b/.test(letters)) return false;
   var FILLER=new Set(["ok","okay","okey","k","kk","thanks","thank","thankyou","thx","ty","tysm","great","perfect","perfectly","awesome","cool","nice","gotcha","gotit","got","it","yes","yep","yeah","yup","sure","alright","allright","fine","understood","noted","cheers","bet","word","sounds","sound","good","appreciate","appreciated","appreciate","you","u","so","very","much","really","will","do","that","much","thumbs","up"]);
@@ -1882,6 +1929,45 @@ function rejectPageHtml(it, token){
 }
 // Decide a queued approval item: YES -> send to guest + learn into KB; NO -> reject.
 const approvalDecisionLocks=new Set();
+async function markEscalationHandled(id, expectedVersion){
+  if(!id||!expectedVersion)return {ok:false,status:400,error:"Refresh the open records before marking one handled."};
+  const key="parkside:approval_decision:"+id, token=require("crypto").randomBytes(16).toString("hex");
+  let locked=false;
+  try{
+    if(redis){const r=await redis.set(key,token,{nx:true,ex:300});locked=r==="OK"||r===true;}
+    else if(!approvalDecisionLocks.has(id)){approvalDecisionLocks.add(id);locked=true;}
+    if(!locked)return {ok:false,status:409,error:"This record is being updated. Refresh and review it again."};
+    const list=await getApprovals(), it=list.find(x=>x.id===id);
+    if(!it)return {ok:false,status:404,error:"Record not found."};
+    if(!["escalated","pending"].includes(it.status))return {ok:true,already:true,id,sent:false};
+    if(it.status!=="escalated"||escalationReviewVersion(it)!==expectedVersion)return {ok:false,status:409,error:"This record changed after you reviewed it. Refresh and read the latest message before marking it handled."};
+    const receipt={state:"handled",reviewedVersion:expectedVersion,at:new Date().toISOString()};
+    if(redis){
+      // Compare and update only this record atomically. Intake does not take the
+      // decision lock, so a read-then-whole-list write could erase a new guest reply.
+      const result=await redis.eval(`-- mark-escalation-handled
+local raw=redis.call('get',KEYS[1]); if not raw then return 0 end
+local list=cjson.decode(raw); local expected=cjson.decode(ARGV[2]); local receipt=cjson.decode(ARGV[3])
+for _,it in ipairs(list) do
+  if it.id==ARGV[1] then
+    for k,v in pairs(expected) do
+      local actual=it[k]; if actual==nil then actual=cjson.null end
+      if cjson.encode(actual)~=cjson.encode(v) then return -1 end
+    end
+    it.status='closed'; it.decidedAt=receipt.at; it.closedBy='staff'; it.closedReason='Marked handled without sending'
+    redis.call('set',KEYS[1],cjson.encode(list)); redis.call('set',KEYS[2],ARGV[3]); return 1
+  end
+end
+return 0`,[AQKEY,approvalSendKey(id)],[id,JSON.stringify(escalationReviewSnapshot(it)),JSON.stringify(receipt)]);
+      if(Number(result)!==1)return {ok:false,status:409,error:"This record changed while you reviewed it. Refresh and review again."};
+    }else{
+      it.status="closed";it.decidedAt=receipt.at;it.closedBy="staff";it.closedReason="Marked handled without sending";
+      await saveApprovalSend(id,receipt);await setApprovals(list);
+    }
+    return {ok:true,id,sent:false,learned:false};
+  }catch(e){return {ok:false,status:503,error:"Could not save the review. Refresh to check its status before retrying."};}
+  finally{if(locked){if(redis){try{await redis.eval("if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end",[key],[token]);}catch(e){}}else approvalDecisionLocks.delete(id);}}
+}
 async function decideApproval(id, decision, overrideAnswer, reason){
   if(!id) return {ok:false, error:"no id"};
   const lockKey="parkside:approval_decision:"+id;
@@ -4416,6 +4502,12 @@ if(action==="email_recipients"){
       cards.sort(function(a,b){ return (b.last_activity||0)-(a.last_activity||0); });
       return res.status(200).json({days, count:cards.length, cards});
     }
+    if(action==="mark_escalation_handled"){
+      if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"__missing"))return res.status(401).json({error:"unauthorized"});
+      if(req.method!=="POST")return res.status(405).json({error:"POST required"});
+      const b=req.body||{},out=await markEscalationHandled(String(b.id||""),String(b.reviewVersion||""));
+      return res.status(out.ok?200:(out.status||400)).json(out);
+    }
     if(action==="approvals"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       const list=await getApprovals(); const status=(req.query&&req.query.status)||"pending";
@@ -4983,7 +5075,7 @@ if(action==="email_recipients"){
       }
       await setNotifyRaw(next);
       const cfg=await getNotifyConfig();
-      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth, primaryChannel:cfg.primaryChannel, smsUrlSet:!!cfg.smsUrl, smsToSet:!!cfg.smsTo, routes:cfg.routes }});
+      return res.status(200).json({ok:true, saved:{ victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, escalationDigest:cfg.escalationDigest, resendFromSet:!!cfg.from, resendKeySet:!!cfg.apiKey, approveSecretSet:!!cfg.secret, ownerrezOauthSet:!!cfg.ownerrezOauth, primaryChannel:cfg.primaryChannel, smsUrlSet:!!cfg.smsUrl, smsToSet:!!cfg.smsTo, routes:cfg.routes }});
     }
     // Send ONE sample approval email to the configured Victor address (password).
     if(action==="sms_twilio_check"||action==="sms_consent_sync"||action==="sms_consent_verify"){
@@ -5100,7 +5192,7 @@ if(action==="email_recipients"){
       const polledNow=await maybePollMessages(req);
       const escNow=await escalateStaleApprovals(req);
       const stN=await getState(); const apprN=await getApprovals();
-      const out={ smsProvider:cfg.smsProvider,smsConfigured:smsConnection(cfg), resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, escalation:escNow, approveSecretSet:!!cfg.secret,
+      const out={ smsProvider:cfg.smsProvider,smsConfigured:smsConnection(cfg), resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, escalationDigest:cfg.escalationDigest, escalation:escNow, approveSecretSet:!!cfg.secret,
         resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, ownerrezOauthLen:(cfg.ownerrezOauth||"").length, oauthProbe, sendProbe, lastDecided, lastSend, webhook, _diag,
         messaging_enabled:!!stN.messaging_enabled,
         // Age-unbounded, unlike `escalation` above, which only covers its recency window.
@@ -5124,7 +5216,7 @@ if(action==="email_recipients"){
       const cfg=await getNotifyConfig();
       const readiness=await smsReadiness(cfg);const recipientSet=staffRecipients(cfg).length>0;
       const _appr=await getApprovals();
-      return res.status(200).json({...readiness,unconfirmedBackups:_appr.filter(x=>x.backupAskUncertain).map(x=>({label:x.smsLabel||x.id,at:x.escalatedTo2At,error:x.backupAskError,messageIds:x.backupAskMessageIds||[]})),generalRecipient:cfg.smsTo,provider:cfg.smsProvider,configured:readiness.smsConfigured&&recipientSet,connectionSet:readiness.smsConfigured,recipientSet,victorSet:!!cfg.smsTo,escalationDigest:cfg.escalationDigest!==false,openEscalations:openEscalationSummary(_appr),roundTrip:(redis?await redis.get("parkside:sms_roundtrip"):_smsMemory.get("parkside:sms_roundtrip"))||null});
+      return res.status(200).json({...readiness,unconfirmedBackups:_appr.filter(x=>x.backupAskUncertain).map(x=>({label:x.smsLabel||x.id,at:x.escalatedTo2At,error:x.backupAskError,messageIds:x.backupAskMessageIds||[]})),generalRecipient:cfg.smsTo,provider:cfg.smsProvider,configured:readiness.smsConfigured&&recipientSet,connectionSet:readiness.smsConfigured,recipientSet,victorSet:!!cfg.smsTo,escalationDigest:cfg.escalationDigest!==false,digestLast:await getEscalationDigestLast(),openEscalations:openEscalationSummary(_appr),roundTrip:(redis?await redis.get("parkside:sms_roundtrip"):_smsMemory.get("parkside:sms_roundtrip"))||null});
     }
 
     res.status(400).json({error:"unknown action"});
@@ -5132,12 +5224,12 @@ if(action==="email_recipients"){
 };
 
 module.exports.__model={compute,paceMult,scarMult,gapGm,deriveLearned,interp,SENS,MODEL,UNIT_PREM,GAP_SEED,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
-module.exports.__msg={kbAutoMatch,normQ,sendSms,decideApproval,aiDraftAnswer,guestFacts};
+module.exports.__msg={isObviousPleasantry,processGuestQuestion,kbAutoMatch,normQ,sendSms,decideApproval,aiDraftAnswer,guestFacts};
 module.exports.__calls={hookBody,phoneDigits,recordingSidOf};
 // item MW-12: expose pure helpers for unit tests (attaches to the handler export).
 module.exports.onDutyActivePct=onDutyActivePct;
 module.exports.timeOffForDate=timeOffForDate;
 
-module.exports.__routing={notificationRoutes,validateNotificationRoutes,routeFor,getNotifyConfig,setNotifyRaw,getNotifyRaw,sendVictorApprovalEmail,sendVictorEscalationSms,sendApprovalEmail,escalateStaleApprovals,setApprovals,getApprovals,authorizedSmsNumbers,openEscalationList,openEscalationSummary,remindOpenEscalations,ESC_DIGEST_MAX_ITEMS,escalationDigestDayKey,escalationDigestLocalHour,escalationDigestWindowOpen,resetEscalationDigestMarker};
+module.exports.__routing={notificationRoutes,validateNotificationRoutes,routeFor,getNotifyConfig,setNotifyRaw,getNotifyRaw,sendVictorApprovalEmail,sendVictorEscalationSms,sendApprovalEmail,escalateStaleApprovals,setApprovals,getApprovals,authorizedSmsNumbers,openEscalationList,openEscalationSummary,remindOpenEscalations,markEscalationHandled,escalationReviewVersion,escalationDigestItems,getEscalationDigestLast,ESC_DIGEST_RECENT_DAYS,ESC_DIGEST_MAX_ITEMS,escalationDigestDayKey,escalationDigestLocalHour,escalationDigestWindowOpen,resetEscalationDigestMarker};
 
 module.exports.__staffSms={employeeSms,staffSms,sendStaffSms,smsReadiness,staffRecipients};
