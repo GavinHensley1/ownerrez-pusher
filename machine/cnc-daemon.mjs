@@ -193,9 +193,12 @@ try { activeRunCheckpoint = readRunCheckpoint(RUN_STATE_PATH); } catch { activeR
 const json = (res, status, value) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
 const recordEvent = (type, detail = {}) => { try { appendCncEvent(EVENT_JOURNAL_PATH, type, detail); } catch (error) { logConnectionEvent?.(`journal:${error.message}`, `[cnc] event journal: ${error.message}`); } };
 const assertCuttingProtection = () => { if (!controllerProtection.ready) throw new Error(`Controller protection blocks cutting: ${controllerProtection.reason}. Use Restore controller protection in Project; manual positioning remains available.`); };
-const assertSetupFrame = ({ allowHeldRecovery = false } = {}) => {
+const assertSetupFrame = ({ allowHeldRecovery = false, allowProbeRecovery = false, allowManualPositioning = false } = {}) => {
+  // Relative operator recovery does not depend on saved cutting coordinates.
+  // Each controller routine still checks fresh state, pins and motion completion.
+  if (allowProbeRecovery || allowHeldRecovery) return;
   if (!allowHeldRecovery && frameRecovery.requiresBufferDiscard) throw new Error("Reset the held controller through Project before manual positioning; the old buffer has not been verified discarded");
-  if (!frameRecovery.active) assertFrameValid(frameIncident);
+  if (!allowManualPositioning && !frameRecovery.active) assertFrameValid(frameIncident);
 };
 const motionGuard = async (context = {}) => { assertSetupFrame(context); return { state: "controller_and_software_guards", frameValid: !frameIncident?.latched }; };
 const latchFrameIncident = (reason, duringMotion = hazardousOperationActive?.() === true) => {
@@ -323,6 +326,16 @@ const captureInterruptedPosition = (status, reason, { initial = false, moved = f
 controller.on("cutFrameVerified", value => recordEvent("program.effective_frame_verified", value));
 controller.on("stockFrameRestored", value => recordEvent("program.stock_frame_restored", value));
 controller.on('probeEvidence', value => recordEvent('probe.contact_evidence', value));
+controller.on('probeRecoveryReset', value => {
+  // Reset acknowledgment invalidates readiness immediately, even if a later
+  // settings query fails and the next retry begins Idle instead of Hold.
+  latchFrameIncident('PROBE_RECOVERY_DISCARDED_HELD_MOTION', false);
+  clearSetup();
+  controllerProtection = { ...controllerProtection, ready: false, reason: 'Controller reset during probe-contact recovery; cutting protection must be rechecked' };
+  frameRecovery = { active: true, requiresBufferDiscard: false, message: 'Held commands discarded. Probe recovery remains available; cutting coordinates are unverified.' };
+  persistRunProgress({ state: 'discarded', message: 'Held controller motion discarded during probe recovery; do not resume.' });
+  recordEvent('probe.recovery_reset_acknowledged', value);
+});
 controller.on("programProgress", (value) => {
   Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() });
   persistRunProgress({ state: "running", lastCompletedLine: value.line, totalLines: value.total, message: job.message });
@@ -512,7 +525,8 @@ const reconnectAndVerifyFrame = async () => {
   const before = await readStatus();
   if (before.state !== "Idle" || before.FS !== "0,0" || before.Pn) {
     const alarm = before.state === "Alarm" && before.FS === "0,0";
-    const held = new Set(["Hold:0", "Door:0"]).has(before.state) && before.FS === "0,0" && !before.Pn;
+    const probeContact = before.FS === "0,0" && /^PZ?$/.test(String(before.Pn || "").split("").sort().join(""));
+    const held = new Set(["Hold:0", "Door:0"]).has(before.state) && before.FS === "0,0" && (!before.Pn || (before.state === "Hold:0" && probeContact));
     frameRecovery.active = alarm || held;
     frameRecovery.requiresBufferDiscard = held;
     frameRecovery.awaitingOperator = true;
@@ -683,17 +697,18 @@ const health = () => {
   clearStaleMotionFlag();
   autoVerifyStoppedFrame();
   if (!controller.connected && !hazardousOperationActive() && !frameIncident?.latched) void recoverIdleConnection();
-  return { ok: true, woodProofVersion: 1, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, controllerProtection: { ...controllerProtection }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: resumeSnapshot() };
+  return { ok: true, contactRecoveryVersion: 2, woodProofVersion: 1, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, controllerProtection: { ...controllerProtection }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: resumeSnapshot() };
 };
 const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (new Set(["Door:0", "Hold:0"]).has(status.state)) throw new Error(`Controller positioning is paused in ${status.state}. The external router may be removed; use Enable positioning first.`); if (status.state !== "Idle") throw new Error(`Controller must report Idle before positioning, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`); return status; };
 
 const jog = async (axis, payload) => {
-  assertSetupFrame();
+  assertSetupFrame({ allowManualPositioning: true });
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   setMoving(true, "jog"); incident = undefined;
   try {
-    await motionGuard();
+    await motionGuard({ allowManualPositioning: true });
+    await assertIdle();
     const distance = Number(payload.distanceMm);
     if (frameRecovery.active && (!Number.isFinite(distance) || Math.abs(distance) > 5 || Number(payload.feedMmPerMin) > 100)) throw new Error("Recovery positioning is limited to 5 mm at 100 mm/min per click");
     if (axis === "Z" && (!Number.isFinite(distance) || Math.abs(distance) > 5)) throw new Error("Z jogs are limited to 5 mm per Project command");
@@ -702,7 +717,6 @@ const jog = async (axis, payload) => {
       const before = await assertIdle(), workPosition = workPositionForStatus(before);
       assertWorkJogWithinStock({ workPosition, axis, distanceMm: distance, stockWidthMm: payload.stockWidthMm, stockHeightMm: payload.stockHeightMm });
     }
-    if (new Set(["X", "Y"]).has(axis) && !setup.xyReady && !frameRecovery.active) throw new Error("Verify coordinates before manual positioning");
     const manualPositioning = Boolean(payload.manualPositioning);
     const calibration = manualPositioning && !workspace.snapshot().calibrated;
     const safeRetract = manualPositioning && axis === "Z" && distance > 0;
@@ -724,10 +738,10 @@ const spindleTest = async () => {
   catch (error) { incident = error?.message || "SPINDLE_TEST_FAILED"; throw error; } finally { setMoving(false); }
 };
 const setXyZero = async (payload) => {
-  assertSetupFrame();
+  assertSetupFrame({ allowManualPositioning: true });
   if (payload.confirmNewProject !== true) throw new Error("Explicit new-project X/Y reset confirmation is required");
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
-  await motionGuard(); const before = await assertIdle(); await controller.setWorkOffset({ x: 0, y: 0 });
+  await motionGuard({ allowManualPositioning: true }); const before = await assertIdle(); await controller.setWorkOffset({ x: 0, y: 0 });
   setup.xyOriginMPos = coordinates(before); setup.xyReady = true; setup.updatedAt = new Date().toISOString();
   setup.xyLockStatus = "locked";
   persistLockedXy(before);
@@ -987,7 +1001,7 @@ const setPlateThickness = async (payload = {}) => {
   return { ok: true, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), setup: { ...setup } };
 };
 const recoverProbeContact = async (payload = {}) => {
-  assertSetupFrame();
+  assertSetupFrame({ allowProbeRecovery: true });
   if (hazardousOperationActive()) throw new Error('A CNC operation is already active');
   setMoving(true, "probe contact recovery");
   try {
@@ -995,7 +1009,14 @@ const recoverProbeContact = async (payload = {}) => {
     lastControllerStatus = result.after;
     // Limit/contact recovery can follow an interrupted wood proof. Verify the
     // stock frame again before any other setup control becomes reachable.
-    result.after = (await restoreStockCoordinateFrame()).after;
+    frameRecovery = { active: true, requiresBufferDiscard: false, message: 'Probe retracted; manual positioning is available. Cutting still requires verified setup.' };
+    incident = undefined;
+    if (result.discardedBufferedMotion) {
+      clearSetup();
+      persistRunProgress({ state: 'discarded', message: 'Held motion discarded during probe-contact recovery; do not resume.' });
+    }
+    try { result.after = (await restoreStockCoordinateFrame()).after; }
+    catch (error) { result.coordinateVerificationWarning = error.message; frameRecovery.message += ' Saved cutting coordinates remain unverified: ' + error.message; }
     captureInterruptedPosition(result.after, 'probe_contact_recovery', { moved: true });
     recordEvent('probe.contact_recovered', result);
     return result;

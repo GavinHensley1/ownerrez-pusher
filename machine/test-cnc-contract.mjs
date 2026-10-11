@@ -760,11 +760,14 @@ test("surface-contact proof gates Start at browser, API and daemon, and metal de
 });
 
 test("connection loss fails closed without GRBL soft reset or automatic motion recovery", () => {
-  // Soft reset now exists ONLY in the explicit operator buffer-discard method,
+  // Soft reset exists ONLY in explicit operator buffer-discard/contact recovery,
   // never in emergency stop or automatic connection recovery.
-  assert.equal((controller.match(/Buffer\.from\(\[0x18\]\)/g) || []).length, 1);
+  assert.equal((controller.match(/Buffer\.from\(\[0x18\]\)/g) || []).length, 2);
   const discard = controller.slice(controller.indexOf("  discardHeldMotion()"), controller.indexOf("  recoverStoppedController("));
   assert.match(discard, /Buffer\.from\(\[0x18\]\)/);
+  const contactRecovery = controller.slice(controller.indexOf("  recoverProbeContact("), controller.indexOf("  // No default plate thickness"));
+  assert.match(contactRecovery, /current.state === "Hold:0"/);
+  assert.match(contactRecovery, /Buffer\.from\(\[0x18\]\)/);
   assert.doesNotMatch(controller.slice(controller.indexOf("  async #emergencyStop")), /Buffer\.from\(\[0x18\]\)/);
   assert.doesNotMatch(daemon.slice(daemon.indexOf("const reconnectAndVerifyFrame"), daemon.indexOf("const xyRecoverySnapshot")), /discardHeldMotion/);
   assert.match(controller, /this\.socket\.write\("!"\)/);
@@ -774,7 +777,9 @@ test("connection loss fails closed without GRBL soft reset or automatic motion r
   assert.match(daemon, /if \(frameIncident\?\.latched\) return/);
   assert.match(daemon, /maxProgramSocketLines: 0/);
   assert.match(agent, /frameValid: health\?\.frameValid === true/);
-  assert.match(api, /health\.frameValid===false&&!\["stop","reconnect_verify"\].includes\(act\)&&!setupRecovery/);
+  const manualFrameExemptions = JSON.parse(api.match(/health\.frameValid===false&&!(\[[^\]]+\]).includes\(act\)&&!setupRecovery/)[1]);
+  for (const action of ["jog", "recover_probe", "recover_controller"]) assert(manualFrameExemptions.includes(action));
+  for (const action of ["start", "resume", "resume_saved"]) assert(!manualFrameExemptions.includes(action));
   assert.match(html, /Manual positioning ready/);
   assert.match(html, /Retry connection/);
   assert.doesNotMatch(html, /permanently blocked all motion/);

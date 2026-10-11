@@ -168,7 +168,7 @@ export class GrblTcpController extends EventEmitter {
       if (safeRetract && !(normalizedAxis === "Z" && distance > 0)) throw new Error("Safe retract is only allowed for positive Z motion");
       if (!Number.isFinite(negativeMargin) || negativeMargin < 0 || negativeMargin > 60 || (negativeMargin > 0 && !new Set(["X", "Y"]).has(normalizedAxis))) throw new Error("Probe-staging margin must be 0-60 mm on X or Y");
       if (this.sessionTravelMm + Math.abs(distance) > this.maxSessionTravelMm) throw new Error(`Session jog envelope of ${this.maxSessionTravelMm} mm would be exceeded`);
-      await this.motionGuard();
+      await this.motionGuard({ allowManualPositioning: true });
       const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
       if (before.state !== "Idle") throw new Error(`Controller must be Idle, got ${before.state}`);
       const [currentFeed, spindle] = String(before.FS || "0,0").split(",").map(Number);
@@ -184,7 +184,7 @@ export class GrblTcpController extends EventEmitter {
       const deadline = now() + Math.min(30_000, Math.max(5_000, expectedMs * 3 + 3_000));
       const samples = [];
       while (now() < deadline) {
-        try { await this.motionGuard(); }
+        try { await this.motionGuard({ allowManualPositioning: true }); }
         catch (error) { await this.#emergencyStop(`MOTION_GUARD_FAILED:${error.message}`); throw this.fault; }
         const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
         samples.push(status.raw);
@@ -194,7 +194,7 @@ export class GrblTcpController extends EventEmitter {
             await this.#emergencyStop(`JOG_DELTA_MISMATCH:expected=${distance},actual=${delta}`);
             throw this.fault;
           }
-          await this.motionGuard();
+          await this.motionGuard({ allowManualPositioning: true });
           this.sessionTravelMm += Math.abs(distance);
           return { axis: normalizedAxis, before, reply, after: status, deltaMm: delta, samples };
         }
@@ -466,24 +466,27 @@ export class GrblTcpController extends EventEmitter {
   }
 
   async #booleanSettingUnlocked(setting) {
-    const lines = await this.#lineCommandUnlocked("$$", false);
-    const match = lines.map((line) => line.match(new RegExp(`^\\$${Number(setting)}=(0|1)(?:\\s|$)`))).find(Boolean);
+    const requiredLine = new RegExp(`^\\$${Number(setting)}=(0|1)(?:\\s|$)`);
+    // A bridge may deliver an extra/late ok from an earlier rejected command.
+    // It is not the completion of this settings query until its payload arrives.
+    const lines = await this.#lineCommandUnlocked("$$", false, { requiredLine });
+    const match = lines.map((line) => line.match(requiredLine)).find(Boolean);
     if (!match) throw new Error(`Could not read $${Number(setting)} setting`);
     return match[1] === "1";
   }
 
-  async #probeRetractUnlocked(distanceMm, feedMmPerMin) {
+  async #probeRetractUnlocked(distanceMm, feedMmPerMin, guardContext) {
     const distance = Number(distanceMm), feed = Number(feedMmPerMin);
     if (!Number.isFinite(distance) || distance < 0.5 || distance > 10) throw new Error("Probe retract must be 0.5-10 mm");
     if (!Number.isFinite(feed) || feed < 20 || feed > 250) throw new Error("Probe retract feed must be 20-250 mm/min");
     const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
     if (before.state !== "Idle") throw new Error(`Controller must be Idle before probe retract, got ${before.state}`);
     const beforeZ = coordinateAxis(before, "Z");
-    const reply = await this.#guardedMotionLine(`$J=G91 G21 Z${distance.toFixed(3)} F${Math.round(feed)}`, 20_000);
+    const reply = await this.#guardedMotionLine(`$J=G91 G21 Z${distance.toFixed(3)} F${Math.round(feed)}`, 20_000, guardContext);
     const deadline = now() + probeRetractTimeoutMs(distance, feed);
     const samples = [];
     while (now() < deadline) {
-      await this.motionGuard();
+      await this.motionGuard(guardContext);
       const status = parseStatus(await this.#statusUnlocked({ attempts: 3 }));
       samples.push(status.raw);
       if (status.state === "Idle") {
@@ -524,29 +527,62 @@ export class GrblTcpController extends EventEmitter {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for probe recovery");
       if (this.programRunning) throw new Error('Stop the active program before probe recovery');
-      await this.motionGuard();
+      const distance = Number(retractMm), speed = Number(feed);
+      if (!Number.isFinite(distance) || distance < 0.5 || distance > 10) throw new Error("Probe retract must be 0.5-10 mm");
+      if (!Number.isFinite(speed) || speed < 20 || speed > 250) throw new Error("Probe retract feed must be 20-250 mm/min");
+      const guardContext = { allowProbeRecovery: true, allowHeldRecovery: true };
+      await this.motionGuard(guardContext);
       const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
-      if (!new Set(["Idle", "Alarm"]).has(before.state)) throw new Error(`Probe recovery requires Idle or Alarm, got ${before.state}`);
-      const [feedBefore, spindleBefore] = feedAndSpindle(before);
-      if (feedBefore !== 0 || spindleBefore !== 0 || !/^PZ?$/.test(String(before.Pn || '').split('').sort().join(''))) throw new Error('Probe recovery requires zero feed/spindle and only an active P or P/Z contact');
+      if (!new Set(["Idle", "Alarm", "Hold:0"]).has(before.state)) throw new Error(`Probe recovery requires stopped Idle, Alarm, or Hold:0, got ${before.state}`);
+      if (before.FS !== "0,0" || !/^PZ?$/.test(String(before.Pn || '').split('').sort().join(''))) throw new Error('Probe recovery requires zero feed/spindle and only an active P or P/Z contact');
       let hardLimitsWereEnabled;
       let hardLimitsSuppressed = false;
+      let motionStarted = false;
+      let resetWelcome;
       try {
-        await this.#lineCommandUnlocked("M5", true).catch(() => []);
         let current = before;
-        if (current.state.split(":")[0] === "Alarm") {
+        if (current.state === "Hold:0") {
+          // A held planner may contain old cutting moves. Only realtime reset
+          // clears it; never Cycle Start (~), and do not query $$ while held.
+          let timer, onLine, onFault, onClose;
+          const welcome = new Promise((resolve, reject) => {
+            onLine = line => { if (/^Grbl\b/i.test(line)) resolve(line); };
+            onFault = error => reject(error);
+            onClose = () => reject(new Error("Controller disconnected before probe-recovery reset acknowledgment"));
+            this.on("line", onLine); this.on("fault", onFault); this.on("close", onClose);
+            timer = setTimeout(() => reject(new Error("Probe-recovery reset was not acknowledged")), this.commandTimeoutMs);
+          });
+          try {
+            this.socket.write(Buffer.from([0x18]));
+            resetWelcome = await welcome;
+            // Reset invalidates pre-reset cut/setup readiness even if a later
+            // settings query fails. Notify the owner now, not only on success.
+            this.emit("probeRecoveryReset", { before, resetWelcome });
+          } finally {
+            clearTimeout(timer);
+            this.off("line", onLine); this.off("fault", onFault); this.off("close", onClose);
+          }
+          current = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+          if (!new Set(["Idle", "Alarm"]).has(current.state) || current.FS !== "0,0" || /[^PZ]/.test(String(current.Pn || ""))) {
+            await this.#emergencyStop(`UNEXPECTED_STATE_AFTER_PROBE_RECOVERY_RESET:${current.raw}`);
+            throw this.fault;
+          }
+        }
+        if (current.state === "Alarm") {
           await this.#lineCommandUnlocked("$X", false);
           current = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
         }
-        if (current.state !== "Idle") throw new Error(`Controller did not unlock for probe recovery: ${current.raw}`);
-        // This ARM32 GRBL build rejects `$$` while alarmed. Read $21 only
-        // after $X has returned the controller to Idle.
+        if (current.state !== "Idle" || current.FS !== "0,0" || /[^PZ]/.test(String(current.Pn || ""))) throw new Error(`Controller did not unlock stationary for probe recovery: ${current.raw}`);
+        // Never send M5 in Alarm: firmware may reject it and leave an extra ok
+        // in the bridge. Telemetry already proves the spindle is stopped.
         hardLimitsWereEnabled = await this.#booleanSettingUnlocked(21);
         if (hardLimitsWereEnabled) {
           await this.#lineCommandUnlocked("$21=0", false);
           hardLimitsSuppressed = true;
+          if (await this.#booleanSettingUnlocked(21)) throw new Error("Hard limits did not enter probe-contact recovery mode");
         }
-        const retract = await this.#probeRetractUnlocked(retractMm, feed);
+        motionStarted = true;
+        const retract = await this.#probeRetractUnlocked(distance, speed, guardContext);
         if (/[PZ]/.test(String(retract.after.Pn || ""))) throw new Error(`Probe/limit input did not clear after retract: ${retract.after.Pn}`);
         if (hardLimitsWereEnabled) {
           await this.#restoreHardLimitsVerifiedUnlocked();
@@ -554,11 +590,13 @@ export class GrblTcpController extends EventEmitter {
         }
         const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
         if (after.state !== 'Idle' || after.FS !== '0,0' || after.Pn) throw new Error('Probe recovery did not finish stationary with clear inputs');
-        await this.motionGuard();
-        return { before, retract, after, hardLimitsRestored: hardLimitsWereEnabled ? !hardLimitsSuppressed : false };
+        await this.motionGuard(guardContext);
+        return { before, retract, after, resetWelcome, discardedBufferedMotion: Boolean(resetWelcome), hardLimitsRestored: hardLimitsWereEnabled ? !hardLimitsSuppressed : false };
       } catch (error) {
         if (hardLimitsWereEnabled === true && hardLimitsSuppressed) await this.#restoreHardLimitsUnlocked().catch(() => {});
-        if (!this.fault) await this.#emergencyStop(`PROBE_RECOVERY_FAILED:${error.message}`);
+        // A rejected setup query has not moved anything. Do not convert an
+        // otherwise stopped, recoverable controller into a new feed-hold trap.
+        if (motionStarted && !this.fault) await this.#emergencyStop(`PROBE_RECOVERY_FAILED:${error.message}`);
         throw this.fault || error;
       }
     });
@@ -1020,7 +1058,7 @@ export class GrblTcpController extends EventEmitter {
     return { before: before.raw, after: after.raw };
   }
 
-  async #lineCommandUnlocked(command, motion, { timeoutMs = this.commandTimeoutMs } = {}) {
+  async #lineCommandUnlocked(command, motion, { timeoutMs = this.commandTimeoutMs, requiredLine } = {}) {
     await this.connect();
     if (!this.connected) throw new Error("CNC socket is not connected");
     if (this.lineWaiter) throw new Error("Line command already pending");
@@ -1035,7 +1073,7 @@ export class GrblTcpController extends EventEmitter {
       if (motion) await this.#emergencyStop(error.message); else this.#latchFault(error, true);
       rejectLine(this.fault || error);
     }, timeoutMs);
-    this.lineWaiter = { generation, lines, resolve: (value) => { clearTimeout(timer); resolveLine(value); }, reject: (error) => { clearTimeout(timer); rejectLine(error); } };
+    this.lineWaiter = { generation, lines, requiredLine, resolve: (value) => { clearTimeout(timer); resolveLine(value); }, reject: (error) => { clearTimeout(timer); rejectLine(error); } };
     this.socket.write(`${command}\r`);
     return response;
   }
@@ -1078,6 +1116,7 @@ export class GrblTcpController extends EventEmitter {
       }
       if (this.lineWaiter?.generation === generation) {
         this.lineWaiter.lines.push(line);
+        if (line === "ok" && this.lineWaiter.requiredLine && !this.lineWaiter.lines.some(value => this.lineWaiter.requiredLine.test(value))) continue;
         if (line === "ok" || /^error:\d+$/.test(line) || /^ALARM:\d+$/.test(line)) {
           const waiter = this.lineWaiter; this.lineWaiter = undefined;
           if (line === "ok") waiter.resolve([...waiter.lines]); else waiter.reject(new Error(`${line}; ${waiter.lines.join(" | ")}`));
@@ -1102,14 +1141,14 @@ export class GrblTcpController extends EventEmitter {
   #enqueue(operation) { const next = this.queue.then(operation, operation); this.queue = next.catch(() => {}); return next; }
   #rejectWaiters(error) { this.statusWaiter?.reject(error); this.lineWaiter?.reject(error); this.statusWaiter = undefined; this.lineWaiter = undefined; }
 
-  async #guardedMotionLine(command, timeoutMs) {
+  async #guardedMotionLine(command, timeoutMs, guardContext) {
     let settled = false, value, failure;
     const pending = this.#lineCommandUnlocked(command, true, { timeoutMs }).then(
       (result) => { settled = true; value = result; },
       (error) => { settled = true; failure = error; },
     );
     while (!settled) {
-      try { await this.motionGuard(); }
+      try { await this.motionGuard(guardContext); }
       catch (error) { await this.#emergencyStop(`MOTION_GUARD_FAILED:${error.message}`); throw this.fault; }
       await Promise.race([pending, sleep(200)]);
     }

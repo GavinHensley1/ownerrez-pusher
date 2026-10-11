@@ -151,9 +151,9 @@ test('fresh-process recovery selects known G55 back to G54 without changing zero
 test('operator UI offers only isolated stationary probe-contact recovery, never general Alarm movement',()=>{
   const ui=loadBrowserScript(new URL('../index.html',import.meta.url));
   const job={id:'wood',material:'Wood',hasGcode:false};
-  for(const [state,pins,fs,allowed] of [['Alarm','PZ','0,0',true],['Alarm','P','0,0',true],['Idle','P','0,0',true],['Alarm','PXY','0,0',false],['Run','PZ','0,0',false],['Hold:0','PZ','0,0',false],['Alarm','PZ','1,0',false],['Alarm','PZ','0,1',false]]){
+  for(const [state,pins,fs,allowed] of [['Alarm','PZ','0,0',true],['Alarm','P','0,0',true],['Idle','P','0,0',true],['Alarm','PXY','0,0',false],['Run','PZ','0,0',false],['Hold:0','PZ','0,0',true],['Alarm','PZ','1,0',false],['Alarm','PZ','0,1',false]]){
     ui.renderAgent(job,{connected:true,moving:false,frameValid:false,frameRecovery:{active:true},lastControllerStatus:{state,FS:fs,Pn:pins,MPos:'0,0,0'},setup:{},controllerProtection:{ready:false}},{});
     assert.equal(ui.elements.cncProbeRecoverBtn.disabled,!allowed,`${state} ${pins} ${fs}`);
-    if(state==='Alarm'){assert(ui.jogButtons.every(b=>b.disabled));assert.equal(ui.elements.cncZeroBtn.disabled,true);assert.equal(ui.elements.cncProbeBedBtn.disabled,true);}
+    for(const button of ui.jogButtons){const upward=button.dataset.axis==='Z'&&Number(button.dataset.dir)>0;assert.equal(button.disabled,!(upward&&allowed),`${state} ${pins}: ${button.dataset.axis}/${button.dataset.dir}`);if(upward&&allowed)assert.equal(button.textContent,'Z+ retract 3 mm');}assert.equal(ui.elements.cncZeroBtn.disabled,true);assert.equal(ui.elements.cncProbeBedBtn.disabled,true);
   }
 });
