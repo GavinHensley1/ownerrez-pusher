@@ -839,7 +839,10 @@ async function escalateStaleApprovals(req){
 // one-shot guard or the no-backlog-blast rule above.
 function openEscalationList(list){
   const now=Date.now();
-  return (list||[]).filter(x=>x&&x.status==="escalated").map(function(x){
+  // Array.isArray, not `list||[]`: a bare object (a single record passed by mistake, or a
+  // store read that returned `{}` instead of a list) made `.filter` throw and took the whole
+  // status endpoint down with it. Reporting must never be the thing that breaks.
+  return (Array.isArray(list)?list:[]).filter(x=>x&&x.status==="escalated").map(function(x){
     const t=Date.parse(x.primaryNotifiedAt||x.ts||"");
     return { id:x.id, label:x.smsLabel||x.id, unit:x.unit||"", guest:x.guest_name||"",
       complaint:!!x.complaint, ts:x.ts||null, threadId:x.thread_id||null,
@@ -863,22 +866,71 @@ function openEscalationSummary(list){
 // Driven by the project's own Vercel cron (run_escalations) — nothing outside the project
 // schedules this.
 const ESC_DIGEST_MAX_ITEMS=8;
+// The once-a-day marker is keyed to the PROPERTY'S calendar day, not to UTC. A UTC key
+// rolls over at 8pm Eastern, so two digests could land ~60 seconds apart on the same
+// evening and read as a duplicate nag: 2026-10-11T23:59:30Z and 2026-10-12T00:00:30Z are
+// different UTC dates but the same New York day. Rolling over at local midnight puts the
+// seam where nobody is reading texts, and makes "once a day" mean the day staff live in.
+const ESC_DIGEST_TZ="America/New_York";
+function escalationDigestDayKey(now){
+  const d=(now instanceof Date)?now:new Date(now==null?Date.now():now);
+  if(!isFinite(d.getTime())) return "invalid-date";
+  // en-CA formats as YYYY-MM-DD, which keeps the key sortable and the old shape intact.
+  try{ return new Intl.DateTimeFormat("en-CA",{timeZone:ESC_DIGEST_TZ,year:"numeric",month:"2-digit",day:"2-digit"}).format(d); }
+  catch(e){ return d.toISOString().slice(0,10); }
+}
+// WAKING HOURS, and the reason this window exists at all: the marker used to be keyed to the
+// UTC date, which rolls over at 8pm Eastern, so the every-5-minutes cron happened to deliver
+// the digest at ~8:05pm ET. Keying the marker to the LOCAL day (correct, see above) moves that
+// first post-rollover run to 12:00am ET — fixing the duplicate would have started texting
+// staff at midnight. So: only send between these local hours, and DO NOT take the marker
+// outside them, so a digest skipped at 02:00 still goes out on the first run after 08:00 the
+// SAME local day. Net effect: one digest per local day, in the morning, never at night.
+const ESC_DIGEST_HOUR_MIN=8, ESC_DIGEST_HOUR_MAX=21;
+function escalationDigestLocalHour(now){
+  const d=(now instanceof Date)?now:new Date(now==null?Date.now():now);
+  if(!isFinite(d.getTime())) return null;
+  // hourCycle h23 so midnight is 00 and not 24.
+  try{ return Number(new Intl.DateTimeFormat("en-GB",{timeZone:ESC_DIGEST_TZ,hour:"2-digit",hourCycle:"h23"}).format(d)); }
+  catch(e){ return d.getUTCHours(); }
+}
+function escalationDigestWindowOpen(now){
+  const h=escalationDigestLocalHour(now);
+  // Unknown hour: allow. A reminder that cannot prove it is the middle of the night is still
+  // worth more than silence, and the day marker keeps it to one.
+  return h==null?true:(h>=ESC_DIGEST_HOUR_MIN&&h<=ESC_DIGEST_HOUR_MAX);
+}
 let _memEscDigestDay=null;
-async function remindOpenEscalations(req){
+// Test seam. The in-memory day marker is module-private, and a suite that exercises both the
+// "marker held" and "marker released" paths has to start each case from a known state.
+// Memory only: this never touches a real KV key, so it cannot clear a production marker.
+function resetEscalationDigestMarker(){ _memEscDigestDay=null; }
+// `opts.now` is a clock seam for the tests; the cron calls this with the request only.
+async function remindOpenEscalations(req, opts){
   try{
+    const nowRef=(opts&&opts.now!=null)?opts.now:Date.now();
     const cfg=await getNotifyConfig();
     if(cfg.escalationDigest===false) return {sent:false, reason:"digest turned off"};
     const route=cfg.routes.backup;
     if(!route||!route.recipient) return {sent:false, reason:"no backup recipient set"};
     const open=openEscalationList(await getApprovals()).filter(x=>x.backupAskSent||x.backupSkippedStale);
     if(!open.length) return {sent:false, reason:"nothing still open"};
-    const day=new Date().toISOString().slice(0,10);
+    const day=escalationDigestDayKey(nowRef);
+    // Checked BEFORE the lock on purpose: taking the marker here would burn the day and the
+    // reminder would never arrive.
+    if(!escalationDigestWindowOpen(nowRef)){
+      return {sent:false, reason:"outside the daily reminder window", day:day,
+        hour:escalationDigestLocalHour(nowRef), count:open.length};
+    }
     const key="parkside:esc_digest:"+day;
     // FAIL CLOSED. If the once-a-day lock cannot be established we skip rather than send:
     // a missed reminder is recoverable, a duplicate nag to staff every 5 minutes is not.
     let _first=false, _lockErr=null;
     try{
       if(redis){ const _r=await redis.set(key, new Date().toISOString(), {nx:true, ex:7*24*3600}); _first=(_r!==null&&_r!==false); }
+      // No Redis: the guard is per-process only, so a serverless cold start could repeat the
+      // digest. Acceptable as a local/dev fallback; production runs with KV configured, which
+      // is what makes the NX key a real cross-invocation lock.
       else { _first=(_memEscDigestDay!==day); if(_first) _memEscDigestDay=day; }
     }catch(e){ _lockErr=String(e&&e.message||e); }
     if(_lockErr) return {sent:false, reason:"could not take the daily lock", error:_lockErr, day:day, count:open.length};
@@ -5086,6 +5138,6 @@ module.exports.__calls={hookBody,phoneDigits,recordingSidOf};
 module.exports.onDutyActivePct=onDutyActivePct;
 module.exports.timeOffForDate=timeOffForDate;
 
-module.exports.__routing={notificationRoutes,validateNotificationRoutes,routeFor,getNotifyConfig,setNotifyRaw,getNotifyRaw,sendVictorApprovalEmail,sendVictorEscalationSms,sendApprovalEmail,escalateStaleApprovals,setApprovals,getApprovals,authorizedSmsNumbers,openEscalationList,openEscalationSummary,remindOpenEscalations,ESC_DIGEST_MAX_ITEMS};
+module.exports.__routing={notificationRoutes,validateNotificationRoutes,routeFor,getNotifyConfig,setNotifyRaw,getNotifyRaw,sendVictorApprovalEmail,sendVictorEscalationSms,sendApprovalEmail,escalateStaleApprovals,setApprovals,getApprovals,authorizedSmsNumbers,openEscalationList,openEscalationSummary,remindOpenEscalations,ESC_DIGEST_MAX_ITEMS,escalationDigestDayKey,escalationDigestLocalHour,escalationDigestWindowOpen,resetEscalationDigestMarker};
 
 module.exports.__staffSms={employeeSms,staffSms,sendStaffSms,smsReadiness,staffRecipients};
