@@ -629,6 +629,9 @@ async function getNotifyConfig(rawOverride){ const c=rawOverride||await getNotif
   to2:    (c.victorEmail2||process.env.VICTOR_EMAIL_2||"").trim(),
   scoreAlertEmails: (c.scoreAlertEmails||process.env.SCORE_ALERT_EMAILS||"").trim(),
   escalateMins: (function(){ var m=Number(c.escalateMins||process.env.ESCALATE_MINS||60); return (isFinite(m)&&m>0)?m:60; })(),
+  // Daily "still waiting" digest for already-flagged, still-unanswered items. Default ON;
+  // set false to silence it without a redeploy.
+  escalationDigest: (c.escalationDigest===false)?false:true,
   secret: (c.approveSecret||process.env.APPROVE_LINK_SECRET||"").trim(),
   ownerrezOauth: (c.ownerrez_oauth_token||process.env.OWNERREZ_OAUTH_TOKEN||"").trim(),
   webhookUser: (c.webhook_user||process.env.OR_WEBHOOK_USER||"").trim(),
@@ -824,6 +827,96 @@ async function escalateStaleApprovals(req){
     }
     if(changed) await setApprovals(list);
     return {escalated:done.length, neutralized:neutralized, maxAgeH:Math.round(maxAgeMs/3600000), mins:cfg.escalateMins, items:done};
+  }catch(e){ return {error:String(e.message||e)}; }
+}
+
+// ===== STILL-OPEN ESCALATIONS =====
+// escalateStaleApprovals reports ONLY what it acted on inside its recency window, so a
+// question left unanswered past that window vanishes from every status read. On
+// 2026-10-11 notify_status reported `escalated: 0` while five items were genuinely open
+// — the oldest 7.4 days, three of them prospective bookings. These helpers are
+// age-unbounded on purpose: they report, they never send, and they never touch the
+// one-shot guard or the no-backlog-blast rule above.
+function openEscalationList(list){
+  const now=Date.now();
+  return (list||[]).filter(x=>x&&x.status==="escalated").map(function(x){
+    const t=Date.parse(x.primaryNotifiedAt||x.ts||"");
+    return { id:x.id, label:x.smsLabel||x.id, unit:x.unit||"", guest:x.guest_name||"",
+      complaint:!!x.complaint, ts:x.ts||null, threadId:x.thread_id||null,
+      ageH:isFinite(t)?Math.round((now-t)/360000)/10:null,
+      backupAskSent:!!x.backupAskSent, escalatedTo2At:x.escalatedTo2At||null,
+      backupSkippedStale:!!x.backupSkippedStale, backupAskUncertain:!!x.backupAskUncertain,
+      partialAnswered:!!x.partialAnswered, answeredToGuest:!!x.answeredToGuest };
+  }).sort((a,b)=>(b.ageH||0)-(a.ageH||0));
+}
+function openEscalationSummary(list){
+  const items=openEscalationList(list);
+  // neverNotified = no notification attempt of any kind yet, so `backupAskUncertain` is
+  // excluded: those may already have reached staff and must not be reported as untouched.
+  return { count:items.length, oldestAgeH:items.length?items[0].ageH:null,
+    neverNotified:items.filter(x=>!x.backupAskSent&&!x.backupSkippedStale&&!x.backupAskUncertain).length, items:items };
+}
+
+// Bounded daily reminder for items that ALREADY had their one-shot backup and are still
+// unanswered. Deliberately ONE digest, never one message per item, and at most once per
+// calendar day behind an NX key. The one-shot guard and the recency guard are untouched.
+// Driven by the project's own Vercel cron (run_escalations) — nothing outside the project
+// schedules this.
+const ESC_DIGEST_MAX_ITEMS=8;
+let _memEscDigestDay=null;
+async function remindOpenEscalations(req){
+  try{
+    const cfg=await getNotifyConfig();
+    if(cfg.escalationDigest===false) return {sent:false, reason:"digest turned off"};
+    const route=cfg.routes.backup;
+    if(!route||!route.recipient) return {sent:false, reason:"no backup recipient set"};
+    const open=openEscalationList(await getApprovals()).filter(x=>x.backupAskSent||x.backupSkippedStale);
+    if(!open.length) return {sent:false, reason:"nothing still open"};
+    const day=new Date().toISOString().slice(0,10);
+    const key="parkside:esc_digest:"+day;
+    // FAIL CLOSED. If the once-a-day lock cannot be established we skip rather than send:
+    // a missed reminder is recoverable, a duplicate nag to staff every 5 minutes is not.
+    let _first=false, _lockErr=null;
+    try{
+      if(redis){ const _r=await redis.set(key, new Date().toISOString(), {nx:true, ex:7*24*3600}); _first=(_r!==null&&_r!==false); }
+      else { _first=(_memEscDigestDay!==day); if(_first) _memEscDigestDay=day; }
+    }catch(e){ _lockErr=String(e&&e.message||e); }
+    if(_lockErr) return {sent:false, reason:"could not take the daily lock", error:_lockErr, day:day, count:open.length};
+    if(!_first) return {sent:false, reason:"already sent today", day:day, count:open.length};
+    const shown=open.slice(0,ESC_DIGEST_MAX_ITEMS);
+    const lines=shown.map(function(x){
+      const who=[x.unit,x.guest].filter(Boolean).join(" - ");
+      return x.label+(who?(" - "+who):"")+" — "+(x.ageH!=null?(x.ageH+"h"):"age unknown")+" waiting"+(x.complaint?" (COMPLAINT)":"");
+    });
+    const extra=open.length-shown.length;
+    const text="Still waiting for an answer ("+open.length+"):\n"+lines.join("\n")+(extra>0?("\n+"+extra+" more"):"")
+      +"\n\nThese were already flagged once and are still open. Please answer in OwnerRez, or text the Q number followed by the fact.";
+    let r;
+    if(route.channel==="email"){
+      r=await resendSend({apiKey:cfg.apiKey, from:cfg.from, to:route.recipient,
+        subject:"Still waiting: "+open.length+" guest question"+(open.length===1?"":"s"),
+        html:"<pre style=\"font:14px/1.5 system-ui,sans-serif;white-space:pre-wrap\">"+escHtml(text)+"</pre>"});
+    } else {
+      r=await sendStaffSms(routedSmsConfig(cfg,route), text);
+    }
+    const sent=!!(r&&r.sent===true);
+    // Release the day marker ONLY when we know for certain nothing went out. `staged` means
+    // the transport refused before sending (missing key/recipient), and a numeric `status`
+    // means the provider answered and rejected it. A bare `{sent:false, error}` is the
+    // AMBIGUOUS case — resendSend and sendSmsGateway both return that from their catch
+    // blocks, which fires even when the provider already accepted the message and only the
+    // response read failed. Treating that as "not sent" is what would let the 5-minute cron
+    // nag staff repeatedly. Ambiguous and `uncertain` both keep the full marker: one missed
+    // reminder is recoverable, a duplicate blast is not.
+    const definitelyNotSent = !!(r && (r.staged===true || typeof r.status==="number")) && !(r&&r.uncertain);
+    if(!sent && definitelyNotSent){
+      // Retryable, but not every 5 minutes — hold it off for 30.
+      if(redis){ try{ await redis.set(key, new Date().toISOString(), {ex:1800}); }catch(e){} }
+      else if(_memEscDigestDay===day) _memEscDigestDay=null;
+    }
+    return {sent:sent, count:open.length, shown:shown.length, more:extra>0?extra:0,
+      channel:route.channel, to:route.recipient, day:day, retryable:!sent&&definitelyNotSent,
+      uncertain:!!(r&&r.uncertain)||(!sent&&!definitelyNotSent), error:(r&&(r.error||r.reason))||null};
   }catch(e){ return {error:String(e.message||e)}; }
 }
 // Auto-resolve: any approval still pending after 24h becomes Rejected (nothing sent to guest).
@@ -4031,7 +4124,11 @@ if(action==="email_recipients"){
       try{ _esc=await escalateStaleApprovals(req); }catch(e){ _esc={error:String(e&&e.message||e)}; }
       try{ _autorej=await autoRejectStaleApprovals(req); }catch(e){ _autorej={error:String(e&&e.message||e)}; }
       let _verify=null; try{ _verify=await runVictorVerifyReminder(new Date().toISOString()); }catch(e){ _verify={error:String(e&&e.message||e)}; }
-      return res.status(200).json({ok:true, ranAt:new Date().toISOString(), cleanup:_cleanup, muteClear:_muteClear, escalation:_esc, autoReject:_autorej, verifyReminder:_verify});
+      // Once-a-day digest of already-flagged, still-unanswered items. Own NX day key, so
+      // running every 5 minutes cannot repeat it.
+      let _digest=null; try{ _digest=await remindOpenEscalations(req); }catch(e){ _digest={error:String(e&&e.message||e)}; }
+      return res.status(200).json({ok:true, ranAt:new Date().toISOString(), cleanup:_cleanup, muteClear:_muteClear, escalation:_esc, autoReject:_autorej, verifyReminder:_verify,
+        openEscalations:openEscalationSummary(await getApprovals()), digest:_digest});
     }
     if(action==="tick"){
       const tok=String((req.query&&req.query.token)||""); const secret=(await getNotifyConfig()).secret;
@@ -4812,6 +4909,7 @@ if(action==="email_recipients"){
       if(typeof b.ownerrez_oauth_token==="string" && b.ownerrez_oauth_token.trim()!=="") next.ownerrez_oauth_token=b.ownerrez_oauth_token.trim();
       else if(b.ownerrez_oauth_token==="") delete next.ownerrez_oauth_token;
       if(b.primaryChannel==="sms"||b.primaryChannel==="email") next.primaryChannel=b.primaryChannel;
+      if(b.escalationDigest!==undefined) next.escalationDigest=!!b.escalationDigest;
       if(typeof b.smsGatewayUrl==="string"){ const t=b.smsGatewayUrl.trim(); if(t!=="") next.smsGatewayUrl=t; else delete next.smsGatewayUrl; }
       if(typeof b.smsTo==="string"){ const t=b.smsTo.trim(); if(t!=="") next.smsTo=t; else delete next.smsTo; }
       if(typeof b.smsBody==="string"){ if(b.smsBody.trim()!=="") next.smsBody=b.smsBody; else delete next.smsBody; }
@@ -4953,7 +5051,10 @@ if(action==="email_recipients"){
       const out={ smsProvider:cfg.smsProvider,smsConfigured:smsConnection(cfg), resendKey:!!cfg.apiKey, resendFromSet:!!cfg.from, victorEmailSet:!!cfg.to, victorEmail2Set:!!cfg.to2, escalateMins:cfg.escalateMins, escalation:escNow, approveSecretSet:!!cfg.secret,
         resendConfigured:!!(cfg.apiKey&&cfg.from&&cfg.to), requireApprovalAll:reqAll, ownerrez_oauth_set:!!cfg.ownerrezOauth, ownerrezOauthLen:(cfg.ownerrezOauth||"").length, oauthProbe, sendProbe, lastDecided, lastSend, webhook, _diag,
         messaging_enabled:!!stN.messaging_enabled,
-        counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
+        // Age-unbounded, unlike `escalation` above, which only covers its recency window.
+        // This is the number that must never silently read 0 while guests are waiting.
+        openEscalations:openEscalationSummary(apprN),
+        counts:{ pendingApprovals:apprN.filter(x=>x.status==="pending").length, openEscalations:apprN.filter(x=>x.status==="escalated").length, approvedBank:(await getApprovedBank()).length, webhookSeen:((redis&&await redis.get("parkside:wh_seen"))||[]).length, msgSeen:((redis&&await redis.get("parkside:msg_seen"))||[]).length },
         lastPoll: polledNow||await getPollStatus(),
         routes:cfg.routes, from:cfg.from||null, to:cfg.to||null, to2:cfg.to2||null, primaryChannel:cfg.primaryChannel, smsUrl:cfg.smsUrl||null, smsTo:cfg.smsTo||null, smsBody:cfg.smsBody||null, smsHeaders:cfg.smsHeaders||null, smsUser:cfg.smsUser||null, smsPassSet:!!cfg.smsPass,
         source:{ apiKey: raw.resendApiKey?"ui":(process.env.RESEND_API_KEY?"env":null), from: raw.from?"ui":(process.env.RESEND_FROM?"env":null), to: raw.victorEmail?"ui":(process.env.VICTOR_EMAIL?"env":null), secret: raw.approveSecret?"ui":(process.env.APPROVE_LINK_SECRET?"env":null) } };
@@ -4970,7 +5071,8 @@ if(action==="email_recipients"){
       if((req.headers["x-app-password"]||"")!==(process.env.APP_PASSWORD||"")) return res.status(401).json({error:"unauthorized"});
       const cfg=await getNotifyConfig();
       const readiness=await smsReadiness(cfg);const recipientSet=staffRecipients(cfg).length>0;
-      return res.status(200).json({...readiness,unconfirmedBackups:(await getApprovals()).filter(x=>x.backupAskUncertain).map(x=>({label:x.smsLabel||x.id,at:x.escalatedTo2At,error:x.backupAskError,messageIds:x.backupAskMessageIds||[]})),generalRecipient:cfg.smsTo,provider:cfg.smsProvider,configured:readiness.smsConfigured&&recipientSet,connectionSet:readiness.smsConfigured,recipientSet,victorSet:!!cfg.smsTo,roundTrip:(redis?await redis.get("parkside:sms_roundtrip"):_smsMemory.get("parkside:sms_roundtrip"))||null});
+      const _appr=await getApprovals();
+      return res.status(200).json({...readiness,unconfirmedBackups:_appr.filter(x=>x.backupAskUncertain).map(x=>({label:x.smsLabel||x.id,at:x.escalatedTo2At,error:x.backupAskError,messageIds:x.backupAskMessageIds||[]})),generalRecipient:cfg.smsTo,provider:cfg.smsProvider,configured:readiness.smsConfigured&&recipientSet,connectionSet:readiness.smsConfigured,recipientSet,victorSet:!!cfg.smsTo,escalationDigest:cfg.escalationDigest!==false,openEscalations:openEscalationSummary(_appr),roundTrip:(redis?await redis.get("parkside:sms_roundtrip"):_smsMemory.get("parkside:sms_roundtrip"))||null});
     }
 
     res.status(400).json({error:"unknown action"});
@@ -4984,6 +5086,6 @@ module.exports.__calls={hookBody,phoneDigits,recordingSidOf};
 module.exports.onDutyActivePct=onDutyActivePct;
 module.exports.timeOffForDate=timeOffForDate;
 
-module.exports.__routing={notificationRoutes,validateNotificationRoutes,routeFor,getNotifyConfig,setNotifyRaw,getNotifyRaw,sendVictorApprovalEmail,sendVictorEscalationSms,sendApprovalEmail,escalateStaleApprovals,setApprovals,getApprovals,authorizedSmsNumbers};
+module.exports.__routing={notificationRoutes,validateNotificationRoutes,routeFor,getNotifyConfig,setNotifyRaw,getNotifyRaw,sendVictorApprovalEmail,sendVictorEscalationSms,sendApprovalEmail,escalateStaleApprovals,setApprovals,getApprovals,authorizedSmsNumbers,openEscalationList,openEscalationSummary,remindOpenEscalations,ESC_DIGEST_MAX_ITEMS};
 
 module.exports.__staffSms={employeeSms,staffSms,sendStaffSms,smsReadiness,staffRecipients};

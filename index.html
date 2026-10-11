@@ -452,6 +452,7 @@
           <div class="muted" style="margin-top:8px">Saving Twilio details does not change the active service. Twilio activation requires approval, a connected owned number and enrolled recipients. No automatic gateway fallback.</div>
           <div id="smsTransportMsg" role="status" aria-live="polite" style="margin-top:8px;overflow-wrap:anywhere"></div>
           <div id="smsUnconfirmed" role="status" style="margin-top:8px;color:#fbbf24;overflow-wrap:anywhere"></div>
+          <div id="smsOpenEsc" role="status" aria-live="polite" style="margin-top:8px;overflow-wrap:anywhere;white-space:pre-wrap"></div>
           <div id="smsRoundTrip" style="margin-top:8px;overflow-wrap:anywhere"></div>
         </fieldset>
         <div id="smsFields" style="display:grid;gap:10px;margin-top:6px">
@@ -3633,12 +3634,28 @@ function smsConnectionInputs(){return {twilioAccountSid:document.getElementById(
 function smsInputsSaved(){return SMS_TRANSPORT && document.getElementById('smsProviderChoice').value===SMS_TRANSPORT.provider && JSON.stringify(smsConnectionInputs())===JSON.stringify(SMS_CONNECTION_SAVED) && !document.getElementById('twToken').value && document.getElementById('nSmsTo').value.trim()===SMS_TRANSPORT.generalRecipient;}
 async function smsRequest(action,body){const r=await fetch(api(action),{method:body?'POST':'GET',headers:{'Content-Type':'application/json','x-app-password':PW,'x-gavin-password':GPW||''},...(body?{body:JSON.stringify(body)}:{})});const j=await r.json();if(!r.ok||j.ok===false)throw Error(j.error||j.reason||'Request failed');return j;}
 async function loadSmsTransport(refresh=false){
-  try{const j=await smsRequest('sms_status');const first=!SMS_TRANSPORT;SMS_TRANSPORT=j;
+  try{const j=await smsRequest('sms_status');const first=!SMS_TRANSPORT;const prevProvider=SMS_TRANSPORT?SMS_TRANSPORT.provider:null;SMS_TRANSPORT=j;
     document.getElementById('smsActive').textContent='Active text service: '+j.provider+(j.provider==='twilio'?' · '+j.twilio.from:'');
     if(first){document.getElementById('smsProviderChoice').value=j.provider;document.getElementById('twAccount').value=j.twilio.accountSid||'';document.getElementById('twFrom').value=j.twilio.from||'';document.getElementById('twService').value=j.twilio.serviceSid||'';SMS_CONNECTION_SAVED=smsConnectionInputs();}
+    // The dropdown used to sync on first load ONLY, so a tab opened before a provider
+    // switch kept showing the old service for the rest of its life — it read "SMS Gateway"
+    // after the 2026-10-11 Twilio cutover and looked like the switch had failed. Resync it
+    // whenever the operator has not deliberately picked something else. Never while
+    // SMS_BUSY: the post-activation refresh runs inside smsUiWork, and the select stays
+    // enabled, so resyncing there would overwrite a choice made mid-request.
+    else if(!SMS_BUSY){const _sel=document.getElementById('smsProviderChoice');if(_sel&&_sel.value===prevProvider)_sel.value=j.provider;}
     document.getElementById('twTokenState').textContent=j.twilio.authTokenSet?'(saved)':'(not set)';
     document.getElementById('twConsent').innerHTML=(j.smsRecipients||[]).map(x=>'<div style="margin:8px 0;border-top:1px solid var(--line);padding-top:8px"><b>'+esc(x.phone)+'</b> · '+esc(x.consentStatus)+'<br>'+(x.optedInAt?'START received: '+esc(x.optedInAt)+'<br>':'')+'<button class="ghost" type="button" onclick="syncSmsConsent(\''+esc(x.phone)+'\')">Check enrollment</button> '+(!x.ready?'<button class="ghost" type="button" onclick="verifySmsConsent(\''+esc(x.phone)+'\')">Verify employee identity</button>':'')+'</div>').join('');
-    document.getElementById('smsUnconfirmed').textContent=(j.unconfirmedBackups||[]).map(x=>'Backup '+x.label+': send outcome unconfirmed; automatic resend held. Check Twilio logs before retrying. '+(x.messageIds||[]).join(', ')).join('\n');const round=j.roundTrip;document.getElementById('smsRoundTrip').textContent=round?('Latest reply test: '+round.provider+' · '+round.at+' · '+round.from+' · '+round.testText+' · acknowledgment '+(round.replyAccepted?'accepted':'not accepted')):'No two-way reply test recorded yet. After switching, text TEST VERIFY01 from the enrolled staff phone to the Twilio number, then refresh.';
+    document.getElementById('smsUnconfirmed').textContent=(j.unconfirmedBackups||[]).map(x=>'Backup '+x.label+': send outcome unconfirmed; automatic resend held. Check Twilio logs before retrying. '+(x.messageIds||[]).join(', ')).join('\n');
+    // Age-unbounded open count. The in-window escalation sweep reads 0 once items pass its
+    // recency guard, which is how five unanswered guests stayed invisible for up to 7 days.
+    (function(){const _oe=j.openEscalations||{count:0,items:[]};const _el=document.getElementById('smsOpenEsc');if(!_el)return;
+      if(!_oe.count){_el.style.color='';_el.textContent='No guest questions are waiting for an answer.';return;}
+      _el.style.color='#fbbf24';
+      _el.textContent='Still waiting for an answer: '+_oe.count+(_oe.oldestAgeH!=null?(' · oldest '+_oe.oldestAgeH+'h'):'')+'\n'
+        +(_oe.items||[]).slice(0,8).map(x=>'  '+x.label+([x.unit,x.guest].filter(Boolean).length?(' - '+[x.unit,x.guest].filter(Boolean).join(' - ')):'')+' — '+(x.ageH!=null?x.ageH+'h':'age unknown')+(x.complaint?' (complaint)':'')).join('\n')
+        +((_oe.items||[]).length>8?('\n  +'+((_oe.items||[]).length-8)+' more'):'')
+        +(j.escalationDigest===false?'\n(Daily reminder is turned off.)':'');})();const round=j.roundTrip;document.getElementById('smsRoundTrip').textContent=round?('Latest reply test: '+round.provider+' · '+round.at+' · '+round.from+' · '+round.testText+' · acknowledgment '+(round.replyAccepted?'accepted':'not accepted')):'No two-way reply test recorded yet. After switching, text TEST VERIFY01 from the enrolled staff phone to the Twilio number, then refresh.';
     if(refresh)document.getElementById('smsTransportMsg').textContent='Service status refreshed.';
   }catch(e){document.getElementById('smsTransportMsg').textContent=e.message;}
 }
