@@ -146,7 +146,7 @@ test("visible reconnect restores unchanged saved coordinates with read-only comm
   assert.equal(h.frameValid, true); assert.equal(h.setup.xyReady, true); assert.equal(h.setup.probeLocked, true);
   assert.deepEqual([h.setup.xyOriginMPos.X, h.setup.xyOriginMPos.Y, h.setup.zOriginMPos], [-75, -49, -45]);
   assert.equal(h.setup.probeLockedAt, probe.lockedAt); // reconnect must not fake a new bit touch
-  assert(f.wire.every(command => command === "?" || command === "$#" || command === "$$"), JSON.stringify(f.wire));
+  assert(f.wire.every(command => command === "?" || command === "$#" || command === "$G" || command === "$$"), JSON.stringify(f.wire));
   assert.equal((await f.request("/job/resume", {})).status, 500);
   assert.equal(JSON.parse(readFileSync(f.env.CNC_FRAME_INCIDENT)).latched, false);
 });
@@ -448,7 +448,7 @@ test("Stop restores manual positioning without a reconnect click, but never vali
 test("startup exposes manual positioning after a recorded stop without requiring reconnect", async t => {
  const f=await fixture(t,"0,0,0");const h=(await f.request("/health")).body;
  assert.equal(h.frameRecovery.active,true);assert.equal(h.frameValid,false);
- assert(f.wire.every(c=>c==='?'||c==='$#'||c==='$$'));
+ assert(f.wire.every(c=>c==='?'||c==='$#'||c==='$G'||c==='$$'));
  assert.equal((await f.request("/jog/z",{distanceMm:1,feedMmPerMin:100,manualPositioning:true})).status,200);
 });
 

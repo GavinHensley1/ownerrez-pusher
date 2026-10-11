@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { analyzeProgram } from "./cnc-program.mjs";
+import woodProofCam from "../api/cnc-wood-proof.cjs";
 
 export function validateSavedProgram(raw) {
   if (!raw || typeof raw !== "object" || raw.version !== 1) throw new Error("Saved CNC program is unsupported");
@@ -10,12 +11,14 @@ export function validateSavedProgram(raw) {
   for (const field of ["stockWidthMm", "stockHeightMm", "stockReserveMm"]) {
     if (!Number.isFinite(Number(context[field]))) throw new Error(`Saved CNC program ${field} is invalid`);
   }
+  const woodProof = context.woodProof ? woodProofCam.validatePlacement(context.woodProof, context) : null;
+  if (woodProof) woodProofCam.verifyProgram(gcode, context);
   return {
     version: 1,
     jobId: String(raw.jobId || ""),
     capturedAt: String(raw.capturedAt || new Date().toISOString()),
     state: String(raw.state || "accepted").slice(0, 24),
-    context: { stockWidthMm: Number(context.stockWidthMm), stockHeightMm: Number(context.stockHeightMm), stockReserveMm: Number(context.stockReserveMm), manualRouter, operation: String(context.operation || ""), material: String(context.material || ""), camProvider: String(context.camProvider || ""), camCertification: String(context.camCertification || ""), camSourceHash: String(context.camSourceHash || ""), camAuditHash: String(context.camAuditHash || ""), camStage: String(context.camStage || ""), camTool: String(context.camTool || ""), certifiedLibraryId: String(context.certifiedLibraryId || ""), allowSacrificialCutThrough: context.allowSacrificialCutThrough === true, sacrificialBackingConfirmed: context.sacrificialBackingConfirmed === true, profileDepthMm: context.profileDepthMm !== null && context.profileDepthMm !== undefined && Number.isFinite(Number(context.profileDepthMm)) ? Number(context.profileDepthMm) : null },
+    context: { woodProof, stockWidthMm: Number(context.stockWidthMm), stockHeightMm: Number(context.stockHeightMm), stockReserveMm: Number(context.stockReserveMm), manualRouter, operation: String(context.operation || ""), material: String(context.material || ""), camProvider: String(context.camProvider || ""), camCertification: String(context.camCertification || ""), camSourceHash: String(context.camSourceHash || ""), camAuditHash: String(context.camAuditHash || ""), camStage: String(context.camStage || ""), camTool: String(context.camTool || ""), certifiedLibraryId: String(context.certifiedLibraryId || ""), allowSacrificialCutThrough: context.allowSacrificialCutThrough === true, sacrificialBackingConfirmed: context.sacrificialBackingConfirmed === true, profileDepthMm: context.profileDepthMm !== null && context.profileDepthMm !== undefined && Number.isFinite(Number(context.profileDepthMm)) ? Number(context.profileDepthMm) : null },
     analysis: { bounds: analysis.bounds, maxSpindleRpm: analysis.maxSpindleRpm, spindleMode: analysis.spindleMode, executableLines: analysis.executableLines },
     gcode,
   };

@@ -89,6 +89,39 @@ const startDaemon = (dir, grbl, socketPath) => spawn(process.execPath, [new URL(
 
 const PLATE_MM = 14.19;
 
+test('puck confirmation preserves matching calibration and changed height cannot mix bed/stock references', async (t) => {
+  const dir=mkdtempSync(join(tmpdir(),'cnc-puck-confirm-')),socketPath=join(dir,'cnc.sock'),grbl=await makeGrbl();
+  let child=startDaemon(dir,grbl,socketPath),stderr='';child.stderr.on('data',c=>stderr+=c);
+  t.after(async()=>{child.kill('SIGTERM');await new Promise(r=>child.once('exit',r));await grbl.close();});
+  await waitFor(()=>existsSync(socketPath));
+  await waitFor(async()=>{const h=(await unixRequest(socketPath,'/health')).value;return h.connected&&!h.moving;});
+  assert.equal((await unixRequest(socketPath,'/zero/xy',{confirmNewProject:true})).status,200,stderr);
+  grbl.setProbe({startZ:0,targetZ:-22});
+  assert.equal((await unixRequest(socketPath,'/probe/bed',{thicknessMm:PLATE_MM,maxSearchMm:73,confirmReprobe:true})).status,200,stderr);
+  const before=(await unixRequest(socketPath,'/health')).value.setup,zeroWrites=grbl.zeroWrites();
+  const mismatch=await unixRequest(socketPath,'/probe/stock',{thicknessMm:12,maxSearchMm:73});
+  assert.equal(mismatch.status,500);assert.match(mismatch.value.error,/mixed-puck/);
+  assert.equal(grbl.zeroWrites(),zeroWrites);assert.deepEqual((await unixRequest(socketPath,'/health')).value.setup,before);
+  grbl.setProbe({startZ:10,targetZ:-8});
+  assert.equal((await unixRequest(socketPath,'/probe/stock',{thicknessMm:PLATE_MM,maxSearchMm:73})).status,200,stderr);
+  const calibrated=(await unixRequest(socketPath,'/health')).value.setup;
+  const xyFile=readFileSync(join(dir,'xy.json'),'utf8');
+  assert.equal((await unixRequest(socketPath,'/probe/plate',{thicknessMm:PLATE_MM})).status,200);
+  assert.deepEqual((await unixRequest(socketPath,'/health')).value.setup,calibrated,'same-height confirmation must not discard setup');
+  const changed=await unixRequest(socketPath,'/probe/plate',{thicknessMm:12});
+  assert.equal(changed.status,200);assert.equal(changed.value.setup.xyReady,true);
+  for(const key of ['bedProbeReady','stockProbeReady','probeReady','probeLocked','materialReady'])assert.equal(changed.value.setup[key],false,key);
+  assert.equal(readFileSync(join(dir,'xy.json'),'utf8'),xyFile);
+  const invalidated=JSON.parse(readFileSync(join(dir,'probe.json'),'utf8'));
+  assert.equal(invalidated.invalidated,true);assert.equal(invalidated.probeThickness,PLATE_MM,'keep prior measurement as evidence');
+  assert.equal((await unixRequest(socketPath,'/probe/stock',{thicknessMm:12,maxSearchMm:73})).status,500);
+  child.kill('SIGTERM');await new Promise(r=>child.once('exit',r));
+  child=startDaemon(dir,grbl,socketPath);child.stderr.on('data',c=>stderr+=c);
+  await waitFor(async()=>{try{const h=(await unixRequest(socketPath,'/health')).value;return h.connected&&!h.moving;}catch{return false;}});
+  const restarted=(await unixRequest(socketPath,'/health')).value;
+  assert.equal(restarted.setup.materialReady,false);assert.equal(restarted.setup.probeLocked,false);assert.equal(restarted.plate.thicknessMm,12);assert.equal(restarted.plate.confirmed,true);
+});
+
 test("the configured plate thickness is honoured end to end and never silently defaulted", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "cnc-plate-flow-")), socketPath = join(dir, "cnc.sock"), grbl = await makeGrbl();
   const child = startDaemon(dir, grbl, socketPath);

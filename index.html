@@ -518,6 +518,19 @@
       <button id="cncPrepareMetalBtn" onclick="cncPrepareMetalJob()" style="display:none">Prepare raised-metal copy</button>
     </div>
 
+    <div id="cncWoodProofCard" style="display:none;margin-top:14px;padding:12px;border:1px solid #2f8f62;border-radius:10px">
+      <b>Wood proof · exact loaded files</b>
+      <p class="muted" style="font-size:12px">Test Rough (W03010) and Finish (W01015-SPE-X) on wood without changing either program. The original metal job stays separate. No cutout or release.</p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+        <label style="font-size:12px">Left-edge clearance (mm)<br><input id="cncWoodProofLeft" type="number" min="0" step="0.1" value="5" style="width:120px"></label>
+        <label style="font-size:12px">Front-edge clearance (mm)<br><input id="cncWoodProofFront" type="number" min="0" step="0.1" value="5" style="width:120px"></label>
+        <button id="cncWoodProofSaveBtn" onclick="cncSaveWoodProof(this)">Create wood proof</button>
+        <button id="cncWoodProofOriginalBtn" class="ghost" style="display:none" onclick="cncOpenWoodProofSource()">Open original metal job</button>
+      </div>
+      <div id="cncWoodProofStatus" role="status" style="margin-top:10px;font-size:12px"></div>
+      <div id="cncWoodProofDiagram" style="margin-top:10px"></div>
+      <p class="muted" style="font-size:12px;margin-bottom:0">X/Y zero stays at the board’s actual front-left corner. Clearances include the cutter, not just the centerline. Saving placement never moves the machine or resets your probes/zero.</p>
+    </div>
     <div style="margin-top:14px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:12px">
       <div style="font-weight:600;margin-bottom:8px">Job setup</div>
       <div style="font-size:11px;color:#93a2b8;font-weight:600;letter-spacing:.03em;text-transform:uppercase;margin-bottom:2px">Design size &mdash; drives the 3D design (set these first, then Load)</div><div class="muted" style="font-size:11px;margin-bottom:8px">You set the <b>max depth</b> (the deepest cut). The software reads the image and decides how deep each part is, up to that max &mdash; the deepest point hits your number, everything else is proportionally shallower.</div>
@@ -542,7 +555,7 @@
       <div style="display:flex;gap:12px;flex-wrap:wrap">
         <label class="muted" style="font-size:12px">Material<br>
           <select id="cncMat" onchange="cncSaveSetup()">
-            <option>C752 nickel silver</option><option>Aluminum / soft metal</option><option>Hardwood</option><option>Softwood / pine</option><option>Acrylic</option><option>Other</option>
+            <option>C752 nickel silver</option><option>Wood</option><option>Aluminum / soft metal</option><option>Hardwood</option><option>Softwood / pine</option><option>Acrylic</option><option>Other</option>
           </select></label>
         <label class="muted" style="font-size:12px">Carve type<br>
           <select id="cncType" onchange="cncSaveSetup()"><option>3D relief</option><option>2D outline</option></select></label>
@@ -550,7 +563,7 @@
           <select id="cncBit" onchange="cncSaveSetup()"><option>30&deg; V-bit 0.1mm</option><option>3.175mm ball nose</option><option>3.175mm flat end mill</option></select></label>
         <label class="muted" style="font-size:12px">Z-probe puck thickness (mm) — measure yours<br>
           <input id="cncProbeThickness" type="number" min="5" max="30" step="0.01" value="14.19" onchange="cncSaveProbeThickness()" style="width:120px" aria-label="Measured Z-probe puck thickness in millimetres">
-          <span class="muted" style="display:block;font-size:11px;margin-top:3px">Genmitsu ships 14, 14.19 and 20.17&nbsp;mm pucks. An error here shifts every cut depth by the same amount and will not show up in the measured stock thickness.</span></label>
+          <button id="cncConfirmPlateBtn" type="button" class="ghost cncCommandBtn" onclick="cncConfirmPlate(this)" style="display:block;margin-top:5px">Save &amp; confirm puck thickness</button><span class="muted" style="display:block;font-size:11px;margin-top:3px">Use your confirmed puck height. Saving confirms this value without moving the machine; an unchanged value preserves the existing probes.</span></label>
         <label class="muted" style="font-size:12px">Speed<br>
           <select id="cncSpeed" onchange="cncSaveSetup()"><option>Conservative (recommended)</option><option>Normal</option></select></label>
       </div>
@@ -579,7 +592,7 @@
       </div>
       <div style="background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:14px;text-align:center">
         <div style="font-weight:600;margin-bottom:8px">2 &middot; Review machining geometry <span class="muted" style="font-weight:400">&mdash; wood may generate here; metal continues through certified Kiri:Moto CAM</span></div>
-        <button onclick="cncLoad()" style="font-size:15px;padding:12px 22px">Review geometry / CAM setup</button>
+        <button id="cncGeometryBtn" onclick="cncLoad()" style="font-size:15px;padding:12px 22px">Review geometry / CAM setup</button>
       </div>
     </div>
 
@@ -636,13 +649,13 @@
         <button id="cncProbeLockBtn" class="cncCommandBtn" onclick="cncLockProbe(this)">Lock probe calibration</button>
         <button id="cncStockZZeroBtn" class="cncCommandBtn" onclick="cncSetStockZZero(this)" style="display:none">Advanced manual stock Z zero</button>
         <button id="cncProbeUnlockBtn" class="cncCommandBtn" onclick="cncUnlockProbe(this)">Unlock calibration</button>
-        <button id="cncProbeRecoverBtn" class="cncCommandBtn" onclick="cncMachineAction('recover_probe',{},this)">Retract from probe</button>
+        <button id="cncProbeRecoverBtn" class="cncCommandBtn" onclick="cncRecoverProbe(this)">Retract from probe</button>
         <span id="cncMeasuredStock" class="muted" style="font-size:11.5px">Thickness not measured.</span>
         <span id="cncAbsoluteReference" class="muted" style="font-size:11.5px;display:block;margin-top:4px"></span>
       </div>
       <div id="cncSurfaceProofCard" style="margin-top:11px;padding:10px 11px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(0,0,0,.18)">
         <div style="font-size:12.5px;font-weight:600;margin-bottom:4px">Surface-contact proof <span class="muted" style="font-weight:400">&mdash; required before any cut</span></div>
-        <div class="muted" style="font-size:11.5px;margin-bottom:7px">The controller reporting work Z&nbsp;0 only means the probe arithmetic was self-consistent. This check measures the surface again <b>without the plate</b> &mdash; clip on the conductive stock, plate removed &mdash; so a wrong plate thickness shows up as a disagreement here instead of as a cut that is too deep.</div>
+        <div id="cncSurfaceProofHelp" class="muted" style="font-size:11.5px;margin-bottom:7px">The controller reporting work Z&nbsp;0 only means the probe arithmetic was self-consistent. This check measures the surface again <b>without the plate</b> &mdash; clip on the conductive stock, plate removed &mdash; so a wrong plate thickness shows up as a disagreement here instead of as a cut that is too deep.</div>
         <button id="cncVerifySurfaceBtn" class="cncCommandBtn" onclick="cncVerifySurface('conductive-stock-touch',this)" disabled>Verify surface contact (measured touch)</button>
         <button id="cncAttestSurfaceBtn" class="cncCommandBtn" onclick="cncVerifySurface('operator-attested-feeler',this)" disabled>Non-conductive stock &middot; attest by feel</button>
         <span id="cncSurfaceProofState" class="muted" style="font-size:11.5px;display:block;margin-top:6px">Not verified.</span>
@@ -679,7 +692,7 @@
     </div>
     <div id="cncPanelPlan" style="margin-top:14px" class="muted">Set a Finished width to see the panel plan.</div>
     <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-      <button onclick="cncGeneratePanels()" style="font-size:15px;padding:10px 18px">&#11015; Generate panel files</button>
+      <button id="cncGeneratePanelsBtn" onclick="cncGeneratePanels()" style="font-size:15px;padding:10px 18px">&#11015; Generate panel files</button>
       <span id="cncPanelStatus" class="muted" style="font-size:12px"></span>
     </div>
     <div id="cncPanelOut" style="margin-top:12px"></div>
@@ -1848,6 +1861,7 @@ function cncRenderPositioning(health,baseBlocked){
   if(!box||!title||!detail||!button)return info;
   if(info.idle&&!(health.frameRecovery||{}).requiresBufferDiscard&&health.controllerProtection&&health.controllerProtection.ready!==true){box.dataset.state='ready';title.textContent='Manual positioning ready · cutting protection needs verification';detail.textContent='Manual movement and X/Y zero remain available. Cutting is blocked: '+String(health.controllerProtection.reason||'Controller protection is unverified.');button.textContent='Restore controller protection';button.disabled=!!baseBlocked;button.onclick=function(){cncRecoverController(button);};return info;}
   if(health&&health.frameValid===false&&(health.frameRecovery||{}).active&&!(health.frameRecovery||{}).requiresBufferDiscard&&info.idle){box.dataset.state='ready';title.textContent='Manual positioning ready';detail.textContent='You can move the tool and set zero. Saved records are retained; only starting or resuming G-code requires a verified cutting setup.';button.textContent='Manual controls available';button.disabled=true;button.onclick=null;return info;}
+  if(!baseBlocked&&!(health.frameRecovery||{}).requiresBufferDiscard&&info.state==='Alarm'&&info.feed===0&&info.spindle===0&&/^PZ?$/.test(info.pins.split('').sort().join(''))){box.dataset.state='paused';title.textContent='Probe contact held · recovery available';detail.textContent='Switch the external router OFF and keep the puck in place. Use Retract from probe to lift 3 mm, clear P/Z contact and restore hard-limit protection. This does not resume a cut.';button.textContent='Retract from probe';button.disabled=false;button.onclick=function(){cncRecoverProbe(button);};return info;}
   if(health&&health.frameValid===false&&(health.frameRecovery||{}).active&&!(health.frameRecovery||{}).requiresBufferDiscard&&info.state==='Alarm'){box.dataset.state='paused';title.textContent=info.rearYLimit?'Rear Y limit reached · cut stopped':'Controller alarm · cut stopped';detail.textContent='Saved coordinates are retained. Clear the physical obstruction before recovery. This will not resume a cut.';button.textContent=info.rearYLimit?'Release rear Y limit':'Unlock stopped alarm';button.disabled=!!baseBlocked||(!info.rearYLimit&&!!info.pins);button.onclick=function(){if(info.rearYLimit)cncRecoverRearYLimit(button);else cncRecoverController(button);};return info;}
   if(info.recoverable||((info.idle||(info.state==='Alarm'&&info.feed===0&&info.spindle===0&&!info.pins))&&(health.frameRecovery||{}).requiresBufferDiscard)){box.dataset.state='paused';title.textContent='Controller connected · '+info.state;detail.textContent='The controller is stopped, but old cutting commands have not been verified discarded. Reset clears them; it does not resume the cut. Saved zeros and probes are retained and checked before reuse.';button.textContent='Reset held controller · enable positioning';button.disabled=!!baseBlocked;button.onclick=function(){cncRecoverController(button);};return info;}
   if(health&&(health.frameValid===false||!health.connected)){var recovery=health.frameRecovery||{};box.dataset.state='paused';title.textContent=!health.connected?'Controller offline · reconnecting':health.reconnecting?'Controller connected · checking state':'Controller connected · '+info.state;detail.textContent=!health.connected?'Manual movement needs a live controller connection. Saved zeros and probes are not what is blocking it.':recovery.message||'Saved zeros and probes are retained. Reconnect checks the controller without resetting coordinates, moving an axis, or resuming a cut. Recalibrate only axes that cannot be verified.';button.textContent='Retry connection';
@@ -1876,7 +1890,7 @@ async function cncRefreshMachineState(){
   CNC=(j&&j.cnc)||{jobs:[],config:{}}; if(!CNC.jobs)CNC.jobs=[]; if(!CNC.config)CNC.config={}; var current=cncCurrentJob(); renderCncJobs(); renderCncActiveSelect(); if(current&&current.activeStage!==previousStage)cncRenderStages(current); cncRenderAgent(current); return CNC;
 }
 async function cncQueueMachineAction(action,extra,button){
-  var setupActions=['reconnect_verify','jog','probe_bed','probe_stock','probe_tool','restore_probe','lock_probe','unlock_probe','recover_probe','recover_controller','recover_rear_y_limit','restore_xy','zero_xy','zero_z'];
+  var setupActions=['reconnect_verify','jog','probe_bed','probe_stock','probe_tool','set_plate','restore_probe','lock_probe','unlock_probe','recover_probe','recover_controller','recover_rear_y_limit','restore_xy','zero_xy','zero_z'];
   var job=cncCurrentJob();
   if(!job&&setupActions.indexOf(action)!==-1)job=await cncEnsureJob();
   if(!job){alert('Create or select a job first.');return null;}
@@ -1945,7 +1959,8 @@ function cncPopulateSetup(job){
   var tbh=document.getElementById('cncTabH'); if(tbh) tbh.value=(job.tabHeight&&job.tabHeight!=='0')?job.tabHeight:'';
   cncCutoutHint();
   cncSetupHint();
-  var metal=cncIsMetalJob(job),box=document.getElementById('cncMetalContract'),copy=document.getElementById('cncPrepareMetalBtn'),depth=document.getElementById('cncReliefD');if(box)box.style.display=metal?'block':'none';if(copy)copy.style.display=job.hasCreative&&!metal?'inline-block':'none';if(depth){depth.disabled=metal&&!cncMetalProbeReady();depth.placeholder=metal&&!cncMetalProbeReady()?'Probe metal stock first':'Enter approved depth';}
+  cncRenderWoodProof(job, true);
+  var metal=cncIsMetalJob(job),box=document.getElementById('cncMetalContract'),copy=document.getElementById('cncPrepareMetalBtn'),depth=document.getElementById('cncReliefD');if(box)box.style.display=metal?'block':'none';if(copy)copy.style.display=job.hasCreative&&!metal?'inline-block':'none';if(depth){depth.disabled=!!job.woodProof||(metal&&!cncMetalProbeReady());depth.placeholder=metal&&!cncMetalProbeReady()?'Probe metal stock first':'Enter approved depth';}
 }
 function cncSetupHint(){
   var h=document.getElementById('cncSetupHint'); if(!h) return;
@@ -1954,11 +1969,14 @@ function cncSetupHint(){
   var p=CNC_MATS[mat]||CNC_MATS['Other']; var cons=!/Normal/.test(spd);
   var feed=Math.round(p.feed*(cons?0.6:1)), step=+(p.step*(cons?0.7:1)).toFixed(3), depth=(CNC.config&&CNC.config.reliefDepth)||p.depth;
   var szv=(document.getElementById('cncSizeVal')||{}).value||'100', szu=(document.getElementById('cncSizeUnit')||{}).value||'mm';
+  var setupJob=cncCurrentJob();
+  if(setupJob&&setupJob.certifiedLibraryId==='rambo-buckle-c752-v2'){h.textContent=setupJob.woodProof?'Wood proof · W03010 Rough → W01015-SPE-X Finish · exact source files, manual router Rough 10,600 RPM (gear 2), Finish 14,950 RPM (gear 3).':'Certified C752 job · W03010 Rough → W01015-SPE-X Finish · manual router Rough 10,600 RPM (gear 2), Finish 14,950 RPM (gear 3).';return;}
   if(/C752 nickel silver/i.test(mat))h.innerHTML='<b>C752 nickel silver · raised relief</b> &middot; first tool: Whiteside RU2100 1/4″ two-flute upcut. Depth is unavailable until the actual blank is probed; high artwork stays at stock Z0.';
   else h.innerHTML='<b>'+cncEsc(mat)+'</b> &middot; '+(cons?'conservative':'normal')+' feeds: ~'+feed+' mm/min, '+step+' mm per Z pass. X/Y zero and Z probing are separate guarded buttons below.';
 }
 async function cncSaveSetup(){
   var job=cncCurrentJob(); if(!job){ job=await cncEnsureJob(); if(!job) return; }
+  if(job.woodProof){cncPopulateSetup(job);return;}
   var sv=parseFloat((document.getElementById('cncSizeVal')||{}).value)||100;
   var su=(document.getElementById('cncSizeUnit')||{}).value||'mm';
   var mm=(su==='in')? sv*25.4 : sv;
@@ -1983,6 +2001,35 @@ async function cncSaveSetup(){
 function cncSetActive(id){ CNC_CUR=id||null; cncRenderActive(); }
 async function cncNewJob(){ var p=prompt('New job — project name?','Belt Buckle'); if(p===null) return; var material=String((document.getElementById('cncMat')||{}).value||'').trim(); var j=await cncPost({addJob:{project:(p||'Job'),material:material}}); if(j&&j.cnc){ CNC=j.cnc; CNC_CUR=CNC.jobs[CNC.jobs.length-1].id; renderCncJobs(); await cncRenderActive(); } }
 async function cncPrepareMetalJob(){var source=cncCurrentJob();if(!source||!source.hasCreative){alert('Choose the completed buckle job with its artwork first.');return;}if(!confirm('Create a new raised-metal buckle job from this artwork?\n\nThis copies only the artwork and dimensions. It does not copy wood G-code, depth, probes, zeroes, checkpoints, or machine commands. Metal relief depth stays locked until the actual C752 blank is probed.'))return;var r=await cncPost({prepareMetalJob:{sourceJobId:source.id}});if(!r||!r.cnc||r.error){alert((r&&r.error)||'Could not prepare the metal job');return;}CNC=r.cnc;CNC_CUR=String(r.jobId||'');renderCncJobs();await cncRenderActive();var st=document.getElementById('cncRunStatus');if(st)st.textContent='Raised-metal job prepared. Artwork is copied; no G-code or machine command was created.';}
+function cncRenderWoodProof(job, populate){
+  var card=document.getElementById('cncWoodProofCard');if(!card)return;
+  var supported=!!(job&&(job.woodProof||job.certifiedLibraryId==='rambo-buckle-c752-v2')),proof=job&&job.woodProof;
+  card.style.display=supported?'':'none';
+  ['cncMat','cncType','cncBit','cncSpeed','cncSizeVal','cncSizeUnit','cncPieceH','cncReliefD','cncRelSrc','cncInvert','cncFlatten','cncCutout','cncThick','cncTabs','cncTabH','cncCreative','cncGcode','cncGeometryBtn','cncGeneratePanelsBtn'].forEach(function(id){var e=document.getElementById(id);if(e&&(proof||populate))e.disabled=!!proof||(id==='cncReliefD'&&cncIsMetalJob(job)&&!cncMetalProbeReady());});
+  if(!supported)return;
+  if(proof||job.certifiedLibraryId==='rambo-buckle-c752-v2'){var bitSelect=document.getElementById('cncBit'),certs={};try{certs=JSON.parse(job.camCertificates||'{}');}catch(e){}var actualTool=String((certs[job.activeStage]||{}).tool||job.camTool||'');if(bitSelect&&actualTool){bitSelect.innerHTML='<option>'+cncEsc(actualTool)+'</option>';bitSelect.value=actualTool;}}
+  if(populate){document.getElementById('cncWoodProofLeft').value=proof?proof.leftInsetMm:5;document.getElementById('cncWoodProofFront').value=proof?proof.frontInsetMm:5;}
+  var h=(CNC.agent&&CNC.agent.health)||{},busy=CNC_COMMAND_IN_FLIGHT||!!h.moving||(CNC.jobs||[]).some(function(j){return ['queued','accepted','running','paused'].includes(String(j.agentState||''));});
+  var btn=document.getElementById('cncWoodProofSaveBtn');btn.textContent=proof?'Save placement · return to Rough':'Create wood proof';btn.disabled=busy;
+  document.getElementById('cncWoodProofLeft').disabled=busy;document.getElementById('cncWoodProofFront').disabled=busy;
+  document.getElementById('cncWoodProofOriginalBtn').style.display=proof?'':'none';
+  var out=document.getElementById('cncWoodProofStatus'),diagram=document.getElementById('cncWoodProofDiagram'),m=cncMach();
+  if(!proof){out.textContent='Current board: '+m.X.toFixed(1)+' × '+m.Y.toFixed(1)+' mm. Create a separate proof with the same Rough/Finish files; existing X/Y and bed/stock setup are retained.';diagram.innerHTML='';return;}
+  var fit=cncStockFit(job),b=proof.bounds;
+  out.textContent=(fit.ok?'✓ Placement fits. ':'× '+fit.reason+' ')+ 'Cutter envelope: X '+b.minX.toFixed(2)+'…'+b.maxX.toFixed(2)+' mm; Y '+b.minY.toFixed(2)+'…'+b.maxY.toFixed(2)+' mm. Rough/Finish files unchanged. '+(h.woodProofVersion===1?'':'The Mac bridge needs the wood-placement update before Start.');
+  diagram.innerHTML='<svg role="img" aria-label="Wood proof placement on the actual board; front-left zero" viewBox="-3 -3 '+(m.X+6)+' '+(m.Y+6)+'" style="display:block;width:100%;max-width:600px;max-height:240px"><rect width="'+m.X+'" height="'+m.Y+'" fill="#242d38" stroke="#aaa" stroke-width="1"/><rect x="'+b.minX+'" y="'+(m.Y-b.maxY)+'" width="'+(b.maxX-b.minX)+'" height="'+(b.maxY-b.minY)+'" fill="#315f49" stroke="#7ee0ac" stroke-width="1"/><circle cx="0" cy="'+m.Y+'" r="1.5" fill="#ffcf79"/></svg><div class="muted" style="font-size:11px">Top view · front is the bottom edge · yellow mark is stock X0/Y0 · green includes the cutter envelope.</div>';
+}
+async function cncSaveWoodProof(button){
+  var job=cncCurrentJob();if(!job)return;
+  var left=Number(document.getElementById('cncWoodProofLeft').value),front=Number(document.getElementById('cncWoodProofFront').value);
+  if(!Number.isFinite(left)||!Number.isFinite(front)||left<0||front<0){alert('Enter non-negative left and front clearances in millimetres.');return;}
+  button.disabled=true;
+  try{var payload=job.woodProof?{jobId:job.id,woodProofPlacement:{leftInsetMm:left,frontInsetMm:front}}:{createWoodProof:{sourceJobId:job.id,leftInsetMm:left,frontInsetMm:front}};
+    var r=await cncPost(payload);if(!r||r.error||!r.cnc)throw Error((r&&r.error)||'Could not save the wood proof');CNC=r.cnc;if(r.jobId)CNC_CUR=r.jobId;renderCncJobs();await cncRenderActive();
+  }catch(e){alert(e.message||e);}finally{cncRenderWoodProof(cncCurrentJob(),false);}
+}
+function cncOpenWoodProofSource(){var job=cncCurrentJob();if(job&&job.woodProofSourceJobId)cncSetActive(job.woodProofSourceJobId);}
+
 // The production metal library. v1 (five Kiri:Moto operations) stays resolvable
 // server-side for an already-installed job, but the loader installs v2 — the
 // openclaw-cam rebuild, four stages, 3.91 h instead of 20.27 h.
@@ -2068,7 +2115,9 @@ function cncRenderAgent(job){
   // relief is under 1 mm. The daemon enforces both independently of this badge.
   var proofState=h.surfaceProof||null,plateState=h.plate||null,metalJob=cncIsMetalJob(job);
   var proofOk=!!(proofState&&proofState.ready===true&&(!metalJob||String((proofState.proof||{}).method||'')==='conductive-stock-touch'))&&!!(plateState&&plateState.confirmed===true);
+  if(job&&job.woodProof)proofOk=proofOk&&String((proofState.proof||{}).method||'')==='operator-attested-feeler'&&Date.parse((proofState.proof||{}).at||'')>=Date.parse(job.woodProof.configuredAt||'');
   var checks=[['Bridge',!!CNC.agent],['Coordinate frame',h.frameValid!==false],['Controller ready',!!controller.idle&&h.frameValid!==false],['Controller protection',!!h.controllerProtection&&h.controllerProtection.ready===true],['Machine boundaries',!!ws.calibrated],['Start position',!!frame.ok&&h.frameValid!==false],['Stock fit',!!fit.ok],['X/Y stock zero',!!su.xyReady],['Bed probe',!!su.bedProbeReady],['Stock probe',!!su.stockProbeReady],['Probe lock',!!su.probeLocked],['Surface contact proof',proofOk]];
+  if(job&&job.woodProof){checks.push(['Wood placement bridge',h.woodProofVersion===1]);if(job.stageRequiresProbe){var touchedAt=Date.parse(su.probeLockedAt||''),activatedAt=Date.parse(job.stageActivatedAt||''),previousAt=Date.parse((h.resume||{}).updatedAt||''),stageTouch=Number.isFinite(touchedAt)&&Number.isFinite(activatedAt)&&(touchedAt>activatedAt||(su.probeLockStatus==='locked_after_tool_touch'&&Number.isFinite(previousAt)&&touchedAt>previousAt&&touchedAt<=activatedAt&&activatedAt-touchedAt<=30*60*1000));checks.push(['Current tool touch-off',stageTouch]);}}
   if(box) box.innerHTML=checks.map(function(c){return '<span style="padding:4px 8px;border-radius:999px;font-size:11.5px;border:1px solid '+(c[1]?'#2f8f62':'#7a3b42')+';color:'+(c[1]?'#7ee0ac':'#ff9a9a')+';background:'+(c[1]?'rgba(47,143,98,.12)':'rgba(150,55,65,.12)')+'">'+(c[1]?'✓ ':'× ')+c[0]+'</span>';}).join('');
   // RESUME IS OFFERED ONLY WHEN THE DAEMON SAYS IT IS RESUMABLE.
   // The daemon owns this decision (metal, audit hold, program identity, plate
@@ -2078,7 +2127,7 @@ function cncRenderAgent(job){
   // path that would repeat the 2026-09-30 over-depth cut.
   var ready=checks.every(function(c){return c[1];}),resumePoint=h.resume||{},resumeInvalidatedAt=Date.parse(String(job&&job.resumeInvalidatedAt||'')),resumeUpdatedAt=Date.parse(String(resumePoint.updatedAt||''));
   var resumeStale=Number.isFinite(resumeInvalidatedAt)&&Number.isFinite(resumeUpdatedAt)&&resumeInvalidatedAt>=resumeUpdatedAt;
-  var hasSavedResume=resumePoint.resumable===true&&!resumeStale&&Number(resumePoint.lastCompletedLine)>0;
+  var hasSavedResume=!(job&&job.woodProof)&&resumePoint.resumable===true&&!resumeStale&&Number(resumePoint.lastCompletedLine)>0;
   var resumeBlocked=String(resumePoint.state||'')==='interrupted'&&!hasSavedResume?String(resumePoint.blockedReason||(resumeStale?'The interrupted checkpoint belongs to an older generated program. Start the stage from line 1 after a fresh tool touch-off.':'This interrupted checkpoint cannot be resumed. Set up X/Y and Z again and restart the stage from line 1.')):'';
   var resumeNote=document.getElementById('cncResumeWithdrawn');
   if(resumeNote){resumeNote.textContent=resumeBlocked?('Resume withdrawn · '+resumeBlocked):'';resumeNote.style.display=resumeBlocked?'':'none';}
@@ -2089,7 +2138,8 @@ function cncRenderAgent(job){
   // returned as a 409, so it is visible before the click rather than after it.
   var thicknessHold=String(job&&job.stockThicknessHold||''),thicknessNote=document.getElementById('cncStockThicknessHold');
   if(thicknessNote){thicknessNote.textContent=thicknessHold?('Blank thickness · '+thicknessHold):'';thicknessNote.style.display=thicknessHold?'':'none';}
-  var start=document.getElementById('cncStartBtn'); if(start){start.disabled=!(ready&&!auditHold&&!thicknessHold&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&state!=='running'&&state!=='queued');start.textContent=hasSavedResume?'▶ Restart stage from beginning':'▶ Start carve';start.title=thicknessHold||auditHold||'';}
+  cncRenderWoodProof(job,false);
+  var start=document.getElementById('cncStartBtn'); if(start){start.disabled=!(ready&&!auditHold&&!thicknessHold&&job&&job.hasGcode&&(!job.hasCreative||job.planStatus==='approved')&&!baseBlocked);start.textContent=hasSavedResume?'▶ Restart stage from beginning':'▶ Start carve';start.title=thicknessHold||auditHold||'';}
   var pause=document.getElementById('cncPauseBtn'); if(pause) pause.disabled=state!=='running';
   var resume=document.getElementById('cncResumeBtn'); if(resume){resume.disabled=!!auditHold||h.frameValid===false||!(h.controllerProtection&&h.controllerProtection.ready===true)||(state!=='paused'&&!(hasSavedResume&&controller.idle&&!h.moving));resume.textContent=hasSavedResume&&state!=='paused'?'Resume saved carve':'Resume';resume.title=state!=='paused'&&resumeBlocked?resumeBlocked:'';}
   var stop=document.getElementById('cncStopBtn'); if(stop) stop.disabled=!h.moving&&!['queued','accepted','running','paused'].includes(state);
@@ -2104,8 +2154,10 @@ function cncRenderAgent(job){
   var lock=document.getElementById('cncProbeLockBtn'); if(lock) lock.disabled=motionBlocked||!!su.probeLocked||!su.bedProbeReady||!su.stockProbeReady;
   var stockZero=document.getElementById('cncStockZZeroBtn'); if(stockZero) stockZero.disabled=motionBlocked||!su.probeLocked||!su.stockProbeReady;
   var unlock=document.getElementById('cncProbeUnlockBtn'); if(unlock) unlock.disabled=motionBlocked||!su.probeLocked;
-  var recoverProbe=document.getElementById('cncProbeRecoverBtn'); if(recoverProbe) recoverProbe.disabled=motionBlocked;
-  var probeInput=document.getElementById('cncProbeThickness'); if(probeInput) probeInput.disabled=motionBlocked;
+  var recoverProbe=document.getElementById('cncProbeRecoverBtn'); if(recoverProbe){var stoppedProbeContact=['Idle','Alarm'].includes(controller.state)&&controller.feed===0&&controller.spindle===0&&/^PZ?$/.test(controller.pins.split('').sort().join(''));recoverProbe.disabled=baseBlocked||!!(h.frameRecovery||{}).requiresBufferDiscard||!stoppedProbeContact;}
+  var plateEditBlocked=baseBlocked||!!(h.frameRecovery||{}).requiresBufferDiscard||!['Idle','Alarm'].includes(controller.state)||controller.feed!==0||controller.spindle!==0;
+  var probeInput=document.getElementById('cncProbeThickness'); if(probeInput) probeInput.disabled=plateEditBlocked;
+  var plateConfirm=document.getElementById('cncConfirmPlateBtn');if(plateConfirm)plateConfirm.disabled=plateEditBlocked;
   var measured=document.getElementById('cncMeasuredStock'); if(measured){var probing=['searching','contact','first_retract','verifying','final_retract'].includes(String(su.probePhase||''));measured.textContent=probing?('Probing: '+String(su.probePhase).replace(/_/g,' ')+' · '+Number(su.probeTravelledMm||0).toFixed(1)+' / '+Number(su.probeSearchLimitMm||0).toFixed(1)+' mm'):su.probePhase==='returned_no_contact'?'No plate contact. Z returned to its starting height; check plate and clip, then retry.':su.stockProbeReady?('🔒 Saved · measured '+Number(su.stockThicknessMm).toFixed(3)+' mm; protected floor '+Number(su.safetyFloorMm).toFixed(3)+' mm; max cut '+Number(su.maxCutDepthMm).toFixed(3)+' mm.'):(su.materialReady?'Material thickness saved; touch off the current bit on the stock.':su.bedProbeReady?'Bed measurement saved. Position over the stock, place the puck on top, then Probe stock & save. Do not repeat the bed probe.':'Thickness not measured.');}
   // Show the ABSOLUTE surface references and the puck they came from. Derived
   // thickness alone hides a puck error, because the same error cancels out of
@@ -2141,6 +2193,7 @@ function cncRenderAgent(job){
 function cncRenderOriginFootprint(job,su){
   var el=document.getElementById('cncOriginFootprint'); if(!el)return;
   var f=cncFinished(job);
+  if(job&&job.woodProof){var wp=job.woodProof,fit=cncStockFit(job);el.textContent='Wood proof cutter envelope '+f.W.toFixed(2)+' × '+f.H.toFixed(2)+' mm; left clearance '+wp.leftInsetMm+' mm, front clearance '+wp.frontInsetMm+' mm. '+(fit.ok?'Fits on this board. ':fit.reason+' ')+(su&&su.xyReady?'Saved stock-corner X/Y is retained.':'Set X/Y at the board’s actual front-left corner, not the carve’s inset corner.');return;}
   if(!f){el.innerHTML='<span class="muted">Generate the design to calculate its required X/Y footprint.</span>';return;}
   var fit=cncStockFit(job), msg='<b>Required carve footprint:</b> '+Number(f.W).toFixed(1)+' × '+Number(f.H).toFixed(1)+' mm at project offset X '+Number(f.OX||0).toFixed(1)+' / Y '+Number(f.OY||0).toFixed(1)+' mm in the preserved stock coordinate frame.';
   if(fit.ok) msg+=' <span style="color:#7ee0ac">✓ Fits inside '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm stock; remaining far-edge clearance '+fit.clearX.toFixed(1)+' mm X and '+fit.clearY.toFixed(1)+' mm Y.</span>';
@@ -2312,11 +2365,12 @@ function cncRenderToolpath(text,requestedStage){
     ? ('Coloured area is the swept footprint of the '+foot.diameterMm.toFixed(2)+' mm cutter'+(foot.stepoverMm>0?(' at '+foot.stepoverMm.toFixed(2)+' mm stepover'):'')+', not sample points. Commanded depth: cyan is cut at the surface, gold shallow, orange medium, red deepest. BLACK MEANS THIS STAGE REMOVES NO MATERIAL THERE — the relief is already shallower than this stage cuts, or the move was a G0 rapid, which is never drawn. Black is not "cut at surface"; cyan is.')
     : ('Tool diameter could not be resolved ('+foot.source+'), so this draws sample points rather than the swept cutter footprint and understates coverage. Commanded depth: cyan is cut at the surface, gold shallow, orange medium, red deepest. BLACK MEANS THIS STAGE REMOVES NO MATERIAL THERE, not "cut at surface".');
   note.textContent=title+' '+legend;prev.appendChild(note);
+  var placedProof=(cncCurrentJob()||{}).woodProof,placedDx=placedProof?Number(placedProof.offsetXMm):0,placedDy=placedProof?Number(placedProof.offsetYMm):0,placedMinX=minx+placedDx,placedMaxX=maxx+placedDx,placedMinY=miny+placedDy,placedMaxY=maxy+placedDy;
   var mach=cncMach(),mapW=520,mapH=Math.max(150,Math.round(mapW*mach.Y/mach.X)),mp=18,ms=Math.min((mapW-2*mp)/mach.X,(mapH-2*mp)/mach.Y),stockW=mach.X*ms,stockH=mach.Y*ms;
   var pc=document.createElement('canvas');pc.width=mapW;pc.height=mapH;var pctx=pc.getContext('2d');pctx.fillStyle='#0b1220';pctx.fillRect(0,0,mapW,mapH);pctx.fillStyle='rgba(148,163,184,.08)';pctx.fillRect(mp,mapH-mp-stockH,stockW,stockH);pctx.strokeStyle='#94a3b8';pctx.lineWidth=1.5;pctx.strokeRect(mp,mapH-mp-stockH,stockW,stockH);
   if(mach.M>0){pctx.setLineDash([5,4]);pctx.strokeStyle='rgba(255,207,121,.65)';pctx.strokeRect(mp,mapH-mp-(mach.Y-mach.M)*ms,(mach.X-mach.M)*ms,(mach.Y-mach.M)*ms);pctx.setLineDash([]);}
-  var bx=mp+minx*ms,by=mapH-mp-maxy*ms,bw=(maxx-minx)*ms,bh=(maxy-miny)*ms;pctx.fillStyle='rgba(39,211,226,.24)';pctx.fillRect(bx,by,bw,bh);pctx.strokeStyle='#27d3e2';pctx.lineWidth=2;pctx.strokeRect(bx,by,bw,bh);pctx.fillStyle='#fff';pctx.font='12px system-ui';pctx.fillText('X+',mapW-28,mapH-5);pctx.fillText('Y+',3,15);pctx.fillStyle='#27d3e2';pctx.beginPath();pctx.arc(mp+minx*ms,mapH-mp-miny*ms,4,0,Math.PI*2);pctx.fill();
-  var ptitle=document.createElement('div');ptitle.style.cssText='font-size:11px;font-weight:700;margin-top:10px';ptitle.textContent='FULL-STOCK PLACEMENT · '+mach.X.toFixed(1)+' × '+mach.Y.toFixed(1)+' mm';prev.appendChild(ptitle);pc.style.cssText='width:100%;max-width:520px;height:auto;margin-top:5px;border-radius:6px';pc.setAttribute('aria-label','Full stock placement map showing the exact G-code bounds');prev.appendChild(pc);var pnote=document.createElement('div');pnote.className='muted';pnote.style.cssText='font-size:11px;margin-top:5px';pnote.textContent='Exact motion bounds: X '+minx.toFixed(3)+'–'+maxx.toFixed(3)+' mm; Y '+miny.toFixed(3)+'–'+maxy.toFixed(3)+' mm. Cyan rectangle is the carved area in the preserved stock frame; dot is its front-left corner.';prev.appendChild(pnote);
+  var bx=mp+placedMinX*ms,by=mapH-mp-placedMaxY*ms,bw=(placedMaxX-placedMinX)*ms,bh=(placedMaxY-placedMinY)*ms;pctx.fillStyle='rgba(39,211,226,.24)';pctx.fillRect(bx,by,bw,bh);pctx.strokeStyle='#27d3e2';pctx.lineWidth=2;pctx.strokeRect(bx,by,bw,bh);pctx.fillStyle='#fff';pctx.font='12px system-ui';pctx.fillText('X+',mapW-28,mapH-5);pctx.fillText('Y+',3,15);pctx.fillStyle='#27d3e2';pctx.beginPath();pctx.arc(mp+placedMinX*ms,mapH-mp-placedMinY*ms,4,0,Math.PI*2);pctx.fill();
+  var ptitle=document.createElement('div');ptitle.style.cssText='font-size:11px;font-weight:700;margin-top:10px';ptitle.textContent='FULL-STOCK PLACEMENT · '+mach.X.toFixed(1)+' × '+mach.Y.toFixed(1)+' mm';prev.appendChild(ptitle);pc.style.cssText='width:100%;max-width:520px;height:auto;margin-top:5px;border-radius:6px';pc.setAttribute('aria-label','Full stock placement map showing the exact G-code bounds');prev.appendChild(pc);var pnote=document.createElement('div');pnote.className='muted';pnote.style.cssText='font-size:11px;margin-top:5px';pnote.textContent='Exact motion centerline bounds: X '+placedMinX.toFixed(3)+'–'+placedMaxX.toFixed(3)+' mm; Y '+placedMinY.toFixed(3)+'–'+placedMaxY.toFixed(3)+' mm. Cyan rectangle is the motion centerline envelope in the stock frame; dot is its front-left corner. Cutter clearance is shown in the wood-proof placement above when active.';prev.appendChild(pnote);
   if(meta) meta.textContent=cncStageLabel(stage)+' · exact G-code depth · '+nc+' cut moves · '+w.toFixed(1)+'×'+h.toFixed(1)+' mm · '+(isFinite(minz)?Math.abs(minz).toFixed(3):'0')+' mm deepest'+(covered>=0?(' · '+foot.diameterMm.toFixed(2)+' mm cutter clears '+(covered*100/(W*H)).toFixed(0)+'% of the preview frame'):'')+(airMin+cutMin>0?(' · '+(cutMin*100/(airMin+cutMin)).toFixed(1)+'% of feed time in material'):'')+' · '+nr+' rapids not drawn';
 }
 function cncStageLabel(s){return s==='all'?'Relief':s==='cleanup'?'W01015 Cleanup':s.charAt(0).toUpperCase()+s.slice(1);}
@@ -2338,7 +2392,7 @@ function cncRenderStages(job){
     var note=first?'run first':(changed?'change the bit, then touch off on stock':'same bit as the previous stage · no new touch-off needed');
     if(s==='release')note+=' · run last · independently secure the buckle to the sacrificial backing first';
     var through=sensitive.indexOf(s)>=0;
-    var rpmNote=rpm?('set '+Math.round(rpm)+' RPM'):'use the certified spindle setting';
+    var gear=job.certifiedLibraryId==='rambo-buckle-c752-v2'?(s==='finish'?3:2):null;var rpmNote=rpm?('set '+Math.round(rpm)+' RPM'+(gear?' (gear '+gear+')':'')):'use the certified spindle setting';
     prevTool=tool||prevTool;
     var detailLine=job.cutAuditHold?'Cut held · confirm the plate, re-probe and verify surface contact':(note+' · '+rpmNote+' · turn the router on manually');
     // A through-cut stage says, on its own card, that its depth came from a
@@ -2456,11 +2510,13 @@ async function cncSaveMachine(){ var s=document.getElementById('cncMachStatus');
   var j=await cncPost({config:cfg}); if(j&&j.cnc){ CNC=j.cnc; if(s) s.textContent='Saved.'; cncRenderPanelPlan(); cncSetupHint(); setTimeout(function(){if(s)s.textContent='';},1200);} else if(s) s.textContent='Error.'; }
 function cncJobAR(job){ if(!job) return 0.75; if(CNC_AR[job.id]) return CNC_AR[job.id]; return Number(job.imgAR)||0.75; }
 function cncFinished(job){ if(!job) return null;
+  if(job.woodProof){var b=job.woodProof.bounds;return {W:b.maxX-b.minX,H:b.maxY-b.minY,OX:b.minX,OY:b.minY,depth:.787};}
   var W=Number(job.sizeMM)||0; if(!W) return null;
   var H=Number(job.pieceH)||0; if(!H){ H=Math.round(W*cncJobAR(job)); }
   var depth=Number(job.reliefDepth)||((CNC_MATS[job.material]||CNC_MATS['Other']).depth);
   return {W:W,H:H,OX:Math.max(0,Number(job.originOffsetXMm)||0),OY:Math.max(0,Number(job.originOffsetYMm)||0),depth:depth}; }
 function cncStockFit(job){ var f=cncFinished(job), m=cncMach(); if(!f)return {ok:false,reason:'Generate the design to calculate its stock footprint.',f:null,m:m};
+  if(job&&job.woodProof&&(['stockWidthMm','stockHeightMm','stockReserveMm'].some(function(k,i){return Math.abs(Number(job.woodProof[k])-[m.X,m.Y,m.M][i])>.001;})))return {ok:false,reason:'Board dimensions changed. Save wood-proof placement again.',f:f,m:m};
   var reserve=Math.max(0,Number(m.M)||0), usableX=Math.max(0,m.X-reserve), usableY=Math.max(0,m.Y-reserve);
   var endX=f.OX+f.W,endY=f.OY+f.H,ok=endX<=usableX+0.001&&endY<=usableY+0.001;
   return {ok:ok,f:f,m:m,usableX:usableX,usableY:usableY,endX:endX,endY:endY,clearX:usableX-endX,clearY:usableY-endY,reason:ok?'':('Offset toolpath ends at X '+endX.toFixed(1)+' / Y '+endY.toFixed(1)+' mm and exceeds usable stock X '+usableX.toFixed(1)+' / Y '+usableY.toFixed(1)+' mm.')}; }
@@ -2470,6 +2526,7 @@ function cncPanels(job){ var f=cncFinished(job); if(!f) return null; var m=cncMa
   return {cols:cols,rows:rows,total:cols*rows,panelW:f.W/cols,panelH:f.H/rows,uX:uX,uY:uY,f:f,m:m}; }
 function cncRenderPanelPlan(){ var el=document.getElementById('cncPanelPlan'); if(!el) return;
   var job=cncCurrentJob(), pl=cncPanels(job);
+  if(job&&job.woodProof){var wf=cncStockFit(job);el.textContent=wf.ok?'Wood proof fits on '+wf.m.X+' × '+wf.m.Y+' mm stock. See the actual placement above; no scaling or panel splitting.':wf.reason;return;}
   if(!pl){ el.className='muted'; el.textContent='Set a Finished width (in Job setup) to see the panel plan.'; return; }
   el.className=''; var f=pl.f, depthOK=f.depth<=pl.m.Z, summary;
   if(pl.total===1){ summary='<b>Fits on this stock</b> &mdash; '+f.W+'&times;'+f.H+' mm inside '+pl.m.X+'&times;'+pl.m.Y+' mm stock, relief depth '+f.depth+' mm. X/Y zero is the stock front-left carve corner.'; }
@@ -2769,8 +2826,8 @@ async function cncStart(button){ var job=cncCurrentJob(); if(!job){ alert('Pick 
   var h=(CNC.agent&&CNC.agent.health)||{}, w=h.workspace||{}, s=h.setup||{};
   if(!CNC.agent||!h.connected||!w.calibrated||!s.xyReady||!s.bedProbeReady||!s.stockProbeReady||!s.probeReady||!s.probeLocked){ alert('Start is locked until Bridge, Controller, Boundaries, X/Y zero, Bed probe, Stock probe, and Probe lock are all green.'); return; }
   var frame=cncStartFrameCheck(h);if(!frame.ok){alert('Start is locked: '+frame.reason);return;}
-  var tools={},certs={};try{tools=JSON.parse(job.planTools||'{}');certs=JSON.parse(job.camCertificates||'{}');}catch(e){}var stage=job.activeStage||'all',rough=(stage==='rough'||stage==='profile'||stage==='release'),detail=stage==='detail',tool=(certs[stage]&&certs[stage].tool)||(detail?tools.detailBit:(rough?tools.roughBit:tools.finishBit)),targetRpm=detail?tools.detailRpm:(rough?tools.roughRpm:tools.finishRpm);if(certs[stage]&&!targetRpm)targetRpm=18000;var routerNote=targetRpm?('\n\nEXTERNAL ROUTER: Install '+(tool||'the selected bit')+', set the Genmitsu 710W to '+Math.round(targetRpm)+' RPM'+(Math.round(targetRpm)===18000?' (gear 4)':'')+', and switch it ON before confirming. Project cannot start or stop this AC router; switch it OFF after completion or any Stop.') : '',profileNote=stage==='profile'&&job.profileMode==='sacrificial-through'?('\n\nCONTINUOUS-SKIN PROFILE: Cut the complete silhouette but stop with the certified 0.204 mm holding skin intact. Sacrificial backing must remain directly beneath the stock.'):(stage==='release'?('\n\nFINAL RELEASE: This stage fully separates the buckle. Confirm Profile is complete and independently secure the buckle to the sacrificial backing before removing the continuous holding skin.'):'');var point=h.resume||{},restartNote=String(point.state||'')==='interrupted'?'\n\nRESTART FROM LINE 1: This does not resume the interrupted checkpoint; it replaces that checkpoint with a fresh run.':'';
-  if(!confirm('Start the '+cncStageLabel(stage)+' stage for “'+(job.project||'job')+'”?'+restartNote+'\n\nStock: '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm\nToolpath: '+fit.f.W.toFixed(1)+' × '+fit.f.H.toFixed(1)+' mm from the locked stock-corner zero'+routerNote+profileNote+'\n\nConfirm the stock cannot move, the probe plate and clip are removed, the full path is clear, and the e-stop is reachable.')) return;
+  var tools={},certs={};try{tools=JSON.parse(job.planTools||'{}');certs=JSON.parse(job.camCertificates||'{}');}catch(e){}var stage=job.activeStage||'all',rough=(stage==='rough'||stage==='profile'||stage==='release'),detail=stage==='detail',tool=(certs[stage]&&certs[stage].tool)||(detail?tools.detailBit:(rough?tools.roughBit:tools.finishBit)),targetRpm=detail?tools.detailRpm:(rough?tools.roughRpm:tools.finishRpm);if(certs[stage]&&!targetRpm)targetRpm=18000;var routerNote=targetRpm?('\n\nEXTERNAL ROUTER: Install '+(tool||'the selected bit')+', set the Genmitsu 710W to '+Math.round(targetRpm)+' RPM'+(job.certifiedLibraryId==='rambo-buckle-c752-v2'?' (gear '+(stage==='finish'?3:2)+')':(Math.round(targetRpm)===18000?' (gear 4)':''))+', and switch it ON before confirming. Project cannot start or stop this AC router; switch it OFF after completion or any Stop.') : '',profileNote=stage==='profile'&&job.profileMode==='sacrificial-through'?('\n\nCONTINUOUS-SKIN PROFILE: Cut the complete silhouette but stop with the certified 0.204 mm holding skin intact. Sacrificial backing must remain directly beneath the stock.'):(stage==='release'?('\n\nFINAL RELEASE: This stage fully separates the buckle. Confirm Profile is complete and independently secure the buckle to the sacrificial backing before removing the continuous holding skin.'):'');var point=h.resume||{},restartNote=String(point.state||'')==='interrupted'?'\n\nRESTART FROM LINE 1: This does not resume the interrupted checkpoint; it replaces that checkpoint with a fresh run.':'';
+  if(!confirm('Start the '+cncStageLabel(stage)+' stage for “'+(job.project||'job')+'”?'+restartNote+'\n\nStock: '+fit.m.X.toFixed(1)+' × '+fit.m.Y.toFixed(1)+' mm\nToolpath: '+fit.f.W.toFixed(1)+' × '+fit.f.H.toFixed(1)+' mm'+(job.woodProof?(' including cutter, placed '+job.woodProof.leftInsetMm+' mm from the left edge and '+job.woodProof.frontInsetMm+' mm from the front edge. Stock-corner X/Y zero stays unchanged.'):' from the locked stock-corner zero')+routerNote+profileNote+'\n\nConfirm the stock cannot move, the probe plate and clip are removed, the full path is clear, and the e-stop is reachable.')) return;
   return cncQueueMachineAction('start',{},button);
 }
 async function cncMachineAction(action,extra,button){ return cncQueueMachineAction(action,extra||{},button); }
@@ -2811,16 +2868,24 @@ async function cncJog(axis,dir,button){
 }
 async function cncProbe(kind,button){ var t=cncPuckThicknessMm(); if(!(t>0)){ alert('Enter the measured Z-probe puck thickness before probing. It sets your cut depth one-for-one.'); return; } var label=kind==='bed'?'exposed bed':'top of the wood', su=((CNC.agent||{}).health||{}).setup||{}, replacing=kind==='bed'&&(!!su.probeLocked||!!su.materialReady), action=kind==='bed'?'probe_bed':kind==='tool'?'probe_tool':'probe_stock', explanation=kind==='tool'?'Project will preserve the saved material thickness and X/Y origin, then save the new bit\'s Z automatically.':'Project will search in short no-alarm segments and return to the starting height if it does not find the plate.'; var warning=replacing?'\n\nThis starts a new material measurement and replaces the saved bed/stock profile. X/Y remains unchanged.':''; if(!confirm((kind==='tool'?'Touch off the changed bit on the ':'Probe the ')+label+' using a '+t.toFixed(2)+' mm puck?\nConfirm that is the measured height of the puck you are about to use.\nPlace the puck flat on the surface, attach the clip, and keep hands clear.\n\n'+explanation+warning))return; if(!await cncSaveProbeThickness())return; return cncMachineAction(action,{confirmReprobe:replacing},button); }
 function cncPuckThicknessMm(){ var e=document.getElementById('cncProbeThickness'); var v=Number(e&&e.value); return (v>=5&&v<=30)?v:NaN; }
-async function cncSaveProbeThickness(){ var v=cncPuckThicknessMm(); if(!(v>0)){ alert('Enter the measured Z-probe plate thickness between 5 and 30 mm. This value sets your cut depth; measure the plate from the face that rests on the surface to the metal contact face.'); return false; } var j=await cncPost({config:{probeThickness:v}}); if(j&&j.cnc)CNC=j.cnc; return true; }
+async function cncSaveProbeThickness(){ var v=cncPuckThicknessMm(); if(!(v>0)){ alert('Enter the measured Z-probe plate thickness between 5 and 30 mm. This value sets your cut depth; measure the plate from the face that rests on the surface to the metal contact face.'); return false; } var j=await cncPost({config:{probeThickness:v}}); if(!j||!j.cnc||j.error)return false;CNC=j.cnc;return true; }
 // Surface-contact proof UI. Shows the measured-vs-stored disagreement in plain mm,
 // because that number is the only thing that would have made the 2026-09-30 plate
 // error visible before it reached the metal.
+async function cncRecoverProbe(button){if(!confirm('Retract from the probe contact?\n\nSwitch the external router OFF, keep the puck in place and hands clear. Project will unlock this probe-contact alarm if needed, retract Z by 3 mm, verify the P/Z inputs clear, and restore hard-limit protection. It will not resume a cut.'))return;return cncMachineAction('recover_probe',{},button);}
+async function cncConfirmPlate(button){
+  var value=cncPuckThicknessMm();if(!(value>0)){alert('Enter your confirmed puck height between 5 and 30 mm.');return;}
+  if(!confirm('Save and confirm the puck thickness as '+value.toFixed(2)+' mm?\n\nUse the height already confirmed for your puck. This does not move the machine. If the value is unchanged, existing bed/stock measurements are retained.'))return;
+  if(!await cncSaveProbeThickness())return;
+  return cncMachineAction('set_plate',{},button);
+}
 function cncRenderSurfaceProof(h,su,motionBlocked,metalJob,proofOk){
   var card=document.getElementById('cncSurfaceProofCard'); if(!card)return;
   var state=h.surfaceProof||{},plate=h.plate||{},proof=state.proof||null;
+  var help=document.getElementById('cncSurfaceProofHelp');if(help)help.textContent=metalJob?'Verify the stock surface with the router OFF, plate removed, and clip on the conductive stock. The measured touch compares actual contact with the stored zero without changing it.':'For wood, use the router-OFF paper/feel check: remove the puck, lower the stopped bit to work Z0, and confirm paper just drags against the actual wood surface. Then attest below and raise the bit to safe clearance before Start. Wood cannot use the electrical stock-touch check.';
   var verifyBtn=document.getElementById('cncVerifySurfaceBtn'),attestBtn=document.getElementById('cncAttestSurfaceBtn'),out=document.getElementById('cncSurfaceProofState');
   var canVerify=!motionBlocked&&!!su.stockProbeReady;
-  if(verifyBtn)verifyBtn.disabled=!canVerify;
+  if(verifyBtn){verifyBtn.disabled=!canVerify;verifyBtn.style.display=metalJob?'':'none';}
   // Attestation cannot authorise metal, so do not offer it there at all.
   if(attestBtn){attestBtn.style.display=metalJob?'none':'';attestBtn.disabled=!canVerify;}
   if(!out)return;

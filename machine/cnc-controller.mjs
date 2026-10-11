@@ -2,6 +2,7 @@ import net from "node:net";
 import { inspectEffectiveCutFrame } from "./cnc-effective-frame.mjs";
 import { EventEmitter } from "node:events";
 import { analyzeProgram } from "./cnc-program.mjs";
+import woodProofCam from "../api/cnc-wood-proof.cjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = () => Date.now();
@@ -522,10 +523,12 @@ export class GrblTcpController extends EventEmitter {
   recoverProbeContact({ retractMm = 3, feed = 100 } = {}) {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for probe recovery");
+      if (this.programRunning) throw new Error('Stop the active program before probe recovery');
       await this.motionGuard();
       const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
-      if (!new Set(["Idle", "Alarm"]).has(before.state.split(":")[0])) throw new Error(`Probe recovery requires Idle or Alarm, got ${before.state}`);
-      if (!String(before.Pn || "").includes("P")) throw new Error("Probe recovery requires an active probe contact");
+      if (!new Set(["Idle", "Alarm"]).has(before.state)) throw new Error(`Probe recovery requires Idle or Alarm, got ${before.state}`);
+      const [feedBefore, spindleBefore] = feedAndSpindle(before);
+      if (feedBefore !== 0 || spindleBefore !== 0 || !/^PZ?$/.test(String(before.Pn || '').split('').sort().join(''))) throw new Error('Probe recovery requires zero feed/spindle and only an active P or P/Z contact');
       let hardLimitsWereEnabled;
       let hardLimitsSuppressed = false;
       try {
@@ -550,6 +553,7 @@ export class GrblTcpController extends EventEmitter {
           hardLimitsSuppressed = false;
         }
         const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+        if (after.state !== 'Idle' || after.FS !== '0,0' || after.Pn) throw new Error('Probe recovery did not finish stationary with clear inputs');
         await this.motionGuard();
         return { before, retract, after, hardLimitsRestored: hardLimitsWereEnabled ? !hardLimitsSuppressed : false };
       } catch (error) {
@@ -642,6 +646,20 @@ export class GrblTcpController extends EventEmitter {
           this.emit("probeProgress", { phase: "returned_no_contact", travelledMm: searchedMm, limitMm: searchLimit });
           throw new ProbeSearchExhaustedError(searchedMm, searchLimit);
         }
+        // Capture raw trigger and stopped telemetry before validation, including
+        // failed checks. Fast contact can stop below PRB while decelerating; its
+        // allowance is strictly less than the already-verified 1 mm retract.
+        const validateContact = (name, contact, sample) => {
+          const position = coordinates(contact);
+          for (const axis of ['X', 'Y', 'Z']) {
+            const delta = position[axis] - sample.position[axis];
+            const boundedFastBrake = name === 'first' && axis === 'Z';
+            const allowed = boundedFastBrake ? delta <= 0.05 && delta > -1 : Math.abs(delta) <= 0.05;
+            if (!allowed) throw new Error(`${name} probe PRB/${axis} telemetry disagreement: trigger ${sample.position[axis].toFixed(4)} mm, stopped ${position[axis].toFixed(4)} mm, delta ${delta.toFixed(4)} mm; ${boundedFastBrake ? 'fast braking must be downward and less than the 1 mm clearance retract' : 'limit 0.0500 mm'}`);
+          }
+        };
+        this.emit('probeEvidence', { touch: 'fast', contact: firstContact, probe: firstProbe });
+        validateContact('first', firstContact, firstProbe);
         this.emit("probeProgress", { phase: "first_retract", travelledMm: searchedMm, limitMm: searchLimit });
         let firstRetract;
         try { firstRetract = await this.#probeRetractUnlocked(1, fast); }
@@ -651,6 +669,7 @@ export class GrblTcpController extends EventEmitter {
         const slowReply = await this.#guardedMotionLine(`G38.3 Z-${slowTravel.toFixed(3)} F${Math.round(slow)}`, 20_000);
         const finalContact = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
         const finalProbe = parseProbeResult(await this.#lineCommandUnlocked("$#", false));
+        this.emit('probeEvidence', { touch: 'slow', contact: finalContact, probe: finalProbe });
         if (!finalProbe.succeeded) {
           await this.#guardedMotionLine(`G0 Z${slowTravel.toFixed(3)}`, 20_000);
           const slowReturned = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
@@ -666,11 +685,8 @@ export class GrblTcpController extends EventEmitter {
           }
           throw new ProbeVerificationError(`The slow confirmation touch did not see the plate. Z returned to its starting height; check the clip and plate, then retry.`);
         }
-        for (const [name, contact, sample] of [["first", firstContact, firstProbe], ["slow", finalContact, finalProbe]]) {
-          const position = coordinates(contact);
-          for (const axis of ["X", "Y", "Z"]) if (Math.abs(position[axis] - sample.position[axis]) > 0.05) throw new Error(`${name} probe PRB/${axis} telemetry disagreement`);
-        }
-        if (Math.abs(finalProbe.position.Z - firstProbe.position.Z) > 0.05) throw new Error("Probe touches disagree by more than 0.05 mm");
+        validateContact('slow', finalContact, finalProbe);
+        if (Math.abs(finalProbe.position.Z - firstProbe.position.Z) > 0.05) throw new Error(`Probe touches disagree by more than 0.05 mm: first PRB Z ${firstProbe.position.Z.toFixed(4)}, slow PRB Z ${finalProbe.position.Z.toFixed(4)}, delta ${(finalProbe.position.Z - firstProbe.position.Z).toFixed(4)} mm`);
         // PRB is latched at trigger; stopped MPos may include deceleration travel.
         // Establish zero from the trigger point, not the later stopped endpoint.
         if (establishZero) {
@@ -710,6 +726,34 @@ export class GrblTcpController extends EventEmitter {
     }));
   }
 
+  // Select only a previously-known wood-proof frame back to stock coordinates.
+  // No offset or position is rewritten. Held buffers must be discarded through
+  // the existing operator recovery before this Idle-only operation can run.
+  restoreStockFrame(options = {}) {
+    return this.#enqueue(() => this.#withFrameVerificationUnlocked(() => this.#restoreStockFrameUnlocked(options)));
+  }
+
+  async #restoreStockFrameUnlocked({ expectedOrigin, allowG55 = false } = {}) {
+    const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+    if (before.state !== 'Idle' || before.FS !== '0,0' || before.Pn) throw new Error('Stock frame restoration requires stationary Idle');
+    const modes = await this.#lineCommandUnlocked('$G', false);
+    const active = String(modes.find(line => line.startsWith('[GC:')) || '').match(/\bG5[4-9]\b/g) || [];
+    if (active.length !== 1 || (active[0] !== 'G54' && !(allowG55 && active[0] === 'G55'))) throw new Error('Unexpected coordinate frame; stock frame was not restored');
+    const parameters = await this.#lineCommandUnlocked('$#', false);
+    const original = parseWorkOffset(parameters);
+    if (active[0] === 'G55') await this.#lineCommandUnlocked('G54', false);
+    const finalModes = await this.#lineCommandUnlocked('$G', false);
+    const finalParameters = await this.#lineCommandUnlocked('$#', false);
+    const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+    if (after.state !== 'Idle' || after.FS !== '0,0' || after.Pn || after.MPos !== before.MPos) throw new Error('Controller changed while restoring stock coordinates');
+    const restored = parseWorkOffset(finalParameters);
+    if (!String(finalModes.find(line => line.startsWith('[GC:')) || '').match(/\bG54\b/)) throw new Error('G54 restoration readback failed');
+    for (const axis of ['X', 'Y', 'Z']) if (Math.abs(restored[axis] - original[axis]) > 0.0001) throw new Error(`Stock G54 ${axis} changed while restoring coordinates`);
+    if (expectedOrigin) inspectEffectiveCutFrame({ modalLines: finalModes, parameterLines: finalParameters, status: after, expectedOrigin });
+    this.emit('stockFrameRestored', { before, after, g54: restored });
+    return { before, after, g54: restored };
+  }
+
   runProgram(source, { onProgress, programContext, expectedOrigin } = {}) {
     expectedOrigin = expectedOrigin ? { ...expectedOrigin } : undefined;
     return this.#enqueue(() => this.#withFrameVerificationUnlocked(async () => {
@@ -733,6 +777,9 @@ export class GrblTcpController extends EventEmitter {
       if (verifiedStatus.MPos !== before.MPos || verifiedStatus.FS !== "0,0" || verifiedStatus.Pn) throw new Error("Controller changed during cut-frame verification");
       const effectiveFrame = inspectEffectiveCutFrame({ modalLines, parameterLines, status: verifiedStatus, expectedOrigin });
       this.emit("cutFrameVerified", { effectiveFrame, modalLines, parameterLines, status: verifiedStatus });
+      const proof = programContext?.woodProof ? woodProofCam.validatePlacement(programContext.woodProof, programContext) : null;
+      if (proof) woodProofCam.verifyProgram(source, programContext);
+      const cutFrame = proof ? { activeWcs: 'G55', expectedOrigin: { X: expectedOrigin.X + proof.offsetXMm, Y: expectedOrigin.Y + proof.offsetYMm, Z: expectedOrigin.Z }, expectedStockOrigin: expectedOrigin } : { expectedOrigin };
       this.programRunning = true;
       this.pauseRequested = false;
       this.abortRequested = false;
@@ -747,6 +794,18 @@ export class GrblTcpController extends EventEmitter {
       }, 250);
       monitor.unref?.();
       try {
+        if (proof) {
+          // G10 L2 uses current input units: normalize explicitly BEFORE writing.
+          // P2 never rewrites P1/G54, and Z is the verified stock Z unchanged.
+          await this.#lineCommandUnlocked('G21', false);
+          await this.#lineCommandUnlocked(`G10 L2 P2 X${cutFrame.expectedOrigin.X.toFixed(4)} Y${cutFrame.expectedOrigin.Y.toFixed(4)} Z${cutFrame.expectedOrigin.Z.toFixed(4)}`, false);
+          await this.#lineCommandUnlocked('G55', false);
+          const placementModes = await this.#lineCommandUnlocked('$G', false), placementParameters = await this.#lineCommandUnlocked('$#', false);
+          const placementStatus = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+          if (placementStatus.MPos !== verifiedStatus.MPos || placementStatus.FS !== '0,0' || placementStatus.Pn) throw new Error('Controller moved during wood-proof frame setup');
+          const placed = inspectEffectiveCutFrame({ modalLines: placementModes, parameterLines: placementParameters, status: placementStatus, ...cutFrame });
+          this.emit('cutFrameVerified', { effectiveFrame: placed, modalLines: placementModes, parameterLines: placementParameters, status: placementStatus });
+        }
         let lastSocketRefreshLine = 0;
         for (let index = 0; index < analysis.lines.length; index += 1) {
           if (guardError) throw this.fault || guardError;
@@ -764,7 +823,7 @@ export class GrblTcpController extends EventEmitter {
           if (typeof onProgress === "function" && (index === analysis.lines.length - 1 || index % 20 === 0)) await onProgress({ progress, line: index + 1, total: analysis.lines.length });
           const safeRetract = /^G0*0\b/.test(analysis.lines[index]) && Number(analysis.lines[index].match(/\bZ([-+]?(?:\d+(?:\.\d*)?|\.\d+))\b/)?.[1]) >= 0;
           if (Number.isInteger(this.maxProgramSocketLines) && this.maxProgramSocketLines > 0 && index + 1 - lastSocketRefreshLine >= this.maxProgramSocketLines && safeRetract) {
-            const refreshed = await this.#refreshProgramSocketUnlocked({ expectedOrigin });
+            const refreshed = await this.#refreshProgramSocketUnlocked(cutFrame);
             lastSocketRefreshLine = index + 1;
             this.emit("programTransportRefreshed", { line: index + 1, total: analysis.lines.length, ...refreshed });
           }
@@ -783,6 +842,7 @@ export class GrblTcpController extends EventEmitter {
         const [, finalSpindle] = feedAndSpindle(after);
         if (finalSpindle !== 0) await this.#lineCommandUnlocked("M5", true);
         await this.motionGuard();
+        if (proof) after = (await this.#restoreStockFrameUnlocked({ expectedOrigin, allowG55: true })).after;
         return { before, after, analysis: { bounds: analysis.bounds, maxSpindleRpm: analysis.maxSpindleRpm, executableLines: analysis.executableLines } };
       } catch (error) {
         if (!this.fault) await this.#emergencyStop(`PROGRAM_FAILED:${error.message}`);
@@ -913,7 +973,7 @@ export class GrblTcpController extends EventEmitter {
     throw this.fault;
   }
 
-  async #refreshProgramSocketUnlocked({ timeoutMs = 60_000, expectedOrigin } = {}) {
+  async #refreshProgramSocketUnlocked({ timeoutMs = 60_000, expectedOrigin, expectedStockOrigin, activeWcs = 'G54' } = {}) {
     const deadline = now() + timeoutMs;
     let before;
     while (now() < deadline) {
@@ -948,7 +1008,7 @@ export class GrblTcpController extends EventEmitter {
     const parameterLines = await this.#lineCommandUnlocked("$#", false);
     const after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
     if (after.Pn) throw new Error("Active input pins after transport refresh");
-    inspectEffectiveCutFrame({ modalLines, parameterLines, status: after, expectedOrigin });
+    inspectEffectiveCutFrame({ modalLines, parameterLines, status: after, expectedOrigin, expectedStockOrigin, activeWcs });
     if (after.state !== "Idle") throw new Error(`Controller must remain Idle after transport refresh, got ${after.state}`);
     const [afterFeed, afterSpindle] = feedAndSpindle(after);
     if (afterFeed !== 0 || afterSpindle !== 0) throw new Error(`Non-zero controller feed/spindle after transport refresh: ${after.FS}`);

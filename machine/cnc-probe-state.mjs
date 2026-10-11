@@ -174,3 +174,15 @@ export function writeProbeLock(path, raw) {
 export function removeProbeLock(path) {
   rmSync(path, { force: true });
 }
+
+// Keep the prior measurements as evidence, but make them unusable on restart.
+export function invalidateProbeLock(path, reason) {
+  let prior = {};
+  try { prior = JSON.parse(readFileSync(path, 'utf8')); } catch {}
+  const record = { ...prior, version: 1, locked: false, invalidated: true, invalidatedAt: new Date().toISOString(), invalidatedReason: String(reason) };
+  const temp = `${path}.${process.pid}.tmp`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temp, path);
+  return record;
+}

@@ -21,6 +21,7 @@ const employeeSms=staffSms.create({
  }
 });
 const certifiedCncCam = require("./cnc-certified-library.cjs");
+const woodProofCam = require("./cnc-wood-proof.cjs");
 const { loadCertifiedLibrary: loadCertifiedCncLibrary, certifiedLibraryProvider: certifiedCncLibraryProvider } = certifiedCncCam;
 // Stage-chain and blank-thickness gates, shared verbatim with the Mac bridge.
 const camStageGate = require("./cnc-cam-stage-gate.cjs");
@@ -2815,7 +2816,27 @@ if(action==="email_recipients"){
       if(req.method==="POST"){
         let b=req.body; if(typeof b==="string"){ try{b=JSON.parse(b);}catch(e){ try{ b=Object.fromEntries(new URLSearchParams(b)); }catch(e2){ b={}; } } } b=b||{};
         let preparedJobId="";
-        if(b.addJob&&typeof b.addJob==="object"){
+        if(b.createWoodProof&&typeof b.createWoodProof==="object"){
+          if(!redis)return res.status(503).json({error:"CNC storage unavailable"});
+          const source=st.jobs.find(x=>x&&x.id===String(b.createWoodProof.sourceJobId||""));
+          if(!source)return res.status(404).json({error:"Source metal job not found"});
+          if((st.agent?.health||{}).moving||st.jobs.some(x=>["queued","accepted","running","paused"].includes(String(x?.agentState||""))))return res.status(409).json({error:"Wait for the active CNC operation before creating the wood proof"});
+          try{
+            const proof=woodProofCam.placement({stockWidthMm:st.config.machX,stockHeightMm:st.config.machY,stockReserveMm:st.config.machMargin??0,leftInsetMm:b.createWoodProof.leftInsetMm,frontInsetMm:b.createWoodProof.frontInsetMm});
+            preparedJobId="cnc_"+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36);
+            const rec=woodProofCam.makeJob(source,preparedJobId,proof,now),certs=JSON.parse(rec.camCertificates),codes={};
+            for(const stage of woodProofCam.STAGES){
+              const stored=String(await redis.get("parkside:cnc:gc:"+source.id+":"+stage)||"");
+              const code=stored.startsWith("@gzip:")?require("zlib").gunzipSync(Buffer.from(stored.slice(6),"base64")).toString("utf8"):stored;
+              const cert=certs[stage];
+              woodProofCam.verifyProgram(code,{certifiedLibraryId:rec.certifiedLibraryId,manualRouter:true,camStage:stage,camProvider:cert.provider,camCertification:cert.certification,camSourceHash:cert.sourceHash,camAuditHash:cert.auditHash,camTool:cert.tool});
+              codes[stage]=stored;
+            }
+            for(const stage of woodProofCam.STAGES)await redis.set("parkside:cnc:gc:"+preparedJobId+":"+stage,codes[stage]);
+            await redis.set("parkside:cnc:gc:"+preparedJobId,codes.rough);
+            st.jobs.push(rec);
+          }catch(e){return res.status(409).json({error:String(e.message||e),cnc:st});}
+        } else if(b.addJob&&typeof b.addJob==="object"){
           const a=b.addJob;
           const rec={ id:"cnc_"+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36),
             project:String(a.project||"Job").slice(0,80), material:String(a.material||"").slice(0,120),
@@ -2850,6 +2871,7 @@ if(action==="email_recipients"){
           st.jobs.push(rec);if(st.jobs.length>200)st.jobs=st.jobs.slice(-200);
         } else if(b.updateJob&&typeof b.updateJob==="object"){
           const u=b.updateJob; const id=String(u.id||"");
+          if(st.jobs.some(x=>x&&x.id===id&&x.woodProof))return res.status(409).json({error:"This exact-file wood proof is read-only. Use its placement controls; the original metal job remains separate.",cnc:st});
           st.jobs=st.jobs.map(function(x){ if(x&&x.id===id){ ["project","material","metalMode","depthApprovalStatus","design","status","note","carveType","bit","leveling","speed","sizeMM","sizeUnit","sizeVal","pieceW","pieceH","originOffsetXMm","originOffsetYMm","reliefDepth","invertDepth","flattenBg","stepover","imgAR","depthPatches","reliefSource","cutout","matThick","tabs","tabHeight","xyOriginXMPos","xyOriginYMPos","xyLockedAt","stockThicknessMm","maxCutDepthMm","probeLockedAt","profileMode","profileDepthMm","profilePassDepthMm","sacrificialBackingConfirmed"].forEach(function(k){ if(u[k]!==undefined&&u[k]!==null) x[k]=String(u[k]).slice(0,500); }); if(u.invalidatePlan===true){x.planStatus="draft";x.hasGcode=false;delete x.planHash;delete x.gcodeStages;delete x.activeStage;} x.updatedAt=now; } return x; });
           if(u.invalidatePlan===true) try{if(redis){await redis.del("parkside:cnc:plan:"+id);await redis.del("parkside:cnc:gc:"+id);for(const stage of ["rough","cleanup","finish","detail","profile","release","all"])await redis.del("parkside:cnc:gc:"+id+":"+stage);}}catch(e){}
         } else if(b.delJob){
@@ -2935,6 +2957,22 @@ if(action==="email_recipients"){
           const jid=String(b.jobId); let job=null; for(let i=0;i<st.jobs.length;i++){ if(st.jobs[i]&&st.jobs[i].id===jid){ job=st.jobs[i]; break; } }
           if(!job) return res.status(404).json({error:"job not found"});
           const metalJob=/C752 nickel silver/i.test(String(job.material||""))||String(job.metalMode||"")==="raised-surface";
+          if(job.woodProof&&["installCertifiedProgram","creativeImage","machiningPlan","gcodeStages","gcodeStagesGzip","gcode","gcodeGzip"].some(k=>b[k]!==undefined))return res.status(409).json({error:"Wood proof retains its exact certified Rough/Finish files; regeneration, replacement and other stages are unavailable",cnc:st});
+          if(b.woodProofPlacement!==undefined){
+            if(!job.woodProof)return res.status(409).json({error:"Select a wood-proof job first"});
+            if((st.agent?.health||{}).moving||st.jobs.some(x=>["queued","accepted","running","paused"].includes(String(x?.agentState||""))))return res.status(409).json({error:"Wait for the active CNC operation before changing placement",cnc:st});
+            try{job.woodProof={...woodProofCam.placement({stockWidthMm:st.config.machX,stockHeightMm:st.config.machY,stockReserveMm:st.config.machMargin??0,leftInsetMm:b.woodProofPlacement.leftInsetMm,frontInsetMm:b.woodProofPlacement.frontInsetMm}),configuredAt:now};}catch(e){return res.status(409).json({error:e.message,cnc:st});}
+            const rough=JSON.parse(job.camCertificates||'{}').rough;
+            if(!rough)return res.status(409).json({error:"Wood-proof Rough certificate is missing",cnc:st});
+            const stored=await redis.get("parkside:cnc:gc:"+jid+":rough");
+            if(!stored)return res.status(409).json({error:"Wood-proof Rough program is missing",cnc:st});
+            await redis.set("parkside:cnc:gc:"+jid,stored);
+            const changedTool=job.activeStage!=="rough";
+            job.activeStage="rough";job.camStage="rough";job.gcodeName=JSON.parse(job.gcodeNames||'{}').rough;
+            Object.assign(job,{camProvider:rough.provider,camCertification:rough.certification,camSourceHash:rough.sourceHash,camAuditHash:rough.auditHash,camTool:rough.tool,camAudit:rough.audit});
+            if(changedTool){job.stageRequiresProbe=true;job.stageActivatedAt=now;}
+            job.stageCompletions="{}";job.resumeInvalidatedAt=now;job.updatedAt=now;
+          }
           if(b.installCertifiedProgram!==undefined){
             if(!metalJob)return res.status(409).json({error:"Certified metal programs can be installed only into a raised C752 job."});
             if(["queued","accepted","running","paused"].includes(String(job.agentState||"")))return res.status(409).json({error:"Stop the current machine operation before replacing its program library",cnc:st});
@@ -2987,10 +3025,10 @@ if(action==="email_recipients"){
             job.hasGcode=true;job.gcodeStages=JSON.stringify(order);job.activeStage=active;job.gcodeName="auto-"+active+".nc";job.planStatus="approved";job.gcodeEncoding="gzip-base64";job.stageRequiresProbe=true;job.stageActivatedAt=now;job.resumeInvalidatedAt=now;delete job.profileCompletedAt;job.updatedAt=now;
           }
           if(b.activateStage!==undefined){
-            const stage=String(b.activateStage||""); if(["rough","cleanup","finish","detail","profile","release","all"].indexOf(stage)===-1) return res.status(400).json({error:"invalid machining stage"});
+            const stage=String(b.activateStage||""); if(job.woodProof){try{woodProofCam.assertStage(stage);}catch(e){return res.status(409).json({error:e.message,cnc:st});}} if(["rough","cleanup","finish","detail","profile","release","all"].indexOf(stage)===-1) return res.status(400).json({error:"invalid machining stage"});
             if(["queued","accepted","running","paused"].indexOf(String(job.agentState||""))!==-1) return res.status(409).json({error:"Stop the current machine operation before loading another stage",cnc:st});
-            let stageOrder=[];try{stageOrder=JSON.parse(job.gcodeStages||"[]");}catch(e){}let completed={};try{completed=JSON.parse(job.stageCompletions||"{}");}catch(e){}const certifiedOrder=metalCertifiedOrder(job),certifiedIndex=certifiedOrder.indexOf(stage);
-            if(metalJob&&certifiedIndex>0){const required=certifiedOrder[certifiedIndex-1];if(!stageOrder.includes(required))return res.status(409).json({error:"Import the certified "+required+" stage before loading "+stage,cnc:st});if(!completed[required])return res.status(409).json({error:"Complete the "+required+" stage before loading "+stage,cnc:st});}
+            let stageOrder=[];try{stageOrder=JSON.parse(job.gcodeStages||"[]");}catch(e){}let completed={};try{completed=JSON.parse(job.stageCompletions||"{}");}catch(e){}const certifiedOrder=job.woodProof?woodProofCam.STAGES:metalCertifiedOrder(job),certifiedIndex=certifiedOrder.indexOf(stage);
+            if((metalJob||job.woodProof)&&certifiedIndex>0){const required=certifiedOrder[certifiedIndex-1];if(!stageOrder.includes(required))return res.status(409).json({error:"Import the certified "+required+" stage before loading "+stage,cnc:st});if(!completed[required])return res.status(409).json({error:"Complete the "+required+" stage before loading "+stage,cnc:st});}
             if(stage==="release"&&!job.profileCompletedAt)return res.status(409).json({error:"Complete the Profile stage before loading Final Release",cnc:st});
             let code=""; try{if(redis){const v=await redis.get("parkside:cnc:gc:"+jid+":"+stage);code=(v==null)?"":String(v);}}catch(e){} if(!code)return res.status(404).json({error:"stage G-code not found"});
             let certs={},names={};try{certs=JSON.parse(job.camCertificates||"{}");}catch(e){}try{names=JSON.parse(job.gcodeNames||"{}");}catch(e){}const priorCert=certs[job.activeStage]||null,nextCert=certs[stage]||null;if(metalJob&&!nextCert)return res.status(409).json({error:"Certified CAM metadata is missing for "+stage,cnc:st});
@@ -3040,6 +3078,13 @@ if(action==="email_recipients"){
               if(act==="zero_z"&&(!setup.probeLocked||!setup.stockProbeReady)) return res.status(409).json({error:"Lock a measured stock calibration before setting physical stock Z zero",cnc:st});
               if(act==="zero_z"&&b.confirm!==true) return res.status(400).json({error:"Explicit stock Z-zero confirmation is required",cnc:st});
               if(act==="start"){
+                if(job.woodProof){try{
+                  if(health.woodProofVersion!==1)throw Error("Update the Mac bridge before running this wood proof; placement support is not available yet");
+                  woodProofCam.assertStage(String(job.activeStage||""));
+                  woodProofCam.validatePlacement(job.woodProof,{stockWidthMm:st.config.machX,stockHeightMm:st.config.machY,stockReserveMm:st.config.machMargin??0});
+                  woodProofCam.assertSurface(health.surfaceProof?.proof,job.woodProof);
+                  if(job.activeStage==="finish"&&!JSON.parse(job.stageCompletions||"{}").rough)throw Error("Complete this wood proof's Rough stage before Finish");
+                }catch(e){return res.status(409).json({error:e.message,cnc:st});}}
                 if(!health.controllerProtection||health.controllerProtection.ready!==true) return res.status(409).json({error:"Controller protection blocks cutting. "+String((health.controllerProtection||{}).reason||"Restore controller protection in Project before Start."),cnc:st});
                 // Conditional cut hold, evaluated against the live bridge snapshot:
                 // plate confirmed, Z locked, calibration captured at the configured
@@ -3099,9 +3144,10 @@ if(action==="email_recipients"){
                 const stockWidthMm=Number(st.config.machX), stockHeightMm=Number(st.config.machY), stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);
                 const designWidthMm=Number(job.sizeMM)||0, designHeightMm=Number(job.pieceH)||Math.round(designWidthMm*(Number(job.imgAR)||0.75));
                 if(!(stockWidthMm>0&&stockHeightMm>0)) return res.status(409).json({error:"Enter the actual stock X/Y dimensions before Start",cnc:st});
-                if(designWidthMm>stockWidthMm-stockReserveMm+0.001||designHeightMm>stockHeightMm-stockReserveMm+0.001) return res.status(409).json({error:"The complete toolpath does not fit inside the entered stock dimensions",cnc:st});
+                if(!job.woodProof&&(designWidthMm>stockWidthMm-stockReserveMm+0.001||designHeightMm>stockHeightMm-stockReserveMm+0.001)) return res.status(409).json({error:"The complete toolpath does not fit inside the entered stock dimensions",cnc:st});
               }
               if(act==="resume_saved"){
+                if(job.woodProof)return res.status(409).json({error:"Wood proof has no saved-program resume. Verify placement/setup and restart the stage from line 1.",cnc:st});
                 if(metalJob) return res.status(409).json({error:"Saved-program resume is disabled for metal. Re-establish X/Y and Z, then restart the certified Kiri:Moto operation from line 1.",cnc:st});
                 if(b.confirm!==true) return res.status(400).json({error:"Explicit saved-carve resume confirmation is required",cnc:st});
                 if(!health.resume||String(health.resume.state)!=="interrupted") return res.status(409).json({error:"No interrupted carve checkpoint is available",cnc:st});
@@ -3140,7 +3186,8 @@ if(action==="email_recipients"){
               }
               if(act==="probe_bed")cmd.confirmReprobe=b.confirmReprobe===true;
               if(act==="start"){
-                cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;cmd.operation=String(job.activeStage||job.camStage||"");cmd.material=String(job.material||"");cmd.camProvider=String(job.camProvider||"");cmd.camCertification=String(job.camCertification||"");cmd.camSourceHash=String(job.camSourceHash||"");cmd.camAuditHash=String(job.camAuditHash||"");cmd.camStage=String(job.camStage||"");cmd.camTool=String(job.camTool||"");cmd.certifiedLibraryId=String(job.certifiedLibraryId||"");
+                cmd.stockWidthMm=Number(st.config.machX);cmd.stockHeightMm=Number(st.config.machY);cmd.stockReserveMm=Math.max(0,Number(st.config.machMargin)||0);cmd.manualRouter=job.planStatus==="approved"&&!!job.gcodeStages;cmd.operation=String(job.activeStage||job.camStage||"");cmd.material=String(job.material||"");cmd.camProvider=String(job.camProvider||"");cmd.camCertification=String(job.camCertification||"");cmd.camSourceHash=String(job.camSourceHash||"");cmd.camAuditHash=String(job.camAuditHash||"");cmd.camStage=String(job.camStage||"");cmd.camTool=String(job.camTool||"");cmd.certifiedLibraryId=String(job.certifiedLibraryId||"");cmd.woodProof=job.woodProof||null;
+                if(job.woodProof){try{const stored=String(await redis.get("parkside:cnc:gc:"+jid)||""),code=stored.startsWith("@gzip:")?require("zlib").gunzipSync(Buffer.from(stored.slice(6),"base64")).toString("utf8"):stored;woodProofCam.verifyProgram(code,cmd);}catch(e){return res.status(409).json({error:e.message,cnc:st});}}
                 const throughProfile=["profile","release"].includes(cmd.operation)&&job.profileMode==="sacrificial-through"&&job.sacrificialBackingConfirmed==="true";
                 if(throughProfile){const stock=Number(setup.stockThicknessMm),target=Number(job.profileDepthMm),allowance=target-stock;if(!(stock>0&&target>=stock&&allowance>=0&&allowance<=.2001))return res.status(409).json({error:"Approved sacrificial profile depth no longer matches the measured stock",cnc:st});cmd.allowSacrificialCutThrough=true;cmd.sacrificialBackingConfirmed=true;cmd.profileDepthMm=target;}
               }

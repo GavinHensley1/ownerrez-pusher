@@ -33,7 +33,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /One press sends one command/);
   assert.match(html, /aria-live="assertive"/);
   assert.match(html, /zero\.disabled=motionBlocked/);
-  assert.match(html, /recoverProbe\.disabled=motionBlocked/);
+  assert.match(html, /recoverProbe\.disabled=baseBlocked/);
   assert.match(html, /function cncControllerState/);
   assert.match(html, /Controller ready/);
   assert.match(html, /Controller connected · /);
@@ -229,7 +229,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /haveX=false,haveY=false/);
   assert.match(html, /if\(hadXY\)upd\(px,py\);upd\(nx,ny\)/);
   assert.match(html, /FULL-STOCK PLACEMENT/);
-  assert.match(html, /Exact motion bounds:/);
+  assert.match(html, /Exact motion centerline bounds:/);
   assert.match(html, /prev\.style\.display='block'/);
   assert.match(html, /Previewing does not load or arm the stage/);
   assert.match(html, /function cncStartFrameCheck/);

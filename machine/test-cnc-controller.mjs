@@ -3,7 +3,7 @@ import net from "node:net";
 import test from "node:test";
 import { GrblTcpController, parseProbeResult, parseStatus, parseWorkOffset, probeRetractTimeoutMs, VirtualWorkspace } from "./cnc-controller.mjs";
 
-const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, probeContactAtMm = 1, failSlowProbe = false, startProbeAlarm = false, startLimitY = false, startAlarm = false, startDoor = false, startHold = false, modalState = "G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0", g92Z = 0, tlo = 0, initialOffsetZ = 0, ignoreOffsetWrite = false, probeReportError = 0, slowContactDelta = 0, resetOnLinear = false, reportInches = false, resetOnCommand, refreshOffsetDelta = 0, pinAfterStatus = Infinity } = {}) => {
+const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = false, delimiter = "\r\n", jogNeverIdles = false, lateQueryAckMs = 0, homingAlarm = false, probeAssertsZ = true, probeContactAtMm = 1, failSlowProbe = false, startProbeAlarm = false, startLimitY = false, startAlarm = false, startDoor = false, startHold = false, modalState = "G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0", g92Z = 0, tlo = 0, initialOffsetZ = 0, ignoreOffsetWrite = false, probeReportError = 0, slowContactDelta = 0, resetOnLinear = false, reportInches = false, resetOnCommand, refreshOffsetDelta = 0, pinAfterStatus = Infinity, fastStopDeltaZ = 0, slowStopDeltaZ = 0, fastProbeDeltaX = 0 } = {}) => {
   let connections = 0, statusQueries = 0, probeCommands = 0, x = 0, y = startLimitY ? 151.55 : 0, z = startProbeAlarm ? -74 : 0, incremental = false, jogging = false, jogPolls = 0, homing = false, homePolls = 0, alarmed = startProbeAlarm || startLimitY || startAlarm, door = startDoor, hold = startHold, spindle = 0, probeActive = startProbeAlarm, zLimitActive = startProbeAlarm, yLimitActive = startLimitY, hardLimits = true, probeSucceeded = false, probeZ = z;
   const probeSurfaceZ = -Math.abs(Number(probeContactAtMm));
   const workOffset = {X:0,Y:0,Z:initialOffsetZ};
@@ -39,7 +39,7 @@ const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = fal
             const command = buffer.trim(); buffer = "";
             if (command === resetOnCommand) socket.write(`Grbl 1.1h [reset]${delimiter}`);
             else if (command === "$G") setTimeout(() => socket.write(`[GC:${modalState}]${delimiter}ok${delimiter}`), lateQueryAckMs);
-            else if (command === "$#") socket.write(`[G54:${workOffset.X.toFixed(3)},${workOffset.Y.toFixed(3)},${workOffset.Z.toFixed(3)}]${delimiter}[G92:0.000,0.000,${g92Z.toFixed(3)}]${delimiter}[TLO:${tlo.toFixed(3)}]${delimiter}[PRB:${x.toFixed(3)},${y.toFixed(3)},${probeZ.toFixed(3)}:${probeSucceeded ? 1 : 0}]${delimiter}ok${delimiter}`);
+            else if (command === "$#") socket.write(`[G54:${workOffset.X.toFixed(3)},${workOffset.Y.toFixed(3)},${workOffset.Z.toFixed(3)}]${delimiter}[G92:0.000,0.000,${g92Z.toFixed(3)}]${delimiter}[TLO:${tlo.toFixed(3)}]${delimiter}[PRB:${(x + (probeCommands === 1 ? fastProbeDeltaX : 0)).toFixed(3)},${y.toFixed(3)},${probeZ.toFixed(3)}:${probeSucceeded ? 1 : 0}]${delimiter}ok${delimiter}`);
             else if (command === "$$") {
               if (alarmed) socket.write(`error:9${delimiter}`);
               else socket.write(`$3=4${delimiter}$13=${reportInches ? 1 : 0}${delimiter}$21=${hardLimits ? 1 : 0}${delimiter}$27=3.000${delimiter}ok${delimiter}`);
@@ -64,6 +64,7 @@ const makeMock = async ({ ignoreFirstStatus = false, ignoreLinearMotionAck = fal
               probeSucceeded = !(failSlowProbe && probeCommands > 1) && target <= probeSurfaceZ;
               z = probeSucceeded ? probeSurfaceZ + (probeCommands > 1 ? slowContactDelta : 0) : target;
               probeZ = z + probeReportError;
+              if (probeSucceeded) z += probeCommands === 1 ? fastStopDeltaZ : slowStopDeltaZ;
               probeActive = probeSucceeded;
               zLimitActive = probeSucceeded && probeAssertsZ;
               if (/^G38\.2/.test(command) && !probeSucceeded) { alarmed = true; socket.write(`ALARM:5${delimiter}`); }
@@ -512,4 +513,32 @@ test("probe zero uses the latched trigger position, not small post-trigger stopp
     assert.equal(result.frameReadback.verified,true);
     assert(mock.bytes.toString().includes("G10 L20 P1 Z19.990\r"));
   } finally {await c.close();await mock.close();}
+});
+
+
+test('fast probe permits bounded downward braking only with strict slow PRB confirmation', async () => {
+  const mock = await makeMock({ fastStopDeltaZ: -0.100, slowStopDeltaZ: -0.001 });
+  const c = new GrblTcpController({ host:'127.0.0.1', port:mock.port, motionGuard:async()=>{} });
+  const evidence=[];c.on('probeEvidence', x=>evidence.push(x));
+  try {
+    const result=await c.probeZ({thicknessMm:12,maxSearchMm:20});
+    assert.equal(result.finalProbe.position.Z,result.firstProbe.position.Z);
+    assert.equal(result.actualWorkOffset.Z,result.finalProbe.position.Z-12);
+    assert.equal(evidence.length,2);
+    assert.match(evidence[0].contact.MPos,/-1.100$/);
+    assert.equal(evidence[0].probe.position.Z,-1);
+    assert.equal(result.firstRetract.after.Pn,undefined);
+  } finally {await c.close();await mock.close();}
+});
+for (const [name, options, pattern] of [
+  ['fast lateral drift',{fastProbeDeltaX:.1},/first probe PRB\/X/],
+  ['fast reverse travel',{fastStopDeltaZ:.1},/first probe PRB\/Z/],
+  ['fast braking consumes retract',{fastStopDeltaZ:-1},/first probe PRB\/Z/],
+  ['slow overshoot',{fastStopDeltaZ:-.1,slowStopDeltaZ:-.1},/slow probe PRB\/Z/],
+  ['different trigger heights',{fastStopDeltaZ:-.1,slowContactDelta:.1},/Probe touches disagree/],
+]) test('probe rejects '+name+' before changing zero',async()=>{
+  const mock=await makeMock(options),c=new GrblTcpController({host:'127.0.0.1',port:mock.port,motionGuard:async()=>{}});
+  const evidence=[];c.on('probeEvidence', x=>evidence.push(x));
+  try {await assert.rejects(c.probeZ({thicknessMm:12,maxSearchMm:20}),pattern);assert(!mock.bytes.includes(Buffer.from('G10 L20 P1')));assert(evidence.length>0);}
+  finally{await c.close();await mock.close();}
 });

@@ -4,13 +4,14 @@ import programHolds from "../api/cnc-program-holds.cjs";
 // the blank-thickness rule for a through-cut cannot drift between API and bridge.
 import certifiedCam from "../api/cnc-certified-library.cjs";
 import camStageGate from "../api/cnc-cam-stage-gate.cjs";
+import woodProofCam from "../api/cnc-wood-proof.cjs";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GrblTcpController, coordinates, parseStatus, parseWorkOffset, VirtualWorkspace } from "./cnc-controller.mjs";
 import { approvedProgramDepth, assertPlungeFeedWithinLimit, limitVerticalPlungeFeed, validateProgramEnvelope, validateProgramStockEnvelope } from "./cnc-program.mjs";
-import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, readProbeLockInvalidation, removeProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
+import { applyProbeLock, assertLockedProbeZJog, calibrationFromSetup, readProbeLock, readProbeLockInvalidation, removeProbeLock, invalidateProbeLock, writeProbeLock } from "./cnc-probe-state.mjs";
 import { applyMaterialProfile, materialProfileFromSetup, readMaterialProfile, removeMaterialProfile, writeMaterialProfile } from "./cnc-material-state.mjs";
 import { applyXyLock, planXyPowerCycleRecovery, readXyLock, removeXyLock, writeXyLock, xyLockFromSetup } from "./cnc-xy-state.mjs";
 import { readProgram, saveProgram } from "./cnc-program-state.mjs";
@@ -265,6 +266,11 @@ const programGuard = async ({ before, analysis, programContext }) => {
     material: programContext?.material,
     metalMode: programContext?.metalMode === true,
   });
+  if (programContext?.woodProof) {
+    const proof = woodProofCam.validatePlacement(programContext.woodProof, programContext);
+    woodProofCam.assertSurface(surfaceProof, proof);
+    analysis = woodProofCam.translatedAnalysis(analysis, proof, programContext.camStage, true);
+  }
   const allowedProgramDepthMm = approvedProgramDepth(setup, programContext);
   validateProgramEnvelope(analysis, { widthMm: 360, heightMm: 360, maxDepthMm: allowedProgramDepthMm, maxSafeZMm: 6 });
   validateProgramStockEnvelope(analysis, { widthMm: programContext?.stockWidthMm, heightMm: programContext?.stockHeightMm, reserveMm: programContext?.stockReserveMm });
@@ -315,6 +321,8 @@ const captureInterruptedPosition = (status, reason, { initial = false, moved = f
   });
 };
 controller.on("cutFrameVerified", value => recordEvent("program.effective_frame_verified", value));
+controller.on("stockFrameRestored", value => recordEvent("program.stock_frame_restored", value));
+controller.on('probeEvidence', value => recordEvent('probe.contact_evidence', value));
 controller.on("programProgress", (value) => {
   Object.assign(job, { progress: value.progress, message: `Line ${value.line} of ${value.total}`, updatedAt: new Date().toISOString() });
   persistRunProgress({ state: "running", lastCompletedLine: value.line, totalLines: value.total, message: job.message });
@@ -486,6 +494,13 @@ const restoreVerifiedCalibration = (status, workOffset) => {
   finishFrameRecovery();
   return checked;
 };
+const restoreStockCoordinateFrame = async () => {
+  let knownWoodProof = false;
+  try { knownWoodProof = !!readProgram(PROGRAM_STATE_PATH)?.context?.woodProof; } catch {}
+  const result = await controller.restoreStockFrame({ allowG55: knownWoodProof });
+  lastControllerStatus = result.after;
+  return result;
+};
 const reconnectAndVerifyFrame = async () => {
   if (hazardousOperationActive()) throw new Error("Stop the active operation before reconnecting");
   if (reconnectPromise) throw new Error("A connection check is already in progress");
@@ -505,6 +520,7 @@ const reconnectAndVerifyFrame = async () => {
     incident = undefined;
     return { ok: true, status: before, frameRecovery };
   }
+  await restoreStockCoordinateFrame();
   await restoreHardLimitsOnStartup(before, { restoreHardLimits: false });
   const workOffset = parseWorkOffset(await controller.query("$#"));
   const after = await readStatus();
@@ -533,6 +549,7 @@ const recoverIdleConnection = async () => {
       incident = undefined;
       return;
     }
+    await restoreStockCoordinateFrame();
     const workOffset = parseWorkOffset(await controller.query("$#"));
     lastWorkOffset = workOffset;
     const verifiedStatus = await readStatus();
@@ -628,6 +645,7 @@ const resumeSnapshot = () => {
   }
 
   const context = saved.context || {};
+  if (context.woodProof) return refuse("Wood proof has no saved checkpoint resume. Recheck placement and setup, then restart the stage from line 1.", false);
   if (/C752 nickel silver/i.test(String(context.material || ""))) {
     return refuse("Resume is permanently disabled for metal. Restart the certified Kiri:Moto stage from line 1 after deliberate X/Y and Z recovery.", true);
   }
@@ -665,7 +683,7 @@ const health = () => {
   clearStaleMotionFlag();
   autoVerifyStoppedFrame();
   if (!controller.connected && !hazardousOperationActive() && !frameIncident?.latched) void recoverIdleConnection();
-  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, controllerProtection: { ...controllerProtection }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: resumeSnapshot() };
+  return { ok: true, woodProofVersion: 1, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, controllerProtection: { ...controllerProtection }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: resumeSnapshot() };
 };
 const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (new Set(["Door:0", "Hold:0"]).has(status.state)) throw new Error(`Controller positioning is paused in ${status.state}. The external router may be removed; use Enable positioning first.`); if (status.state !== "Idle") throw new Error(`Controller must report Idle before positioning, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`); return status; };
@@ -864,6 +882,9 @@ const probeSurface = async (kind, payload) => {
   assertSetupFrame();
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (!new Set(["bed", "stock", "tool"]).has(kind)) throw new Error("Unknown probe surface");
+  const puckMm = normalizePuckThickness(payload.thicknessMm);
+  if (puckMm === null) throw new Error(`Probe plate thickness must be supplied and between ${PROBE_PUCK_MIN_MM} and ${PROBE_PUCK_MAX_MM} mm`);
+  if (kind !== 'bed' && (!plateThicknessMatches(puckMm, configuredPlateMm()) || (kind === 'stock' && setup.bedProbeReady && !plateThicknessMatches(puckMm, setup.probeThickness)))) throw new Error('Puck height differs from the saved measurement. Confirm it and probe the bed and stock again; mixed-puck measurements are not permitted.');
   let materialProfile;
   if (kind === "bed") {
     if (setup.probeLocked && payload.confirmReprobe !== true) throw new Error("Probe calibration is locked; confirm a bed re-probe to replace it");
@@ -898,8 +919,6 @@ const probeSurface = async (kind, payload) => {
   }
   // Never probe against an absent or out-of-range plate value. This number sets
   // absolute Z zero one-for-one, so a silent default here is a silent depth error.
-  const puckMm = normalizePuckThickness(payload.thicknessMm);
-  if (puckMm === null) throw new Error(`Probe plate thickness must be supplied and between ${PROBE_PUCK_MIN_MM} and ${PROBE_PUCK_MAX_MM} mm`);
   // Carried along with the probe request, so it is stored and used but is NOT a
   // confirmation. Confirming here is how 12.1 mm became "operator-measured".
   setConfiguredPlateMm(puckMm, "Supplied with a Project probe command");
@@ -951,11 +970,36 @@ const probeSurface = async (kind, payload) => {
 // Changing it invalidates any surface proof, and a stored calibration that used a
 // different plate is rejected on its next restore attempt.
 const setPlateThickness = async (payload = {}) => {
+  if (moving || ['running', 'paused'].includes(job.state)) throw new Error('A CNC operation is already active');
+  const requested = normalizePuckThickness(payload.thicknessMm);
+  if (requested === null) throw new Error('Plate thickness must be between 5 and 30 mm');
+  const changed = !plateThicknessMatches(requested, configuredPlateMm());
+  if (changed) {
+    invalidateProbeLock(PROBE_STATE_PATH, `Puck thickness changed from ${configuredPlateMm()} to ${requested} mm`);
+    clearProbeSetup('plate_changed_reprobe_required');
+    Object.assign(setup, { materialReady: false, savedStockThicknessMm: null, savedSafetyFloorMm: null });
+    workspace.clear();
+  }
   // The ONE path that may confirm a plate. It is a deliberate operator action in
   // the UI, so it is also the only place the value may be attributed to them.
   const thicknessMm = setConfiguredPlateMm(payload.thicknessMm, "Operator-measured and entered via Project", { confirmedByOperator: true, measuredBy: "operator" });
   recordEvent("plate.configured", { thicknessMm, confirmed: true, confirmedByOperator: true });
   return { ok: true, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), setup: { ...setup } };
+};
+const recoverProbeContact = async (payload = {}) => {
+  assertSetupFrame();
+  if (hazardousOperationActive()) throw new Error('A CNC operation is already active');
+  setMoving(true, "probe contact recovery");
+  try {
+    const result = await controller.recoverProbeContact(payload);
+    lastControllerStatus = result.after;
+    // Limit/contact recovery can follow an interrupted wood proof. Verify the
+    // stock frame again before any other setup control becomes reachable.
+    result.after = (await restoreStockCoordinateFrame()).after;
+    captureInterruptedPosition(result.after, 'probe_contact_recovery', { moved: true });
+    recordEvent('probe.contact_recovered', result);
+    return result;
+  } finally { setMoving(false); }
 };
 // Independent surface-contact verification. See cnc-surface-proof.mjs for why a
 // second, plate-free measurement is the only thing that can catch a wrong plate:
@@ -1052,7 +1096,7 @@ const unlockProbeCalibration = async (payload) => {
   workspace.clear();
   return { ok: true, setup: { ...setup } };
 };
-const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", material = "", camProvider = "", camCertification = "", camSourceHash = "", camAuditHash = "", camStage = "", camTool = "", certifiedLibraryId = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
+const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", material = "", camProvider = "", camCertification = "", camSourceHash = "", camAuditHash = "", camStage = "", camTool = "", certifiedLibraryId = "", woodProof = null, allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
   assertCuttingProtection();
   const actualSourceHash = createHash("sha256").update(String(gcode || "")).digest("hex");
   // Independent third enforcement of the conditional cut hold, after the browser
@@ -1068,11 +1112,12 @@ const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockRe
   assertFrameValid(frameIncident);
   if (moving || ["running", "paused"].includes(job.state)) throw new Error("A CNC operation is already active");
   if (/C752 nickel silver/i.test(String(material || "")) && createHash("sha256").update(String(gcode || "")).digest("hex") !== String(camSourceHash || "")) throw new Error("Metal G-code no longer matches its certified Kiri:Moto source hash");
-  const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true, operation: String(operation || ""), material: String(material || ""), camProvider: String(camProvider || ""), camCertification: String(camCertification || ""), camSourceHash: String(camSourceHash || ""), camAuditHash: String(camAuditHash || ""), camStage: String(camStage || ""), camTool: String(camTool || ""), certifiedLibraryId: String(certifiedLibraryId || ""), allowSacrificialCutThrough: allowSacrificialCutThrough === true, sacrificialBackingConfirmed: sacrificialBackingConfirmed === true, profileDepthMm: profileDepthMm !== null && profileDepthMm !== undefined && Number.isFinite(Number(profileDepthMm)) ? Number(profileDepthMm) : null } });
+  const savedProgram = saveProgram(PROGRAM_STATE_PATH, { version: 1, jobId, gcode, capturedAt: new Date().toISOString(), state: "accepted", context: { stockWidthMm, stockHeightMm, stockReserveMm, manualRouter: manualRouter === true, operation: String(operation || ""), material: String(material || ""), camProvider: String(camProvider || ""), camCertification: String(camCertification || ""), camSourceHash: String(camSourceHash || ""), camAuditHash: String(camAuditHash || ""), camStage: String(camStage || ""), camTool: String(camTool || ""), certifiedLibraryId: String(certifiedLibraryId || ""), woodProof, allowSacrificialCutThrough: allowSacrificialCutThrough === true, sacrificialBackingConfirmed: sacrificialBackingConfirmed === true, profileDepthMm: profileDepthMm !== null && profileDepthMm !== undefined && Number.isFinite(Number(profileDepthMm)) ? Number(profileDepthMm) : null } });
+  if (savedProgram.context.woodProof) woodProofCam.assertSurface(surfaceProof, savedProgram.context.woodProof);
   activeRunCheckpoint = writeRunCheckpoint(RUN_STATE_PATH, { version: 1, jobId: savedProgram.jobId, programCapturedAt: savedProgram.capturedAt, state: "running", lastCompletedLine: 0, totalLines: savedProgram.analysis.executableLines, message: "Preflight checks", updatedAt: new Date().toISOString() });
   setMoving(true, "program run"); incident = undefined; Object.assign(job, { state: "running", jobId: String(jobId || ""), progress: 0, message: "Preflight checks", updatedAt: new Date().toISOString() });
   recordEvent("program.started", { jobId, executableLines: savedProgram.analysis.executableLines, manualRouter: manualRouter === true });
-  try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); assertPlungeFeedWithinLimit(conditionedGcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, expectedOrigin: { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos }, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); persistRunProgress({ state: "done", lastCompletedLine: activeRunCheckpoint.totalLines, message: "Carve complete" }); recordEvent("program.completed", { jobId, totalLines: activeRunCheckpoint.totalLines }); return result; }
+  try { const conditionedGcode = limitVerticalPlungeFeed(savedProgram.gcode, 60); if (woodProof && conditionedGcode !== savedProgram.gcode) throw new Error("Wood-proof source must be streamed unchanged"); assertPlungeFeedWithinLimit(conditionedGcode, 60); const result = await controller.runProgram(conditionedGcode, { programContext: savedProgram.context, expectedOrigin: { X: setup.xyOriginMPos?.X, Y: setup.xyOriginMPos?.Y, Z: setup.zOriginMPos }, onProgress: async (p) => Object.assign(job, { progress: p.progress, message: `Line ${p.line} of ${p.total}`, updatedAt: new Date().toISOString() }) }); lastControllerStatus = result.after; persistLockedXy(result.after); persistLockedProbe(result.after); Object.assign(job, { state: "done", progress: 100, message: "Carve complete", updatedAt: new Date().toISOString() }); persistRunProgress({ state: "done", lastCompletedLine: activeRunCheckpoint.totalLines, message: "Carve complete" }); recordEvent("program.completed", { jobId, totalLines: activeRunCheckpoint.totalLines }); return result; }
   catch (error) { incident = error?.message || "PROGRAM_FAILED"; Object.assign(job, { state: "error", message: incident, updatedAt: new Date().toISOString() }); persistRunProgress({ state: "interrupted", message: incident }); recordEvent("program.interrupted", { jobId, message: incident, lastCompletedLine: activeRunCheckpoint?.lastCompletedLine }); throw error; } finally { setMoving(false); }
 };
 const resumeSavedProgram = async (payload) => {
@@ -1139,6 +1184,7 @@ const recoverStoppedController = async (payload) => {
     }
     const result = held ? await controller.discardHeldMotion() : await controller.recoverStoppedController({ allowHeldResume: false });
     lastControllerStatus = result.after;
+    await restoreStockCoordinateFrame();
     const protection = await restoreHardLimitsOnStartup(result.after);
     const workOffset = parseWorkOffset(await controller.query("$#"));
     const after = await readStatus();
@@ -1168,6 +1214,7 @@ const recoverRearYLimit = async (payload) => {
   try {
     const result = await controller.recoverRearYLimit({ retractMm: 5, feed: 100 });
     lastControllerStatus = result.after;
+    result.after = (await restoreStockCoordinateFrame()).after;
     const workOffset = parseWorkOffset(await controller.query("$#"));
     lastWorkOffset = workOffset;
     restoreVerifiedCalibration(result.before, workOffset);
@@ -1208,7 +1255,7 @@ const requestHandler = async (req, res) => {
     if (req.method === "POST" && req.url === "/probe/plate") return json(res, 200, await setPlateThickness(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/probe/lock") return json(res, 200, await lockProbeCalibration());
     if (req.method === "POST" && req.url === "/probe/unlock") return json(res, 200, await unlockProbeCalibration(await bodyJson(req)));
-    if (req.method === "POST" && req.url === "/probe/recover") return json(res, 200, await controller.recoverProbeContact(await bodyJson(req)));
+    if (req.method === "POST" && req.url === "/probe/recover") return json(res, 200, await recoverProbeContact(await bodyJson(req)));
     if (req.method === "POST" && req.url === "/job/start") return json(res, 200, await startProgram(await bodyJson(req, MAX_PROGRAM_BODY_BYTES)));
     if (req.method === "POST" && req.url === "/job/pause") { controller.pauseProgramNow(); Object.assign(job, { state: "paused", message: "Paused", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
     if (req.method === "POST" && req.url === "/job/resume") { assertFrameValid(frameIncident); if (!controller.programRunning || job.state !== "paused") throw new Error("No live paused program is available to resume"); controller.resumeProgramNow(); Object.assign(job, { state: "running", message: "Running", updatedAt: new Date().toISOString() }); return json(res, 200, { ok: true, job: { ...job } }); }
