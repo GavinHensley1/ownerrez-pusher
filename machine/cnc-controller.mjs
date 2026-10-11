@@ -301,7 +301,62 @@ export class GrblTcpController extends EventEmitter {
     });
   }
 
-  recoverStoppedController({ allowHeldResume = true } = {}) {
+  // An operator's setup recovery is not Cycle Start. Even a stopped Hold:0 or
+  // Door:0 can retain a planner full of cutting moves, so discard it explicitly
+  // instead of sending "~". GRBL's reset also clears the serial RX and partial
+  // line buffers (gnea/grbl main.c); a TCP reconnect alone does none of these.
+  discardHeldMotion() {
+    return this.#enqueue(async () => {
+      if (this.programRunning) throw new Error("Stop the active program before discarding held motion");
+      if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for controller recovery");
+      await this.motionGuard({ allowHeldRecovery: true });
+      const before = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      const [feed, spindle] = feedAndSpindle(before);
+      if (!new Set(["Idle", "Alarm", "Hold:0", "Door:0"]).has(before.state) || feed !== 0 || spindle !== 0 || before.Pn) {
+        throw new Error(`Buffer discard requires stopped Idle/Alarm/Hold:0/Door:0 with zero feed/spindle and clear inputs, got ${before.raw}`);
+      }
+      // Only realtime input is processed in GRBL's Hold/Door suspend loop.
+      // Asking for $N here would deadlock recovery on the very held state it
+      // must clear. This is therefore an explicit operator-requested controller
+      // reset, with the UI warning that configured firmware startup commands may
+      // execute. Never describe reset as proof that no physical motion occurred.
+      let timer, onLine, onFault, onClose;
+      const welcome = new Promise((resolve, reject) => {
+        onLine = line => { if (/^Grbl\b/i.test(line)) resolve(line); };
+        onFault = error => reject(error);
+        onClose = () => reject(new Error("Controller disconnected before reset acknowledgment"));
+        this.on("line", onLine); this.on("fault", onFault); this.on("close", onClose);
+        timer = setTimeout(() => reject(new Error("Controller reset was not acknowledged; manual positioning remains blocked")), this.commandTimeoutMs);
+      });
+      let resetWelcome;
+      try {
+        this.socket.write(Buffer.from([0x18]));
+        resetWelcome = await welcome;
+      } finally {
+        clearTimeout(timer);
+        this.off("line", onLine); this.off("fault", onFault); this.off("close", onClose);
+      }
+      let after = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+      if (after.FS !== "0,0" || !new Set(["Idle", "Alarm", "Hold:0", "Door:0"]).has(after.state)) {
+        await this.#emergencyStop(`UNEXPECTED_MOTION_AFTER_BUFFER_DISCARD:${after.raw}`);
+        throw this.fault;
+      }
+      if (after.Pn) throw new Error(`Controller inputs are not clear after buffer discard: ${after.raw}`);
+      if (after.state === "Alarm") {
+        await this.#lineCommandUnlocked("$X", false);
+        const unlocked = parseStatus(await this.#statusUnlocked({ attempts: 5 }));
+        if (unlocked.MPos !== after.MPos || unlocked.FS !== "0,0" || !new Set(["Idle", "Alarm", "Hold:0", "Door:0"]).has(unlocked.state)) {
+          await this.#emergencyStop("UNEXPECTED_MOTION_WHILE_UNLOCKING_AFTER_BUFFER_DISCARD");
+          throw this.fault;
+        }
+        after = unlocked;
+      }
+      if (after.state !== "Idle" || after.FS !== "0,0" || after.Pn) throw new Error(`Controller must be Idle after buffer discard, got ${after.raw}; no cycle-start was sent`);
+      return { before, after, resetWelcome, discardedBufferedMotion: true };
+    });
+  }
+
+  recoverStoppedController({ allowHeldResume = false } = {}) {
     return this.#enqueue(async () => {
       if (typeof this.motionGuard !== "function") throw new Error("Motion guard is required for controller recovery");
       if (this.programRunning) throw new Error("Cannot recover the controller while a program is active");

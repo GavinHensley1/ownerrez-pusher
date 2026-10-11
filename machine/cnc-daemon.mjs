@@ -161,6 +161,7 @@ const clearStaleMotionFlag = () => {
 };
 let frameIncident;
 let frameRecovery = { active: false, message: "" };
+let controllerProtection = { ready: false, reason: "Controller protection has not been verified on this connection", frameInvalid: false, checkedAt: null };
 try { frameIncident = readFrameIncident(FRAME_INCIDENT_PATH); } catch (error) { frameIncident = writeFrameIncident(FRAME_INCIDENT_PATH, { reason: `INVALID_FRAME_INCIDENT_STATE:${error.message}`, duringMotion: false }); }
 let reconnectPromise;
 let nextReconnectAt = 0;
@@ -190,8 +191,12 @@ try { activeRunCheckpoint = readRunCheckpoint(RUN_STATE_PATH); } catch { activeR
 
 const json = (res, status, value) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(value)); };
 const recordEvent = (type, detail = {}) => { try { appendCncEvent(EVENT_JOURNAL_PATH, type, detail); } catch (error) { logConnectionEvent?.(`journal:${error.message}`, `[cnc] event journal: ${error.message}`); } };
-const assertSetupFrame = () => { if (!frameRecovery.active) assertFrameValid(frameIncident); };
-const motionGuard = async () => { assertSetupFrame(); return { state: "controller_and_software_guards", frameValid: !frameIncident?.latched }; };
+const assertCuttingProtection = () => { if (!controllerProtection.ready) throw new Error(`Controller protection blocks cutting: ${controllerProtection.reason}. Use Restore controller protection in Project; manual positioning remains available.`); };
+const assertSetupFrame = ({ allowHeldRecovery = false } = {}) => {
+  if (!allowHeldRecovery && frameRecovery.requiresBufferDiscard) throw new Error("Reset the held controller through Project before manual positioning; the old buffer has not been verified discarded");
+  if (!frameRecovery.active) assertFrameValid(frameIncident);
+};
+const motionGuard = async (context = {}) => { assertSetupFrame(context); return { state: "controller_and_software_guards", frameValid: !frameIncident?.latched }; };
 const latchFrameIncident = (reason, duringMotion = hazardousOperationActive?.() === true) => {
   const message = String(reason || "CONTROLLER_CONNECTION_LOST");
   // Losing the frame means the physical relationship the proof asserted is no
@@ -209,6 +214,7 @@ const latchFrameIncident = (reason, duringMotion = hazardousOperationActive?.() 
 };
 
 const programGuard = async ({ before, analysis, programContext }) => {
+  assertCuttingProtection();
   assertFrameValid(frameIncident);
   if (/C752 nickel silver/i.test(String(programContext?.material || ""))) {
     // A program installed from an in-repo certified library must carry exactly
@@ -405,6 +411,7 @@ const logConnectionEvent = (key, message) => {
   }
 };
 controller.on("fault", (error) => {
+  controllerProtection = { ...controllerProtection, ready: false, reason: "Controller connection was interrupted; protection must be rechecked" };
   const hazardous = hazardousOperationActive();
   incident = error?.message || "CONTROLLER_FAULT";
   if (hazardous || /timeout|socket|connection|EHOSTUNREACH|ECONN|GRBL response/i.test(incident)) latchFrameIncident(incident, hazardous);
@@ -416,6 +423,7 @@ controller.on("fault", (error) => {
   }
 });
 controller.on("close", () => {
+  controllerProtection = { ...controllerProtection, ready: false, reason: "Controller disconnected; protection must be rechecked" };
   const hazardous = hazardousOperationActive();
   latchFrameIncident("CONTROLLER_CONNECTION_LOST", hazardous);
   logConnectionEvent(`close:${hazardous}`, `[cnc] controller close hazardous=${hazardous}`);
@@ -429,6 +437,7 @@ controller.on("close", () => {
 const readStatus = async () => (lastControllerStatus = parseStatus(await controller.status({ attempts: 5 })));
 const finishFrameRecovery = () => {
   if (!frameRecovery.active || !setup.xyReady || !setup.probeLocked) return;
+  if (!controllerProtection.ready) return;
   if (frameIncident?.latched) frameIncident = resolveFrameIncident(FRAME_INCIDENT_PATH, { xyReady: true, probeLocked: true, xyLockStatus: setup.xyLockStatus, probeLockStatus: setup.probeLockStatus });
   frameRecovery = { active: false, message: "Coordinates verified. No cut resumed; Start remains subject to all job checks." };
   incident = undefined;
@@ -447,6 +456,10 @@ const restoreVerifiedCalibration = (status, workOffset) => {
   try { xyLock = readXyLock(XY_STATE_PATH); } catch (error) { unreadable.push(`saved X/Y origin (${error.message})`); }
   try { probeLock = readProbeLock(PROBE_STATE_PATH); } catch (error) { unreadable.push(`saved Z calibration (${error.message})`); }
   const checked = inspectSavedFrame({ status, workOffset, xyLock, probeLock });
+  if (controllerProtection.frameInvalid) {
+    checked.xy = false; checked.z = false;
+    checked.message = "Controller steps/mm changed. Saved calibration cannot be reused; manual setup remains available.";
+  }
   if ((xyLock && !checked.xy) || (probeLock && !checked.z)) latchFrameIncident("SAVED_COORDINATE_CONTINUITY_UNVERIFIED", false);
   clearSetup();
   // A material profile is only as good as the Z reference that produced it. If
@@ -484,10 +497,15 @@ const reconnectAndVerifyFrame = async () => {
   const before = await readStatus();
   if (before.state !== "Idle" || before.FS !== "0,0" || before.Pn) {
     const alarm = before.state === "Alarm" && before.FS === "0,0";
-    frameRecovery.active = alarm;
-    frameRecovery.message = alarm ? `Controller alarm${before.Pn ? `: active ${before.Pn} input` : ""}. Use the explicit alarm/limit recovery control; saved coordinates are retained.` : `Controller reports ${before.state}. No cycle-start or reset was sent. For Hold/Door: switch the external router OFF, power the controller OFF then ON without moving the gantry, then press Reconnect. This discards the held buffer; Project can then offer saved X/Y recovery instead of requiring a new zero.`;
+    const held = new Set(["Hold:0", "Door:0"]).has(before.state) && before.FS === "0,0" && !before.Pn;
+    frameRecovery.active = alarm || held;
+    frameRecovery.requiresBufferDiscard = held;
+    frameRecovery.awaitingOperator = true;
+    frameRecovery.message = alarm ? `Controller alarm${before.Pn ? `: active ${before.Pn} input` : ""}. Use the explicit alarm/limit recovery control; saved coordinates are retained.` : held ? `Controller connected, stopped in ${before.state}. Use Discard held motion · enable positioning to clear the old controller buffer without resuming it. Saved zeros and probes are retained and checked afterwards.` : `Controller connected, reporting ${before.state}${before.Pn ? ` with active ${before.Pn} input` : ""}. Wait for it to stop and clear the safety input, then retry the connection check. No cycle-start or reset was sent.`;
+    incident = undefined;
     return { ok: true, status: before, frameRecovery };
   }
+  await restoreHardLimitsOnStartup(before, { restoreHardLimits: false });
   const workOffset = parseWorkOffset(await controller.query("$#"));
   const after = await readStatus();
   if (after.state !== "Idle" || after.FS !== "0,0" || after.Pn || after.MPos !== before.MPos) throw new Error("Controller changed during coordinate verification; no setup enabled");
@@ -543,7 +561,7 @@ const probeRecoverySnapshot = () => {
 // Read-only recovery is housekeeping, not an operator prerequisite. It never
 // unlocks, resets coordinates, moves, or releases a held program.
 const autoVerifyStoppedFrame = () => {
-  if (!frameIncident?.latched || frameRecovery.active || hazardousOperationActive() || reconnectPromise || Date.now() < nextStoppedFrameCheckAt) return;
+  if (!frameIncident?.latched || frameRecovery.active || (controller.connected && frameRecovery.awaitingOperator) || hazardousOperationActive() || reconnectPromise || Date.now() < nextStoppedFrameCheckAt) return;
   nextStoppedFrameCheckAt = Date.now() + RECONNECT_BACKOFF_MS;
   void reconnectAndVerifyFrame().catch(error => {
     incident = `STOPPED_FRAME_CHECK_FAILED:${error.message}`;
@@ -600,6 +618,7 @@ const resumeSnapshot = () => {
   if (String(activeRunCheckpoint.state || "") !== "interrupted" || !(Number(activeRunCheckpoint.lastCompletedLine) > 0)) {
     return refuse("No interrupted checkpoint is available to resume.");
   }
+  if (!controllerProtection.ready) return refuse(`Controller protection blocks cutting: ${controllerProtection.reason}`);
 
   let saved = null;
   try { saved = readProgram(PROGRAM_STATE_PATH); } catch { /* treated as absent below */ }
@@ -646,7 +665,7 @@ const health = () => {
   clearStaleMotionFlag();
   autoVerifyStoppedFrame();
   if (!controller.connected && !hazardousOperationActive() && !frameIncident?.latched) void recoverIdleConnection();
-  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: resumeSnapshot() };
+  return { ok: true, connected: controller.connected, reconnecting: Boolean(reconnectPromise) || connectionCheckActive, moving, incident, frameValid: !frameIncident?.latched, frameIncident: frameIncident ? { ...frameIncident } : null, frameRecovery: { ...frameRecovery }, controllerProtection: { ...controllerProtection }, lastControllerStatus, workspace: workspace.snapshot(), setup: { ...setup }, plate: plateSnapshot(), surfaceProof: surfaceProofSnapshot(), xyRecovery: (!frameIncident?.latched || frameRecovery.active) && controller.connected ? xyRecoverySnapshot() : { available: false }, probeRecovery: !frameIncident?.latched && controller.connected ? probeRecoverySnapshot() : { available: false }, job: { ...job }, resume: resumeSnapshot() };
 };
 const observe = async () => ({ cnc: await readStatus() });
 const assertIdle = async () => { const status = await readStatus(); if (new Set(["Door:0", "Hold:0"]).has(status.state)) throw new Error(`Controller positioning is paused in ${status.state}. The external router may be removed; use Enable positioning first.`); if (status.state !== "Idle") throw new Error(`Controller must report Idle before positioning, got ${status.state}`); const [feed, spindle] = String(status.FS || "0,0").split(",").map(Number); if (feed || spindle) throw new Error(`Commanded feed/spindle must be zero, got ${status.FS}`); return status; };
@@ -1034,6 +1053,7 @@ const unlockProbeCalibration = async (payload) => {
   return { ok: true, setup: { ...setup } };
 };
 const startProgram = async ({ jobId, gcode, stockWidthMm, stockHeightMm, stockReserveMm, manualRouter = false, operation = "", material = "", camProvider = "", camCertification = "", camSourceHash = "", camAuditHash = "", camStage = "", camTool = "", certifiedLibraryId = "", allowSacrificialCutThrough = false, sacrificialBackingConfirmed = false, profileDepthMm = null }) => {
+  assertCuttingProtection();
   const actualSourceHash = createHash("sha256").update(String(gcode || "")).digest("hex");
   // Independent third enforcement of the conditional cut hold, after the browser
   // and the Vercel API. The hold no longer blocklists program hashes; it asserts
@@ -1085,28 +1105,6 @@ const resumeSavedProgram = async (payload) => {
   const result = await startProgram({ jobId: `${saved.jobId}-resume-${completedLine}`, gcode: resumed.gcode, ...saved.context });
   return { ...result, resume: resumed };
 };
-const restoreStoppedControllerState = async ({ discardBufferedProgram = false } = {}) => {
-  assertFrameValid(frameIncident);
-  await controller.resetConnection();
-  if (discardBufferedProgram) {
-    const beforeDiscard = parseStatus(await controller.status({ attempts: 5 }));
-    if (new Set(["Run", "Hold", "Door"]).has(beforeDiscard.state.split(":")[0])) {
-      // Never release a feed hold that belongs to an interrupted program: "~"
-      // would execute already-buffered motion. Abort/reset the planner, reconnect,
-      // and then accept only Idle or a no-motion Alarm unlock.
-      await controller.emergencyStop("DISCARD_BUFFERED_PROGRAM_AFTER_PROJECT_STOP");
-      await controller.resetConnection();
-    }
-  }
-  const result = await controller.recoverStoppedController({ allowHeldResume: !discardBufferedProgram });
-  lastControllerStatus = result.after;
-  await restoreHardLimitsOnStartup(result.after);
-  const workOffset = parseWorkOffset(await controller.query("$#"));
-  lastWorkOffset = workOffset;
-  restoreVerifiedCalibration(result.after, workOffset);
-  incident = undefined;
-  return { result, workOffset };
-};
 const stopProgram = async () => {
   await controller.stopProgramNow();
   const deadline = Date.now() + 5_000;
@@ -1123,20 +1121,44 @@ const stopProgram = async () => {
   return { ok: true, job: { ...job }, resume: resumeSnapshot(), recovery };
 };
 const recoverStoppedController = async (payload) => {
-  assertSetupFrame();
+  assertSetupFrame({ allowHeldRecovery: true });
   if (payload.confirm !== true) throw new Error("Explicit stopped-controller recovery confirmation is required");
   if (hazardousOperationActive()) throw new Error("A CNC operation is already active");
-  if (frameIncident?.latched) {
+  setMoving(true, "controller recovery");
+  try {
     const before = await readStatus();
-    if (before.state !== "Alarm" || before.Pn) throw new Error("Only an alarm with cleared inputs may be unlocked here; a held program must be discarded by an explicit controller power cycle");
-    setMoving(true, "controller recovery");
-    try { await controller.recoverStoppedController({ allowHeldResume: false }); }
-    finally { setMoving(false); }
-    return reconnectAndVerifyFrame();
+    const held = new Set(["Hold:0", "Door:0"]).has(before.state) || frameRecovery.requiresBufferDiscard === true;
+    if (held && payload.discardBufferedMotion !== true) throw new Error("Explicit held-motion discard confirmation is required; recovery never resumes a held cut");
+    if (held) {
+      latchFrameIncident("OPERATOR_DISCARDED_HELD_MOTION", false);
+      // Retain the files for independent comparison, but do not let a reset or
+      // a failed acknowledgment carry old readiness or a resumable checkpoint.
+      clearSetup();
+      frameRecovery = { active: true, requiresBufferDiscard: true, message: "Discarding the held controller buffer; no cut will resume." };
+      persistRunProgress({ state: "discarded", message: "Held controller motion discarded by the operator. Restart only after fresh cutting checks." });
+    }
+    const result = held ? await controller.discardHeldMotion() : await controller.recoverStoppedController({ allowHeldResume: false });
+    lastControllerStatus = result.after;
+    const protection = await restoreHardLimitsOnStartup(result.after);
+    const workOffset = parseWorkOffset(await controller.query("$#"));
+    const after = await readStatus();
+    if (after.state !== "Idle" || after.FS !== "0,0" || after.Pn || after.MPos !== result.after.MPos) throw new Error("Controller changed during recovery verification; no setup enabled");
+    if (protection?.settings?.frameInvalid) {
+      clearSetup();
+      lastWorkOffset = workOffset;
+      frameRecovery = { active: true, message: "Controller steps/mm changed. Manual setup is available; saved calibration cannot be reused for cutting. Re-measure the affected setup." };
+    } else restoreVerifiedCalibration(after, workOffset);
+    captureInterruptedPosition(after, "stopped_controller_recovery");
+    if (protection?.verified && protection.settings?.ok) incident = undefined;
+    else if (!incident) incident = `CONTROLLER_PROTECTION_UNVERIFIED:${protection?.error || protection?.settings?.problems?.join("; ") || "Controller settings could not be verified"}`;
+    recordEvent("controller.operator_recovered", { discardedBufferedMotion: held, status: after.raw, xyVerified: setup.xyReady, zVerified: setup.probeLocked });
+    return { ok: true, result, workOffset, protection, setup: { ...setup }, workspace: workspace.snapshot() };
+  } catch (error) {
+    incident = `CONTROLLER_RECOVERY_FAILED:${error.message}`;
+    throw error;
+  } finally {
+    setMoving(false);
   }
-  const recovered = await restoreStoppedControllerState({ discardBufferedProgram: activeRunCheckpoint?.state === "interrupted" });
-  captureInterruptedPosition(lastControllerStatus, "stopped_controller_recovery");
-  return { ok: true, ...recovered, setup: { ...setup }, workspace: workspace.snapshot() };
 };
 const recoverRearYLimit = async (payload) => {
   assertSetupFrame();
@@ -1161,7 +1183,7 @@ const recoverRearYLimit = async (payload) => {
 };
 const bodyJson = async (req, maxBytes = MAX_BODY_BYTES) => { let body = "", size = 0; for await (const chunk of req) { size += chunk.length; if (size > maxBytes) throw new Error("Request too large"); body += chunk; } return body ? JSON.parse(body) : {}; };
 
-const localUi = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Project CNC · Local</title><style>body{font:16px system-ui;background:#111827;color:#eef2ff;max-width:820px;margin:30px auto;padding:16px}button{font:inherit;padding:12px 16px;margin:5px;border-radius:8px;border:1px solid #64748b;background:#1e293b;color:white}button.danger{background:#991b1b}pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:8px}</style><h1>Project CNC · Local recovery</h1><p>This console uses Project's local daemon and safety guards without the cloud queue.</p><div><button onclick="recover()">Enable positioning</button><button onclick="start()">Start saved carve</button><button onclick="cmd('/job/pause')">Pause</button><button onclick="cmd('/job/resume')">Resume</button><button class="danger" onclick="cmd('/job/stop')">Stop</button><button onclick="refresh()">Refresh</button></div><pre id="s">Loading…</pre><script>async function req(path,body){let r=await fetch(path,{method:body?'POST':'GET',headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined}),j=await r.json();if(!r.ok)throw Error(j.error||r.status);return j}async function refresh(){try{let h=await req('/health'),p=await req('/job/last');s.textContent=JSON.stringify({controller:h.lastControllerStatus,connected:h.connected,moving:h.moving,incident:h.incident,workspace:h.workspace,setup:h.setup,job:h.job,savedProgram:p.program},null,2)}catch(e){s.textContent='ERROR: '+e.message}}async function cmd(p,b={}){try{await req(p,b);await refresh()}catch(e){alert(e.message);await refresh()}}async function recover(){if(confirm('Enable positioning from a safe Hold:0/Door:0 state? The external router need not be installed and no axis moves during this step.'))await cmd('/controller/recover-stopped',{confirm:true})}async function start(){if(confirm('Start the locally saved carve from line 1 through Project guards?'))await cmd('/job/start-saved',{})}refresh();setInterval(refresh,2000)</script>`;
+const localUi = `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Project CNC · Local</title><style>body{font:16px system-ui;background:#111827;color:#eef2ff;max-width:820px;margin:30px auto;padding:16px}button{font:inherit;padding:12px 16px;margin:5px;border-radius:8px;border:1px solid #64748b;background:#1e293b;color:white}button.danger{background:#991b1b}pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:8px}</style><h1>Project CNC · Local recovery</h1><p>This console uses Project's local daemon and safety guards without the cloud queue.</p><div><button onclick="recover()">Enable positioning</button><button onclick="start()">Start saved carve</button><button onclick="cmd('/job/pause')">Pause</button><button onclick="cmd('/job/resume')">Resume</button><button class="danger" onclick="cmd('/job/stop')">Stop</button><button onclick="refresh()">Refresh</button></div><pre id="s">Loading…</pre><script>async function req(path,body){let r=await fetch(path,{method:body?'POST':'GET',headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):undefined}),j=await r.json();if(!r.ok)throw Error(j.error||r.status);return j}async function refresh(){try{let h=await req('/health'),p=await req('/job/last');s.textContent=JSON.stringify({controller:h.lastControllerStatus,connected:h.connected,moving:h.moving,incident:h.incident,workspace:h.workspace,setup:h.setup,job:h.job,savedProgram:p.program},null,2)}catch(e){s.textContent='ERROR: '+e.message}}async function cmd(p,b={}){try{await req(p,b);await refresh()}catch(e){alert(e.message);await refresh()}}async function recover(){try{let h=await req('/health'),held=['Hold:0','Door:0'].includes((h.lastControllerStatus||{}).state)||!!(h.frameRecovery||{}).requiresBufferDiscard;let question=held?'Reset the held controller and discard old cutting commands? Switch the external router OFF and keep hands clear. Configured firmware startup commands may execute. Project will require reset acknowledgment and Idle, retain saved zeros/probes, and check them before reuse. This does not resume the cut.':'Unlock the stopped alarm and verify saved coordinates? Switch the external router OFF and clear any obstruction. No cycle-start is sent.';if(confirm(question))await cmd('/controller/recover-stopped',{confirm:true,discardBufferedMotion:held})}catch(e){alert(e.message);await refresh()}}async function start(){if(confirm('Start the locally saved carve from line 1 through Project guards?'))await cmd('/job/start-saved',{})}refresh();setInterval(refresh,2000)</script>`;
 const requestHandler = async (req, res) => {
   try {
     if (req.method === "GET" && (req.url === "/" || req.url === "/ui")) { res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }); return res.end(localUi); }
@@ -1213,12 +1235,19 @@ const requestHandler = async (req, res) => {
 const server = http.createServer(requestHandler);
 const uiServer = http.createServer(requestHandler);
 
-const restoreHardLimitsOnStartup = async (knownStatus) => {
+const restoreHardLimitsOnStartup = async (knownStatus, { restoreHardLimits = true } = {}) => {
   try {
     const state = knownStatus?.state || (await readStatus()).state;
-    if (new Set(["Door", "Hold"]).has(String(state).split(":")[0])) return { skipped: true, state };
-    const lines = await controller.query("$$");
-    if (lines.some((line) => /^\$21=0(?:\s|$)/.test(line))) await controller.setBooleanSetting(21, true);
+    if (new Set(["Door", "Hold"]).has(String(state).split(":")[0])) {
+      controllerProtection = { ...controllerProtection, ready: false, reason: "Reset the held controller before checking protection", checkedAt: null };
+      return { skipped: true, state };
+    }
+    let lines = await controller.query("$$");
+    if (restoreHardLimits && lines.some((line) => /^\$21=0(?:\s|$)/.test(line))) {
+      await controller.setBooleanSetting(21, true);
+      lines = await controller.query("$$");
+    }
+    if (!lines.some(line => /^\$21=1(?:\s|$)/.test(line))) throw new Error("Hard-limit protection $21=1 was not verified");
     // $20, $130-$132 and $100-$102 were read but never validated. The steps/mm
     // settings are the conversion between commanded steps and physical travel, so
     // a change there rescales every stored measurement at once -- the probed
@@ -1226,9 +1255,12 @@ const restoreHardLimitsOnStartup = async (knownStatus) => {
     // while leaving them all consistent with each other. Pin them and refuse on
     // drift rather than cutting to a silently different depth.
     const settingsVerdict = verifyControllerSettings(parseGrblSettings(lines));
-    return { skipped: false, state, settings: settingsVerdict };
+    controllerProtection = { ready: settingsVerdict.ok === true, reason: settingsVerdict.ok ? "" : settingsVerdict.problems.join("; "), frameInvalid: !settingsVerdict.ok && (controllerProtection.frameInvalid || settingsVerdict.frameInvalid === true), checkedAt: new Date().toISOString() };
+    return { skipped: false, verified: true, state, settings: settingsVerdict };
   } catch (error) {
     incident = `STARTUP_SAFETY_CHECK_FAILED:${error?.message || "unknown"}`;
+    controllerProtection = { ...controllerProtection, ready: false, reason: error?.message || "Controller protection could not be verified", checkedAt: new Date().toISOString() };
+    return { skipped: false, verified: false, error: error?.message || "unknown" };
   }
 };
 

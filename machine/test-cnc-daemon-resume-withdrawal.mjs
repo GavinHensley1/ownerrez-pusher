@@ -73,6 +73,7 @@ const startDaemon = (dir, grbl, socketPath) => spawn(process.execPath, [new URL(
     CNC_PROBE_STATE: join(dir, "probe.json"), CNC_MATERIAL_STATE: join(dir, "material.json"), CNC_XY_STATE: join(dir, "xy.json"),
     CNC_PROGRAM_STATE: join(dir, "program.json"), CNC_RUN_STATE: join(dir, "run.json"), CNC_EVENT_JOURNAL: join(dir, "events.jsonl"),
     CNC_FRAME_INCIDENT: join(dir, "frame-incident.json"), CNC_PLATE_CONFIG: join(dir, "plate.json"),
+    CNC_CONTROLLER_SETTINGS: join(dir, "controller-settings.json"),
   },
   stdio: ["ignore", "pipe", "pipe"],
 });

@@ -3040,6 +3040,7 @@ if(action==="email_recipients"){
               if(act==="zero_z"&&(!setup.probeLocked||!setup.stockProbeReady)) return res.status(409).json({error:"Lock a measured stock calibration before setting physical stock Z zero",cnc:st});
               if(act==="zero_z"&&b.confirm!==true) return res.status(400).json({error:"Explicit stock Z-zero confirmation is required",cnc:st});
               if(act==="start"){
+                if(!health.controllerProtection||health.controllerProtection.ready!==true) return res.status(409).json({error:"Controller protection blocks cutting. "+String((health.controllerProtection||{}).reason||"Restore controller protection in Project before Start."),cnc:st});
                 // Conditional cut hold, evaluated against the live bridge snapshot:
                 // plate confirmed, Z locked, calibration captured at the configured
                 // plate, surface contact proven at that same plate, and a measured
@@ -3145,7 +3146,7 @@ if(action==="email_recipients"){
               }
               if(act==="unlock_probe")cmd.confirm=b.confirm===true;
               if(act==="zero_z")cmd.confirm=b.confirm===true;
-              if(act==="recover_controller")cmd.confirm=b.confirm===true;
+              if(act==="recover_controller"){cmd.confirm=b.confirm===true;cmd.discardBufferedMotion=b.discardBufferedMotion===true;}
               if(act==="recover_rear_y_limit"){
                 const status=health.lastControllerStatus||{}, pins=String(status.Pn||((String(status.raw||"").match(/Pn:([^|>]+)/)||[])[1])||"");
                 if(String(status.state||"").split(":")[0]!=="Alarm"||!pins.includes("Y")||/[XZP]/.test(pins)) return res.status(409).json({error:"Rear-Y recovery requires an Alarm with only the Y limit input active",cnc:st});

@@ -67,6 +67,7 @@ export function loadBrowserScript(indexPath) {
 
   const canvases = [];
   const elements = {};
+  const jogButtons = [...html.matchAll(/class="cncJogBtn[^\"]*" data-axis="([XYZ])" data-dir="(-?1)"/g)].map(match => ({ ...makeElement(), dataset: { axis: match[1], dir: match[2] } }));
   const document = {
     __elements: elements,
     body: makeElement(), head: makeElement(), documentElement: makeElement(),
@@ -83,7 +84,7 @@ export function loadBrowserScript(indexPath) {
     },
     createTextNode() { return makeElement(); },
     addEventListener() {}, removeEventListener() {},
-    querySelector() { return null; }, querySelectorAll() { return []; },
+    querySelector() { return null; }, querySelectorAll(selector) { return selector === ".cncJogBtn" ? jogButtons : []; },
   };
 
   const globals = {
@@ -124,7 +125,7 @@ export function loadBrowserScript(indexPath) {
     },
   };`);
   const api = factory(...names.map((name) => globals[name]));
-  return { ...api, canvases, elements, background: BACKGROUND };
+  return { ...api, canvases, elements, jogButtons, background: BACKGROUND };
 }
 
 // Coverage statistics for a rendered preview canvas.

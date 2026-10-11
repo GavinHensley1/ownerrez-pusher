@@ -36,7 +36,8 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /recoverProbe\.disabled=motionBlocked/);
   assert.match(html, /function cncControllerState/);
   assert.match(html, /Controller ready/);
-  assert.match(html, /Positioning paused/);
+  assert.match(html, /Controller connected · /);
+  assert.match(html, /Reset held controller · enable positioning/);
   assert.match(html, /Enable positioning/);
   assert.match(html, /Restore saved X\/Y/);
   assert.match(html, /Set current point as X0\/Y0/);
@@ -62,6 +63,7 @@ test("CNC page script parses and exposes guarded positioning, automatic material
   assert.match(html, /var motionBlocked=baseBlocked\|\|!controller\.idle/);
   assert.match(html, /<option value="100">100 mm<\/option>/);
   assert.match(html, /<option value="0\.1">0\.1 mm<\/option>/);
+  assert.match(html, /<option value="0\.01">0\.01 mm<\/option>/);
   assert.match(html, /Large Z moves are also segmented internally/);
   assert.match(html, /probe_bed/);
   assert.doesNotMatch(html, /test_probe|NO-MOTION PROBE TEST|Test probe circuit/);
@@ -639,7 +641,7 @@ test("local Project recovery UI can restore stopped controller state without clo
   assert.match(daemon, /\/controller\/recover-stopped/);
   assert.match(daemon, /\/job\/start-saved/);
   assert.match(daemon, /\/job\/import/);
-  assert.match(daemon, /restoreVerifiedCalibration\(result\.after, workOffset\)/);
+  assert.match(daemon, /restoreVerifiedCalibration\(after, workOffset\)/);
   assert.doesNotMatch(daemon, /auto_restored_after_power_cycle/);
   assert.match(daemon, /Explicit new-project X\/Y reset confirmation is required/);
   assert.match(html, /Restore probes after X\/Y-only reset/);
@@ -688,7 +690,10 @@ test("daemon persists per-line recovery checkpoints and validates position befor
   assert.match(controller, /this\.pauseRequested = false;\s*await this\.#emergencyStop\(reason\)/);
   assert.match(controller, /Held program buffer was not cleared; refusing to resume axis motion/);
   assert.match(daemon, /persistRunProgress\(\{ state: "interrupted", message: "Stopped by Project" \}\)/);
-  assert.match(daemon, /DISCARD_BUFFERED_PROGRAM_AFTER_PROJECT_STOP/);
+  assert.match(daemon, /held && payload\.discardBufferedMotion !== true/);
+  assert.match(daemon, /persistRunProgress\(\{ state: "discarded"/);
+  assert.match(api, /cmd\.discardBufferedMotion=b\.discardBufferedMotion===true/);
+  assert.match(agent, /discardBufferedMotion: command\.discardBufferedMotion === true/);
   // The daemon must reject an absent or out-of-range plate rather than defaulting.
   assert.match(daemon, /Probe plate thickness must be supplied and between/);
   // No silent fallback thickness anywhere in the probe path, in any layer.
@@ -755,7 +760,13 @@ test("surface-contact proof gates Start at browser, API and daemon, and metal de
 });
 
 test("connection loss fails closed without GRBL soft reset or automatic motion recovery", () => {
-  assert.doesNotMatch(controller, /Buffer\.from\(\[0x18\]\)/);
+  // Soft reset now exists ONLY in the explicit operator buffer-discard method,
+  // never in emergency stop or automatic connection recovery.
+  assert.equal((controller.match(/Buffer\.from\(\[0x18\]\)/g) || []).length, 1);
+  const discard = controller.slice(controller.indexOf("  discardHeldMotion()"), controller.indexOf("  recoverStoppedController("));
+  assert.match(discard, /Buffer\.from\(\[0x18\]\)/);
+  assert.doesNotMatch(controller.slice(controller.indexOf("  async #emergencyStop")), /Buffer\.from\(\[0x18\]\)/);
+  assert.doesNotMatch(daemon.slice(daemon.indexOf("const reconnectAndVerifyFrame"), daemon.indexOf("const xyRecoverySnapshot")), /discardHeldMotion/);
   assert.match(controller, /this\.socket\.write\("!"\)/);
   assert.match(controller, /this\.socket\.write\(Buffer\.from\(\[0x85\]\)\)/);
   assert.match(daemon, /CNC_FRAME_INCIDENT/);

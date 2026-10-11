@@ -42,6 +42,7 @@ const readyHealth = () => ({
   frameValid: true,
   frameIncident: null,
   frameRecovery: { active: false, message: "" },
+  controllerProtection: { ready: true, reason: "" },
   // Z sits 2.5 mm above the probed stock surface: cncStartFrameCheck requires at
   // least 2.400 mm of work-Z clearance, so a bit resting ON the stock correctly
   // refuses to start. Retracting Z is a real operator step before Start.
@@ -106,6 +107,7 @@ test("each setup gate independently keeps Start disabled", () => {
     ["Surface contact proof", (h) => { h.surfaceProof.ready = false; }],
     ["Machine boundaries", (h) => { h.workspace.calibrated = false; }],
     ["Coordinate frame", (h) => { h.frameValid = false; }],
+    ["Controller protection", (h) => { h.controllerProtection.ready = false; }],
   ];
   for (const [label, mutate] of cases) {
     const g = gate(mutate);

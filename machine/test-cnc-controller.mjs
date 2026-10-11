@@ -375,10 +375,10 @@ test("long programs refresh the Wi-Fi transport only at a safe Idle retract boun
   await c.close(); await mock.close();
 });
 
-test("recovers an idle stopped Hold state without jog or spindle motion", async () => {
+test("legacy held Cycle Start requires an explicit opt-in, never the default recovery", async () => {
   const mock = await makeMock({ startHold: true }); let guards = 0;
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => { guards += 1; } });
-  const result = await c.recoverStoppedController();
+  const result = await c.recoverStoppedController({ allowHeldResume: true });
   assert.equal(result.before.state, "Hold:0"); assert.equal(result.after.state, "Idle"); assert(guards >= 1);
   assert(mock.bytes.includes("~".charCodeAt(0))); assert(!mock.bytes.includes(Buffer.from("$J="))); assert(!mock.bytes.includes(Buffer.from("M3")));
   await c.close(); await mock.close();
@@ -387,7 +387,7 @@ test("recovers an idle stopped Hold state without jog or spindle motion", async 
 test("never releases a held program when recovery requires the buffered path discarded", async () => {
   const mock = await makeMock({ startHold: true });
   const c = new GrblTcpController({ host: "127.0.0.1", port: mock.port, statusTimeoutMs: 25, motionGuard: async () => {} });
-  await assert.rejects(() => c.recoverStoppedController({ allowHeldResume: false }), /refusing to resume axis motion/);
+  await assert.rejects(() => c.recoverStoppedController(), /refusing to resume axis motion/);
   assert(!mock.bytes.includes("~".charCodeAt(0)));
   assert(!mock.bytes.includes(Buffer.from("$J=")));
   await c.close(); await mock.close();

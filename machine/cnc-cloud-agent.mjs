@@ -93,6 +93,9 @@ async function heartbeat() {
     incident: health?.incident ? String(health.incident).slice(0, 300) : "",
     frameValid: health?.frameValid === true,
     frameRecovery: health?.frameRecovery || null,
+    controllerProtection: health?.controllerProtection || null,
+    plate: health?.plate || null,
+    surfaceProof: health?.surfaceProof || null,
     frameIncident: health?.frameIncident && typeof health.frameIncident === "object" ? {
       latched: health.frameIncident.latched === true,
       reason: String(health.frameIncident.reason || "").slice(0, 300),
@@ -168,7 +171,8 @@ async function execute(command) {
           : command.action === "set_plate" ? { thicknessMm: command.probeThickness }
           : command.action === "restore_xy" ? { confirmGantryUnmoved: command.confirmGantryUnmoved === true }
           : command.action === "zero_xy" ? { confirmNewProject: command.confirmNewProject === true }
-          : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_controller" || command.action === "recover_rear_y_limit" || command.action === "restore_probe") ? { confirm: command.confirm === true }
+          : command.action === "recover_controller" ? { confirm: command.confirm === true, discardBufferedMotion: command.discardBufferedMotion === true }
+          : (command.action === "unlock_probe" || command.action === "zero_z" || command.action === "recover_rear_y_limit" || command.action === "restore_probe") ? { confirm: command.confirm === true }
           : command.action === "resume_saved" ? { confirm: command.confirm === true, allowReposition: command.allowReposition === true }
           : command.action === "start" ? { jobId: command.jobId, gcode: decodeProgram(command), stockWidthMm: command.stockWidthMm, stockHeightMm: command.stockHeightMm, stockReserveMm: command.stockReserveMm, manualRouter: command.manualRouter === true, operation: command.operation, material: command.material, camProvider: command.camProvider, camCertification: command.camCertification, camSourceHash: command.camSourceHash, camAuditHash: command.camAuditHash, camStage: command.camStage, camTool: command.camTool, certifiedLibraryId: command.certifiedLibraryId, allowSacrificialCutThrough: command.allowSacrificialCutThrough === true, sacrificialBackingConfirmed: command.sacrificialBackingConfirmed === true, profileDepthMm: command.profileDepthMm } : {};
         result = await localRequest(path, payload);
