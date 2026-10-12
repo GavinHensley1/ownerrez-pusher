@@ -714,6 +714,36 @@ async function appendThreadLog(threadId, bookingId, dir, body, name){
     if(redis) await redis.set("parkside:thr:"+k, arr); else _memThreads[k]=arr;
   }catch(e){}
 }
+// OwnerRez's public message model has role/contact/date, but no trigger or manual-send
+// provenance. An owner-role message can therefore be a scheduled booking template.
+// Keep routine notices in the transcript without treating them as answers. This is
+// intentionally conservative: staff can use Mark handled after reviewing OwnerRez.
+function routineOwnerRezNotice(body){
+  const text=String(body||"").replace(/<[^>]*>/g," ").replace(/[\u2018\u2019]/g,"'").replace(/\s+/g," ").trim();
+  if(/https?:\/\/guide\.parksidetepees\.com\/g\//i.test(text)||/\b(?:digital|online) guidebook\b/i.test(text))return "guidebook notice";
+  if(/\b(?:thank(?:s| you) for (?:completing |making )?(?:your |the )?(?:booking|reservation)|(?:your |the )?(?:booking|reservation) (?:is |has been )?(?:confirmed|complete))\b/i.test(text))return "booking notice";
+  if(/\b(?:please (?:review and )?sign|complete|completed|signed) (?:your |the |our )?rental agreement\b/i.test(text))return "rental-agreement notice";
+  if(/\b(?:your (?:arrival|check[ -]?in) (?:information|instructions|details)|arrival information the morning of your arrival|(?:arrival|check[ -]?in) instructions (?:are|will be))\b/i.test(text))return "arrival notice";
+  if(/\b(?:check[ -]?out (?:instructions|reminder)|reminder (?:about |for )?(?:your )?check[ -]?out|(?:hope|hoping) you (?:have |had )?enjoyed your stay|(?:please )?leave us a review)\b/i.test(text))return "checkout/review notice";
+  return null;
+}
+function ownerRezReplyEvidence(action,entity,body,now){
+  const role=String(entity.from_role||"").toLowerCase().trim();
+  if(!["owner","co_host"].includes(role))return {eligible:false,reason:"not a staff reply role"};
+  if(entity.is_draft===true||entity.is_draft==="true"||entity.removed_utc)return {eligible:false,reason:"draft or removed message"};
+  if(action!=="entity_create")return {eligible:false,reason:"not a new message event"};
+  const routine=routineOwnerRezNotice(body);
+  if(routine)return {eligible:false,reason:routine};
+  // date_utc is the provider's sent time, not this webhook's arrival time. Never
+  // substitute arrival time: a delayed/retried old message could close a new ask.
+  let date=String(entity.date_utc||"").trim();
+  if(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?$/.test(date))date+="Z";
+  const sentAt=Date.parse(date);
+  if(!date||!isFinite(sentAt)||sentAt>(now==null?Date.now():now))return {eligible:false,reason:"missing, invalid or future provider sent time"};
+  if(!String(body||"").trim()||isHoldingLike(body))return {eligible:false,reason:"empty or holding message"};
+  return {eligible:true,role,sentAt,at:new Date(sentAt).toISOString(),body:String(body).replace(/\s+/g," ").trim()};
+}
+function latestInboundMessage(log){return (Array.isArray(log)?log:[]).filter(m=>m&&m.d==="in").at(-1)||null;}
 // Render the full TWO-WAY conversation for the approval email. Prefers the per-thread
 // log (true in/out history); falls back to reconstructing from approval items.
 async function renderThread(item, approvals){
@@ -1436,6 +1466,7 @@ async function approvalSendRecord(id){ return redis?await redis.get(approvalSend
 async function saveApprovalSend(id,record){ if(redis) await redis.set(approvalSendKey(id),record); else approvalSendMemory.set(id,record); }
 function overlayApprovalSend(it,record){
   if(!record) return it;
+  if(record.state==="external_handled")return escalationReviewVersion(it)===record.reviewedVersion?{...it,...record.patch}:it;
   if(record.state==="handled") return escalationReviewVersion(it)===record.reviewedVersion
     ?{...it,status:"closed",decidedAt:record.at,closedBy:"staff",closedReason:"Marked handled without sending"}:it;
   if(record.state==="sent") return {...it,status:"approved",answer:record.answer,decidedAt:record.at,sendUncertain:false};
@@ -1929,7 +1960,7 @@ function rejectPageHtml(it, token){
 }
 // Decide a queued approval item: YES -> send to guest + learn into KB; NO -> reject.
 const approvalDecisionLocks=new Set();
-async function markEscalationHandled(id, expectedVersion){
+async function markEscalationHandled(id, expectedVersion, externalReply){
   if(!id||!expectedVersion)return {ok:false,status:400,error:"Refresh the open records before marking one handled."};
   const key="parkside:approval_decision:"+id, token=require("crypto").randomBytes(16).toString("hex");
   let locked=false;
@@ -1940,28 +1971,47 @@ async function markEscalationHandled(id, expectedVersion){
     const list=await getApprovals(), it=list.find(x=>x.id===id);
     if(!it)return {ok:false,status:404,error:"Record not found."};
     if(!["escalated","pending"].includes(it.status))return {ok:true,already:true,id,sent:false};
-    if(it.status!=="escalated"||escalationReviewVersion(it)!==expectedVersion)return {ok:false,status:409,error:"This record changed after you reviewed it. Refresh and read the latest message before marking it handled."};
-    const receipt={state:"handled",reviewedVersion:expectedVersion,at:new Date().toISOString()};
+    if((!externalReply&&it.status!=="escalated")||escalationReviewVersion(it)!==expectedVersion)return {ok:false,status:409,error:"This record changed after you reviewed it. Refresh and read the latest message before marking it handled."};
+    let inbound=null;
+    if(externalReply){
+      if(externalReply.eligible!==true||it.sendUncertain)return {ok:false,status:409};
+      inbound=latestInboundMessage(await getThreadLog(it.thread_id,it.booking_id));
+      const latest=Math.max(...[it.ts,it.primaryNotifiedAt,it.lastGuestMsgAt,inbound&&inbound.t].map(t=>Date.parse(t||"")||0));
+      if(!latest||externalReply.sentAt<=latest||latest>=Date.now()-60000)return {ok:false,status:409,reason:"reply does not follow the latest guest activity"};
+    }
+    const at=new Date().toISOString();
+    const patch=externalReply?{status:"closed",decidedAt:at,closedExternally:true,closedBy:externalReply.role,closedReason:"Staff reply received in OwnerRez",externalReply:externalReply.body.slice(0,300),externalReplyAt:externalReply.at}
+      :{status:"closed",decidedAt:at,closedBy:"staff",closedReason:"Marked handled without sending"};
+    const receipt={state:externalReply?"external_handled":"handled",reviewedVersion:expectedVersion,at,...(externalReply?{patch}:{})};
     if(redis){
       // Compare and update only this record atomically. Intake does not take the
       // decision lock, so a read-then-whole-list write could erase a new guest reply.
       const result=await redis.eval(`-- mark-escalation-handled
 local raw=redis.call('get',KEYS[1]); if not raw then return 0 end
-local list=cjson.decode(raw); local expected=cjson.decode(ARGV[2]); local receipt=cjson.decode(ARGV[3])
+local list=cjson.decode(raw); local expected=cjson.decode(ARGV[2]); local receipt=cjson.decode(ARGV[3]); local patch=cjson.decode(ARGV[4])
+if KEYS[3] then
+  local logRaw=redis.call('get',KEYS[3]); local last=cjson.null
+  if logRaw then for _,m in ipairs(cjson.decode(logRaw)) do if m.d=='in' then last=m end end end
+  local expectedIn=cjson.decode(ARGV[5])
+  if (last==cjson.null)~=(expectedIn==cjson.null) then return -1 end
+  if last~=cjson.null then
+    for _,k in ipairs({'t','b','n'}) do if (last[k] or '')~=(expectedIn[k] or '') then return -1 end end
+  end
+end
 for _,it in ipairs(list) do
   if it.id==ARGV[1] then
     for k,v in pairs(expected) do
       local actual=it[k]; if actual==nil then actual=cjson.null end
       if cjson.encode(actual)~=cjson.encode(v) then return -1 end
     end
-    it.status='closed'; it.decidedAt=receipt.at; it.closedBy='staff'; it.closedReason='Marked handled without sending'
+    for k,v in pairs(patch) do it[k]=v end
     redis.call('set',KEYS[1],cjson.encode(list)); redis.call('set',KEYS[2],ARGV[3]); return 1
   end
 end
-return 0`,[AQKEY,approvalSendKey(id)],[id,JSON.stringify(escalationReviewSnapshot(it)),JSON.stringify(receipt)]);
+return 0`,[AQKEY,approvalSendKey(id),...(externalReply?["parkside:thr:"+threadKey(it.thread_id,it.booking_id)]:[])],[id,JSON.stringify(escalationReviewSnapshot(it)),JSON.stringify(receipt),JSON.stringify(patch),JSON.stringify(inbound)]);
       if(Number(result)!==1)return {ok:false,status:409,error:"This record changed while you reviewed it. Refresh and review again."};
     }else{
-      it.status="closed";it.decidedAt=receipt.at;it.closedBy="staff";it.closedReason="Marked handled without sending";
+      Object.assign(it,patch);
       await saveApprovalSend(id,receipt);await setApprovals(list);
     }
     return {ok:true,id,sent:false,learned:false};
@@ -4368,33 +4418,30 @@ if(action==="email_recipients"){
       const msgBody=String(e.body||e.message||e.content||e.text||"").trim();
       if(isDraft) return res.status(200).json({ok:true, ignored:"draft"});
       if(!inboundRole){
-        // Outbound on this thread — either the ENGINE's own send (OwnerRez echoes it back to us) OR a HUMAN
-        // replying to the guest directly in OwnerRez (front desk / owner). Log it; and if it is a human reply
-        // (NOT an echo of a message the engine already sent), CLOSE any open escalation/approval on this thread
-        // so a later "Q# yes"/fact from Victor can NEVER send the guest a SECOND message. Single resolution
-        // across the Victor <-> front-desk boundary. We only close items older than 60s so the engine's own
-        // holding-message echo (which arrives seconds after we open the escalation) can never self-close it.
+        // Owner-role outbound includes BOTH human replies and booking automations.
+        // Log every message, but routine/ambiguous notices cannot resolve a guest's
+        // question. Eligible replies use the same decision lock and revision CAS as
+        // Mark handled, so a concurrent guest follow-up cannot be silently closed.
         let closedExternally=[];
+        const evidence=ownerRezReplyEvidence(act,e,msgBody);
         try{
           const _norm=function(x){ return String(x||"").replace(/\s+/g," ").trim(); };
           const _nb=_norm(msgBody);
           const _log=await getThreadLog(threadId, bookingId);
           const _engineSent = !!_nb && _log.some(function(m){ return m && m.d==="out" && _norm(m.b)===_nb; });
           if(role && msgBody) await appendThreadLog(threadId, bookingId, "out", msgBody, "");
-          if(_nb && !_engineSent && (threadId||bookingId)){
-            const _al=await getApprovals(); let _ch=false; const _cut=Date.now()-60000;
+          if(_nb && !_engineSent && evidence.eligible && (threadId||bookingId)){
+            const _al=await getApprovals();
             for(const it of _al){ if(!it) continue;
               if((it.status==="pending"||it.status==="escalated")
-                 && ((threadId&&it.thread_id===threadId)||(bookingId&&String(it.booking_id)===String(bookingId)))
-                 && (Date.parse(it.primaryNotifiedAt||it.ts||"")||0) < _cut){
-                it.status="closed"; it.decidedAt=new Date().toISOString(); it.closedExternally=true; it.closedBy=String(e.from_role||"staff"); it.externalReply=_nb.slice(0,300);
-                _ch=true; closedExternally.push(it.smsLabel||it.id);
+                 && (threadId?String(it.thread_id)===String(threadId):bookingId&&String(it.booking_id)===String(bookingId))){
+                const closed=await markEscalationHandled(it.id,escalationReviewVersion(it),evidence);
+                if(closed.ok&&!closed.already)closedExternally.push(it.smsLabel||it.id);
               }
             }
-            if(_ch) await setApprovals(_al);
           }
         }catch(e2){}
-        return res.status(200).json({ok:true, logged_outbound:!!(role&&msgBody), closedExternally:closedExternally, ignored_for_reply:"from_role="+(e.from_role||"")});
+        return res.status(200).json({ok:true, logged_outbound:!!(role&&msgBody), closedExternally:closedExternally, closureSkipped:evidence.eligible?null:evidence.reason, ignored_for_reply:"from_role="+(e.from_role||"")});
       }
 
       const question=msgBody;
