@@ -8,7 +8,41 @@
 //       gap>=0 -> level travels toward $300 ; gap<0 -> toward $99.
 //     Then a GENTLE per-unit nudge (~20%, capped +/-$25) for unit-level scarcity vs the resort.
 //   Overrides pin a night. No occupancy data at all -> price at market.
-let redis=null; try{ const {Redis}=require("@upstash/redis"); redis=new Redis({url:process.env.KV_REST_API_URL,token:process.env.KV_REST_API_TOKEN}); }catch{ redis=null; }
+let redis=null, redisRaw=null;
+try{
+  const {Redis}=require("@upstash/redis");
+  const redisConfig={url:process.env.KV_REST_API_URL,token:process.env.KV_REST_API_TOKEN};
+  redis=new Redis(redisConfig);
+  // Daily reports predate the SDK's automatic JSON deserializer. A second client
+  // is intentionally limited to those string values so legacy text such as
+  // "123", "null", or "[]" can be read byte-for-byte instead of changing type.
+  redisRaw=new Redis({...redisConfig,automaticDeserialization:false});
+}catch{ redis=null; redisRaw=null; }
+const DAILY_REPORT_STORAGE_PREFIX='parkside-report:v1:';
+const DAILY_REPORT_STORAGE_FORMAT='v1-json-string';
+function dailyReportKey(date){ return 'parkside:report:'+date; }
+function dailyReportFormatKey(date){ return 'parkside:report-format:'+date; }
+function encodeDailyReportStorage(value){ return DAILY_REPORT_STORAGE_PREFIX+JSON.stringify(String(value==null?'':value)); }
+function decodeDailyReportStorage(raw,format){
+  if(raw==null) return '';
+  if(typeof raw!=='string') throw new Error('Stored daily report is not a string');
+  // Legacy reports have no companion format marker and are always literal text,
+  // even if their first bytes happen to resemble the current encoding prefix.
+  if(format!==DAILY_REPORT_STORAGE_FORMAT) return raw;
+  if(!raw.startsWith(DAILY_REPORT_STORAGE_PREFIX)) throw new Error('Stored daily report encoding is invalid');
+  let value; try{ value=JSON.parse(raw.slice(DAILY_REPORT_STORAGE_PREFIX.length)); }catch(e){ throw new Error('Stored daily report encoding is invalid'); }
+  if(typeof value!=='string') throw new Error('Stored daily report encoding is invalid');
+  return value;
+}
+async function readDailyReport(date){
+  if(!redisRaw) throw new Error('Report persistence is unavailable');
+  const values=await Promise.all([redisRaw.get(dailyReportKey(date)),redisRaw.get(dailyReportFormatKey(date))]);
+  return decodeDailyReportStorage(values[0],values[1]);
+}
+async function writeDailyReport(date,value){
+  if(!redisRaw) throw new Error('Report persistence is unavailable');
+  await redisRaw.mset({[dailyReportKey(date)]:encodeDailyReportStorage(value),[dailyReportFormatKey(date)]:DAILY_REPORT_STORAGE_FORMAT});
+}
 const staffSms = require("./staff-sms.cjs");
 const guestFacts = require("./guest-facts.cjs");
 const _smsMemory=new Map();
@@ -1287,7 +1321,7 @@ async function runDailyScore(nowIso){
   if(!(await getAutograde())) return {skipped:"auto-grade turned off (Gavin toggle) — no grade drafted", date};
   const cfg=await getNotifyConfig();
   const hours=await wwHoursForDate(date); const screen=await wwScreenActivity(date); const zones=await gpsZoneSummary(device,date);
-  let report=""; try{ if(redis) report=(await redis.get("parkside:report:"+date))||""; }catch(e){}
+  let report=""; try{ if(redisRaw) report=await readDailyReport(date); }catch(e){}
   const gaps=[];
   if(!report||!String(report).trim()) gaps.push("Victor’s daily report (what he said he did) — nothing on file");
   if(!hours.available && !(screen&&screen.available)) gaps.push("WebWork data (hours + screen activity) — desktop app may not be running");
@@ -1303,7 +1337,7 @@ async function runDailyScore(nowIso){
 // ===== Gavin's manual grades (ground truth) + in-context learning =====
 async function buildDaySnapshot(date, device){
   const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device||"victor",date); const screen=await wwScreenActivity(date);
-  let report=""; try{ if(redis) report=(await redis.get("parkside:report:"+date))||""; }catch(e){}
+  let report=""; try{ if(redisRaw) report=await readDailyReport(date); }catch(e){}
   const bz=(zones&&zones.byZoneMin)||{};
   const hs=hours.available?(hours.hours+"h, "+hours.active_pct+"% active"):"no WebWork hours";
   const gs=(zones.on_site_min||0)+"/"+(zones.total_min||0)+" min on-site (office "+(bz.office||0)+", tepees "+(bz.tepees||0)+", maint "+(bz.maintenance||0)+", resort "+(bz.resort||0)+", off "+(bz.off||0)+")";
@@ -2193,37 +2227,601 @@ function phoneDigits(v){ return String(v||'').replace(/\D/g,'').slice(-10); }
 function recordingSidOf(v){ const s=String(v||''); const m=s.match(/(?:Recordings\/)?(RE[a-zA-Z0-9]{20,})/); return m?m[1]:''; }
 function twilioCredentials(){ const sid=process.env.SMS_TWILIO_SID||process.env.TWILIO_ACCOUNT_SID||''; const token=process.env.SMS_TWILIO_TOKEN||process.env.TWILIO_AUTH_TOKEN||''; return {sid,token}; }
 function twilioAuthHeader(){ const c=twilioCredentials(); return c.sid&&c.token ? ('Basic '+Buffer.from(c.sid+':'+c.token).toString('base64')) : ''; }
-async function transcribeCallRecording(recordingUrl){
-  const groqKey=String(process.env.GROQ_API_KEY||''), openaiKey=String(process.env.OPENAI_API_KEY||''); const auth=twilioAuthHeader();
-  if(!groqKey&&!openaiKey) throw new Error('No long-recording transcription provider is configured');
-  if(!auth) throw new Error('Twilio recording access is not configured');
-  const base=String(recordingUrl||'').replace(/\.json(?:\?.*)?$/,''); if(!base) throw new Error('Recording URL is missing');
-  const audioRes=await fetch(/\.mp3(?:\?|$)/i.test(base)?base:(base+'.mp3'),{headers:{Authorization:auth}});
-  if(!audioRes.ok) throw new Error('Twilio audio fetch failed ('+audioRes.status+')');
-  const audioBuf=await audioRes.arrayBuffer(); if(audioBuf.byteLength<256) throw new Error('Twilio recording was empty');
-  const fd=new FormData(); fd.append('file',new Blob([audioBuf],{type:'audio/mpeg'}),'call.mp3'); fd.append('model',groqKey?'whisper-large-v3':'gpt-4o-mini-transcribe'); fd.append('response_format','json');
-  const url=groqKey?'https://api.groq.com/openai/v1/audio/transcriptions':'https://api.openai.com/v1/audio/transcriptions'; const key=groqKey||openaiKey;
-  const tr=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+key},body:fd});
-  const tj=await tr.json().catch(()=>({})); if(!tr.ok) throw new Error((groqKey?'Groq':'OpenAI')+' transcription failed ('+tr.status+')');
-  const text=String((tj&&tj.text)||'').trim(); if(!text) throw new Error((groqKey?'Groq':'OpenAI')+' returned an empty transcript'); return text;
+const CALL_LOG_KEY='parkside:calllog';
+const CALL_RECEIPT_PREFIX='parkside:callreceipt:';
+const CALL_JOB_PREFIX='parkside:calljob:';
+const CALL_TOMBSTONE_PREFIX='parkside:calltombstone:';
+const CALL_UPSERT_LUA=String.raw`-- victor-transcript-upsert-v3
+local function decoded(raw, fallback)
+  if not raw then return fallback end
+  local ok, value=pcall(cjson.decode,raw)
+  if ok then return value end
+  return raw
+end
+local function scalar(v)
+  if v==nil or v==cjson.null then return '' end
+  if type(v)=='boolean' then return v and '1' or '0' end
+  return tostring(v)
+end
+local function same_entry(a,b)
+  local fields={'id','from','date','at','recordingUrl','recordingSid','callSid','text','status','isVictor','transcriptionError','provider','providerJobSid','persistenceRevision'}
+  for _,k in ipairs(fields) do if scalar(a[k])~=scalar(b[k]) then return false end end
+  return true
+end
+local meta=cjson.decode(ARGV[1])
+local tomb=decoded(redis.call('get',KEYS[4]),nil)
+if type(tomb)=='table' and scalar(tomb.status)=='deleted' then
+  return cjson.encode({ok=false,conflict='deleted',revision=scalar(tomb.revision)})
+end
+local protection_revision=type(tomb)=='table' and scalar(tomb.revision) or ''
+local job=decoded(redis.call('get',KEYS[5]),nil)
+if type(job)~='table' or scalar(job.revision)~=ARGV[7] then
+  return cjson.encode({ok=false,conflict='job_changed'})
+end
+if scalar(job.recordingSid)~=scalar(meta.recordingSid) or scalar(job.protectionRevision)~=protection_revision then
+  return cjson.encode({ok=false,conflict='protection_changed'})
+end
+local log=decoded(redis.call('get',KEYS[1]),{})
+if type(log)~='table' then return cjson.encode({ok=false,error='invalid_call_log'}) end
+local report_raw=redis.call('get',KEYS[2])
+local report=''
+if report_raw then
+  local report_format=redis.call('get',KEYS[6])
+  if report_format==ARGV[8] then
+    if string.sub(report_raw,1,string.len(ARGV[6]))~=ARGV[6] then return cjson.encode({ok=false,error='invalid_report'}) end
+    local ok,value=pcall(cjson.decode,string.sub(report_raw,string.len(ARGV[6])+1))
+    if not ok or type(value)~='string' then return cjson.encode({ok=false,error='invalid_report'}) end
+    report=value
+  else
+    report=report_raw
+  end
+end
+local receipt=decoded(redis.call('get',KEYS[3]),nil)
+local expected=cjson.decode(ARGV[2])
+local expected_found=ARGV[3]=='1'
+local expected_report=ARGV[4]
+local allow_legacy=ARGV[5]=='1'
+local sid=scalar(meta.recordingSid)
+local found=nil
+local index=nil
+for i,c in ipairs(log) do
+  local cs=scalar(c.recordingSid)
+  local cu=scalar(c.recordingUrl)
+  if sid~='' and (cs==sid or (cu~='' and string.find(cu,sid,1,true))) then found=c; index=i; break end
+end
+if (found~=nil)~=expected_found then return cjson.encode({ok=false,conflict='call_changed'}) end
+if found and not same_entry(found,expected) then return cjson.encode({ok=false,conflict='call_changed'}) end
+local entry=found or {id=sid}
+if scalar(entry.id)=='' then entry.id=sid end
+if scalar(entry.from)=='' then entry.from=scalar(meta.from) end
+if scalar(entry.date)=='' then entry.date=scalar(meta.date) end
+if scalar(entry.at)=='' then entry.at=scalar(meta.at) end
+if scalar(entry.recordingUrl)=='' then entry.recordingUrl=scalar(meta.recordingUrl) end
+if scalar(entry.recordingSid)=='' then entry.recordingSid=sid end
+if scalar(entry.callSid)=='' then entry.callSid=scalar(meta.callSid) end
+if entry.isVictor==nil or entry.isVictor==cjson.null then entry.isVictor=meta.isVictor==true end
+entry.provider=scalar(meta.provider)
+entry.providerJobSid=scalar(meta.providerJobSid)
+local old_text=scalar(entry.text)
+local incoming_text=scalar(meta.text)
+if old_text~='' then entry.text=old_text elseif incoming_text~='' then entry.text=incoming_text else entry.text='' end
+if scalar(entry.text)~='' then
+  entry.status='completed'
+  entry.transcriptionError=nil
+else
+  entry.status=scalar(meta.status)~='' and scalar(meta.status) or (scalar(entry.status)~='' and scalar(entry.status) or 'failed')
+  if scalar(meta.transcriptionError)~='' then entry.transcriptionError=scalar(meta.transcriptionError) end
+end
+entry.persistenceRevision=scalar(meta.persistenceRevision)
+if not found then table.insert(log,1,entry) else log[index]=entry end
+while #log>500 do table.remove(log) end
+local disposition='no_text'
+local write_report=false
+local final_receipt=receipt
+if entry.isVictor==true and scalar(entry.text)~='' then
+  local receipt_complete=type(receipt)=='table' and scalar(receipt.status)=='completed'
+  if receipt_complete then
+    disposition='already_materialized'
+  else
+    if report~=expected_report then return cjson.encode({ok=false,conflict='report_changed'}) end
+    local text=scalar(entry.text)
+    local legacy=false
+    if allow_legacy then
+      local padded='\n\n'..report..'\n\n'
+      legacy=(report==text) or string.find(padded,'\n\n'..text..'\n\n',1,true)~=nil or string.find(padded,'\n\n[call] '..text..'\n\n',1,true)~=nil
+    end
+    if legacy then
+      disposition='existing_legacy'
+    else
+      report=(report~='' and (report..'\n\n[call] '..text) or text)
+      disposition='appended'
+      write_report=true
+    end
+    final_receipt={version=1,status='completed',recordingSid=sid,date=scalar(entry.date),entryId=scalar(entry.id),textLength=string.len(text),textDigest=scalar(meta.textDigest),reportDisposition=disposition,materializedAt=scalar(meta.persistedAt),source=scalar(meta.source)}
+  end
+elseif entry.isVictor==true then
+  final_receipt={version=1,status='failed',recordingSid=sid,date=scalar(entry.date),entryId=scalar(entry.id),error=scalar(entry.transcriptionError),updatedAt=scalar(meta.persistedAt),source=scalar(meta.source)}
+else
+  disposition='not_victor'
+  final_receipt={version=1,status=scalar(entry.text)~='' and 'completed' or scalar(entry.status),recordingSid=sid,date=scalar(entry.date),entryId=scalar(entry.id),reportDisposition=disposition,updatedAt=scalar(meta.persistedAt),source=scalar(meta.source)}
+end
+if write_report then
+  redis.call('mset',KEYS[1],cjson.encode(log),KEYS[2],ARGV[6]..cjson.encode(report),KEYS[3],cjson.encode(final_receipt),KEYS[6],ARGV[8])
+else
+  redis.call('mset',KEYS[1],cjson.encode(log),KEYS[3],cjson.encode(final_receipt))
+end
+return cjson.encode({ok=true,entry=entry,receipt=final_receipt,reportDisposition=disposition,reportWritten=write_report})
+`;
+const CALL_JOB_RESERVE_LUA=String.raw`-- victor-transcript-job-reserve-v1
+local function scalar(v)
+  if v==nil or v==cjson.null then return '' end
+  return tostring(v)
+end
+local tomb_raw=redis.call('get',KEYS[2])
+local tomb=tomb_raw and cjson.decode(tomb_raw) or nil
+if type(tomb)=='table' and scalar(tomb.status)=='deleted' then
+  return cjson.encode({ok=false,conflict='deleted',revision=scalar(tomb.revision)})
+end
+local existing_raw=redis.call('get',KEYS[1])
+if existing_raw then return cjson.encode({ok=true,created=false,job=cjson.decode(existing_raw)}) end
+local job=cjson.decode(ARGV[1])
+job.protectionRevision=type(tomb)=='table' and scalar(tomb.revision) or ''
+redis.call('set',KEYS[1],cjson.encode(job))
+return cjson.encode({ok=true,created=true,job=job})
+`;
+const CALL_JOB_CAS_LUA=String.raw`-- victor-transcript-job-cas-v1
+local function scalar(v)
+  if v==nil or v==cjson.null then return '' end
+  return tostring(v)
+end
+local current_raw=redis.call('get',KEYS[1])
+if not current_raw then return cjson.encode({ok=false,conflict='job_missing'}) end
+local current=cjson.decode(current_raw)
+if scalar(current.revision)~=ARGV[1] then return cjson.encode({ok=false,conflict='job_changed'}) end
+local tomb_raw=redis.call('get',KEYS[2])
+local tomb=tomb_raw and cjson.decode(tomb_raw) or nil
+if type(tomb)=='table' and scalar(tomb.status)=='deleted' then
+  return cjson.encode({ok=false,conflict='deleted',revision=scalar(tomb.revision)})
+end
+local protection_revision=type(tomb)=='table' and scalar(tomb.revision) or ''
+if scalar(current.protectionRevision)~=protection_revision then
+  return cjson.encode({ok=false,conflict='protection_changed'})
+end
+local next=cjson.decode(ARGV[2])
+if scalar(next.recordingSid)~=scalar(current.recordingSid) or scalar(next.accountSid)~=scalar(current.accountSid) then
+  return cjson.encode({ok=false,error='job_identity_changed'})
+end
+next.protectionRevision=protection_revision
+redis.call('set',KEYS[1],cjson.encode(next))
+return cjson.encode({ok=true,job=next})
+`;
+const CALL_DELETE_LUA=String.raw`-- victor-call-delete-v2
+local raw=redis.call('get',KEYS[1])
+local log=raw and cjson.decode(raw) or {}
+if type(log)~='table' then return cjson.encode({ok=false,error='invalid_call_log'}) end
+local next={}
+local removed=0
+local removed_entry=nil
+for _,c in ipairs(log) do
+  if tostring(c.id or '')==ARGV[1] or tostring(c.at or '')==ARGV[1] then
+    removed=removed+1
+    removed_entry=c
+  else
+    table.insert(next,c)
+  end
+end
+if removed==0 then return cjson.encode({ok=false,conflict='not_found'}) end
+if removed~=1 then return cjson.encode({ok=false,conflict='ambiguous'}) end
+local entry_sid=tostring(removed_entry.recordingSid or '')
+if entry_sid=='' then entry_sid=string.match(tostring(removed_entry.recordingUrl or ''),'(RE[%w]+)') or '' end
+if entry_sid~=ARGV[2] then return cjson.encode({ok=false,conflict='recording_changed'}) end
+local next_json=#next==0 and '[]' or cjson.encode(next)
+local tomb={version=1,status='deleted',revision=ARGV[3],recordingSid=ARGV[2],deletedAt=ARGV[4],entry=removed_entry}
+local job_raw=redis.call('get',KEYS[3])
+if job_raw then
+  local job=cjson.decode(job_raw)
+  job.revision=ARGV[3]
+  job.protectionRevision=ARGV[3]
+  job.blockedByDeletion=true
+  job.deletionRevision=ARGV[3]
+  job.updatedAt=ARGV[4]
+  redis.call('set',KEYS[3],cjson.encode(job))
+end
+redis.call('mset',KEYS[1],next_json,KEYS[2],cjson.encode(tomb))
+return cjson.encode({ok=true,deleted=1,remaining=#next,recordingSid=ARGV[2],restoreRevision=ARGV[3]})
+`;
+const CALL_RESTORE_LUA=String.raw`-- victor-call-restore-v1
+local function scalar(v)
+  if v==nil or v==cjson.null then return '' end
+  return tostring(v)
+end
+local tomb_raw=redis.call('get',KEYS[2])
+if not tomb_raw then return cjson.encode({ok=false,conflict='not_deleted'}) end
+local tomb=cjson.decode(tomb_raw)
+if scalar(tomb.status)~='deleted' or scalar(tomb.revision)~=ARGV[2] then
+  return cjson.encode({ok=false,conflict='tombstone_changed'})
+end
+local entry=tomb.entry
+if type(entry)~='table' then return cjson.encode({ok=false,error='invalid_tombstone'}) end
+local entry_sid=scalar(entry.recordingSid)
+if entry_sid=='' then entry_sid=string.match(scalar(entry.recordingUrl),'(RE[%w]+)') or '' end
+if entry_sid~=ARGV[1] then return cjson.encode({ok=false,error='invalid_tombstone'}) end
+local raw=redis.call('get',KEYS[1])
+local log=raw and cjson.decode(raw) or {}
+for _,c in ipairs(log) do
+  local sid=scalar(c.recordingSid)
+  if sid=='' then sid=string.match(scalar(c.recordingUrl),'(RE[%w]+)') or '' end
+  if sid==ARGV[1] then return cjson.encode({ok=false,conflict='already_restored'}) end
+end
+table.insert(log,1,entry)
+while #log>500 do table.remove(log) end
+tomb.status='restored'
+tomb.revision=ARGV[3]
+tomb.restoredAt=ARGV[4]
+local job_raw=redis.call('get',KEYS[3])
+local job=nil
+if job_raw then
+  job=cjson.decode(job_raw)
+  job.revision=ARGV[3]
+  job.protectionRevision=ARGV[3]
+  job.blockedByDeletion=false
+  job.updatedAt=ARGV[4]
+end
+redis.call('mset',KEYS[1],cjson.encode(log),KEYS[2],cjson.encode(tomb))
+if job then redis.call('set',KEYS[3],cjson.encode(job)) end
+return cjson.encode({ok=true,recordingSid=ARGV[1],revision=ARGV[3],job=job})
+`;
+const CALL_MOVE_LUA=String.raw`-- victor-call-move-v1
+local raw=redis.call('get',KEYS[1])
+local log=raw and cjson.decode(raw) or {}
+local found=false
+local oldDate=''
+for _,c in ipairs(log) do
+  if not found and (tostring(c.id or '')==ARGV[1] or tostring(c.at or '')==ARGV[1]) then oldDate=tostring(c.date or ''); c.date=ARGV[2]; found=true end
+end
+if found then redis.call('set',KEYS[1],cjson.encode(log)) end
+return cjson.encode({found=found,from=oldDate,to=ARGV[2]})
+`;
+function callPersistenceError(message,code){ const e=new Error(message); e.code=code||'CALL_PERSISTENCE_FAILED'; return e; }
+function parseEvalResult(raw){
+  if(typeof raw!=='string') return raw;
+  try{ return JSON.parse(raw); }catch(e){ throw callPersistenceError('Transcript persistence returned an invalid result','CALL_PERSISTENCE_INVALID'); }
 }
-async function upsertCallLog(meta){
-  if(!redis) return null; meta=meta||{};
+function findCallEntry(log,recSid){
+  return (log||[]).find(function(c){ return String(c&&c.recordingSid||recordingSidOf(c&&c.recordingUrl)||'')===recSid; })||null;
+}
+function callEntrySnapshot(entry){
+  if(!entry) return null;
+  const out={}; for(const k of ['id','from','date','at','recordingUrl','recordingSid','callSid','text','status','isVictor','transcriptionError','provider','providerJobSid','persistenceRevision']) if(entry[k]!=null) out[k]=entry[k];
+  return out;
+}
+async function readCallPersistenceState(meta){
+  if(!redis) throw callPersistenceError('Transcript persistence is unavailable','CALL_PERSISTENCE_UNAVAILABLE');
+  meta=meta||{}; const recSid=String(meta.recordingSid||recordingSidOf(meta.recordingUrl)||'').trim();
+  if(!/^RE[a-zA-Z0-9]{20,}$/.test(recSid)) throw callPersistenceError('A valid RecordingSid is required','CALL_RECORDING_SID_REQUIRED');
+  let log; try{ log=(await redis.get(CALL_LOG_KEY))||[]; }catch(e){ throw callPersistenceError('Transcript persistence could not be read','CALL_PERSISTENCE_UNAVAILABLE'); }
+  if(!Array.isArray(log)) throw callPersistenceError('Stored call log is invalid','CALL_PERSISTENCE_INVALID');
+  const entry=findCallEntry(log,recSid);
+  const fallbackAt=String(meta.at||new Date().toISOString());
+  const date=String((entry&&entry.date)||meta.date||etDate(fallbackAt));
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw callPersistenceError('Stored call date is invalid','CALL_PERSISTENCE_INVALID');
+  let report,receipt,job,tombstone;
+  try{ [report,receipt,job,tombstone]=await Promise.all([readDailyReport(date),redis.get(CALL_RECEIPT_PREFIX+recSid),redis.get(CALL_JOB_PREFIX+recSid),redis.get(CALL_TOMBSTONE_PREFIX+recSid)]); }catch(e){ throw callPersistenceError('Transcript persistence could not be read','CALL_PERSISTENCE_UNAVAILABLE'); }
+  return {recSid,date,entry:entry?JSON.parse(JSON.stringify(entry)):null,entrySnapshot:callEntrySnapshot(entry),report,receipt:receipt||null,job:job||null,tombstone:tombstone||null};
+}
+async function upsertCallLog(meta,options){
+  meta=meta||{}; options=options||{};
   const recUrl=String(meta.recordingUrl||'').trim(), recSid=String(meta.recordingSid||recordingSidOf(recUrl)||'').trim();
-  const now=String(meta.at||new Date().toISOString()), date=String(meta.date||etDate(now));
-  let log=(await redis.get('parkside:calllog'))||[];
-  let entry=log.find(function(c){ const cs=String(c.recordingSid||recordingSidOf(c.recordingUrl)||''); return (recSid&&cs===recSid)||(recUrl&&String(c.recordingUrl||'').replace(/\.json$/,'')===recUrl.replace(/\.json$/,'')); });
-  if(!entry){ entry={id:recSid||('c'+Date.now().toString(36)+Math.random().toString(36).slice(2,7))}; log.unshift(entry); }
-  entry.from=String(meta.from||entry.from||'').trim(); entry.date=date; entry.at=now;
-  if(recUrl) entry.recordingUrl=recUrl; if(recSid) entry.recordingSid=recSid; if(meta.callSid) entry.callSid=String(meta.callSid);
-  if(meta.text!=null) entry.text=String(meta.text).trim(); entry.status=String(meta.status||(entry.text?'completed':'recorded'));
-  entry.isVictor=meta.isVictor!=null?!!meta.isVictor:!!entry.isVictor; delete entry.transcriptionError;
-  if(meta.transcriptionError) entry.transcriptionError=String(meta.transcriptionError).slice(0,180);
-  await redis.set('parkside:calllog',log.slice(0,500));
-  if(entry.isVictor&&entry.text){ const prev=(await redis.get('parkside:report:'+date))||''; if(String(prev).indexOf(entry.text)===-1){ const merged=prev?(String(prev)+'\n\n[call] '+entry.text):entry.text; await redis.set('parkside:report:'+date,merged); } }
-  return entry;
+  if(!/^RE[a-zA-Z0-9]{20,}$/.test(recSid)) throw callPersistenceError('A valid RecordingSid is required','CALL_RECORDING_SID_REQUIRED');
+  let state=options.expectedState||await readCallPersistenceState({...meta,recordingSid:recSid});
+  const strict=!!options.strictExpected, maxAttempts=strict?1:5;
+  for(let attempt=0;attempt<maxAttempts;attempt++){
+    if(state.tombstone&&state.tombstone.status==='deleted') throw callPersistenceError('This transcript was deleted and must be explicitly restored','CALL_DELETED');
+    const job=options.job||state.job;
+    if(!job||!job.revision) throw callPersistenceError('Durable transcript job is missing','CALL_JOB_MISSING');
+    const existing=state.entry;
+    const now=String((existing&&existing.at)||meta.at||new Date().toISOString());
+    const date=String((existing&&existing.date)||meta.date||etDate(now));
+    const text=String(meta.text==null?'':meta.text).trim();
+    const persistedAt=new Date().toISOString();
+    const finalText=String((existing&&existing.text)||text);
+    const payload={
+      from:String(meta.from||'').trim(),date,at:now,text,recordingUrl:recUrl,recordingSid:recSid,callSid:String(meta.callSid||''),
+      status:String(meta.status||(text?'completed':'failed')),isVictor:!!meta.isVictor,
+      transcriptionError:String(meta.transcriptionError||'').slice(0,180),
+      provider:String(meta.provider||job.provider||''),providerJobSid:String(meta.providerJobSid||job.transcriptSid||''),
+      persistenceRevision:require('crypto').randomUUID(),persistedAt,source:String(meta.source||'call_intake'),
+      textDigest:require('crypto').createHash('sha256').update(finalText).digest('hex')
+    };
+    let raw;
+    try{
+      raw=await redis.eval(CALL_UPSERT_LUA,[CALL_LOG_KEY,dailyReportKey(date),CALL_RECEIPT_PREFIX+recSid,CALL_TOMBSTONE_PREFIX+recSid,CALL_JOB_PREFIX+recSid,dailyReportFormatKey(date)],[JSON.stringify(payload),JSON.stringify(state.entrySnapshot||{}),state.entry?'1':'0',state.report,state.entry&&String(state.entry.text||'').trim()?'1':'0',DAILY_REPORT_STORAGE_PREFIX,String(job.revision),DAILY_REPORT_STORAGE_FORMAT]);
+    }catch(e){ throw callPersistenceError('Transcript persistence outcome is unknown','CALL_PERSISTENCE_UNKNOWN'); }
+    const out=parseEvalResult(raw);
+    if(out&&out.ok){
+      const entry=out.entry||{}; entry._persistence={receipt:out.receipt||null,reportDisposition:out.reportDisposition||'',reportWritten:!!out.reportWritten};
+      return entry;
+    }
+    if(out&&out.conflict){
+      if(out.conflict==='deleted') throw callPersistenceError('This transcript was deleted and must be explicitly restored','CALL_DELETED');
+      if(strict) throw callPersistenceError('Transcript data changed during recovery; nothing was overwritten','CALL_PERSISTENCE_CONFLICT');
+      state=await readCallPersistenceState({...meta,recordingSid:recSid});
+      options.job=state.job;
+      continue;
+    }
+    throw callPersistenceError('Transcript persistence failed','CALL_PERSISTENCE_FAILED');
+  }
+  throw callPersistenceError('Transcript data changed too many times; nothing was overwritten','CALL_PERSISTENCE_CONFLICT');
 }
-async function twilioJson(url){ const auth=twilioAuthHeader(); if(!auth) throw new Error('Twilio API is not configured'); const r=await fetch(url,{headers:{Authorization:auth}}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error('Twilio API failed ('+r.status+')'); return j; }
+function newCallJob(meta,provider,serviceSid){
+  const now=new Date().toISOString(), crypto=require('crypto');
+  return {version:1,provider:String(provider||'twilio_classic_ci'),accountSid:String(meta.accountSid||twilioCredentials().sid||''),serviceSid:String(serviceSid||''),recordingSid:String(meta.recordingSid||''),callSid:String(meta.callSid||''),recordingUrl:String(meta.recordingUrl||''),from:String(meta.from||''),date:String(meta.date||''),at:String(meta.at||''),isVictor:!!meta.isVictor,customerKey:'victor-report:'+String(meta.recordingSid||''),status:'reserved',submissionState:'not_started',transcriptSid:'',text:'',reservationId:crypto.randomUUID(),revision:crypto.randomUUID(),createdAt:now,updatedAt:now,protectionRevision:''};
+}
+async function readCallJob(recSid){
+  if(!redis) throw callPersistenceError('Transcript persistence is unavailable','CALL_PERSISTENCE_UNAVAILABLE');
+  try{ return (await redis.get(CALL_JOB_PREFIX+recSid))||null; }catch(e){ throw callPersistenceError('Transcript job state could not be read','CALL_PERSISTENCE_UNAVAILABLE'); }
+}
+async function reserveCallJob(meta,provider,serviceSid){
+  if(!redis) throw callPersistenceError('Transcript persistence is unavailable','CALL_PERSISTENCE_UNAVAILABLE');
+  const job=newCallJob(meta,provider,serviceSid); let raw;
+  try{ raw=await redis.eval(CALL_JOB_RESERVE_LUA,[CALL_JOB_PREFIX+job.recordingSid,CALL_TOMBSTONE_PREFIX+job.recordingSid],[JSON.stringify(job)]); }
+  catch(e){
+    let current=null; try{ current=await readCallJob(job.recordingSid); }catch(readError){}
+    if(current&&current.recordingSid===job.recordingSid) return current;
+    throw callPersistenceError('Transcript job reservation outcome is unknown; provider submission was not attempted','CALL_PERSISTENCE_UNKNOWN');
+  }
+  const out=parseEvalResult(raw);
+  if(out&&out.ok&&out.job){
+    const current=out.job;
+    if(String(current.recordingSid)!==job.recordingSid||String(current.accountSid)!==String(job.accountSid)) throw callPersistenceError('Stored transcript job identity does not match','CALL_PERSISTENCE_CONFLICT');
+    if(current.provider==='twilio_classic_ci'&&String(current.serviceSid)!==String(serviceSid||'')) throw callPersistenceError('Stored transcript job belongs to a different Twilio service','CALL_PERSISTENCE_CONFLICT');
+    return current;
+  }
+  if(out&&out.conflict==='deleted') throw callPersistenceError('This transcript was deleted and must be explicitly restored','CALL_DELETED');
+  throw callPersistenceError('Transcript job could not be reserved','CALL_PERSISTENCE_FAILED');
+}
+async function updateCallJob(job,changes){
+  if(!job||!job.recordingSid||!job.revision) throw callPersistenceError('Durable transcript job is invalid','CALL_PERSISTENCE_INVALID');
+  const next={...job,...changes,revision:require('crypto').randomUUID(),updatedAt:new Date().toISOString()}; let raw;
+  try{ raw=await redis.eval(CALL_JOB_CAS_LUA,[CALL_JOB_PREFIX+job.recordingSid,CALL_TOMBSTONE_PREFIX+job.recordingSid],[String(job.revision),JSON.stringify(next)]); }
+  catch(e){
+    let current=null; try{ current=await readCallJob(job.recordingSid); }catch(readError){}
+    if(current&&current.revision===next.revision) return current;
+    throw callPersistenceError('Transcript job persistence outcome is unknown','CALL_PERSISTENCE_UNKNOWN');
+  }
+  const out=parseEvalResult(raw);
+  if(out&&out.ok&&out.job) return out.job;
+  if(out&&out.conflict==='deleted') throw callPersistenceError('This transcript was deleted and must be explicitly restored','CALL_DELETED');
+  if(out&&out.conflict) throw callPersistenceError('Transcript job changed; no provider request was repeated','CALL_PERSISTENCE_CONFLICT');
+  throw callPersistenceError('Transcript job could not be updated','CALL_PERSISTENCE_FAILED');
+}
+function twilioHeader(req,name){ const h=req&&req.headers||{}; return String(h[String(name).toLowerCase()]||h[name]||''); }
+function callbackPublicUrl(req){
+  const origin=String(process.env.APP_PUBLIC_ORIGIN||'https://project-jvyw3.vercel.app').replace(/\/+$/,'');
+  const raw=String((req&&(req.originalUrl||req.url))||''); if(raw.startsWith('/')) return origin+raw;
+  const q=req&&req.query||{}, pairs=[]; for(const key of Object.keys(q)) if(q[key]!=null) pairs.push(encodeURIComponent(key)+'='+encodeURIComponent(String(q[key])));
+  return origin+'/api/app'+(pairs.length?('?'+pairs.join('&')):'');
+}
+function validTwilioSignature(req,body){
+  const token=String(twilioCredentials().token||''), supplied=twilioHeader(req,'x-twilio-signature'); if(!token||!supplied) return false;
+  let material=callbackPublicUrl(req);
+  for(const key of Object.keys(body||{}).sort()){
+    const value=body[key]; if(Array.isArray(value)){ for(const item of value.map(String).sort()) material+=key+item; } else material+=key+String(value==null?'':value);
+  }
+  const expected=require('crypto').createHmac('sha1',token).update(material).digest('base64'), a=Buffer.from(supplied), b=Buffer.from(expected);
+  return a.length===b.length&&require('crypto').timingSafeEqual(a,b);
+}
+const CLASSIC_CI_SUBMIT_TIMEOUT_MS=30000;
+async function twilioJson(url,options){
+  const auth=twilioAuthHeader(); if(!auth) throw callPersistenceError('Twilio API is not configured','TWILIO_NOT_CONFIGURED');
+  const timeoutMs=Math.max(0,Number(options&&options.timeoutMs)||0), controller=timeoutMs?new AbortController():null;
+  const opts={...(options||{}),headers:{...((options&&options.headers)||{}),Authorization:auth}}; delete opts.timeoutMs;
+  let timer=null, r, j; if(controller){ opts.signal=controller.signal; timer=setTimeout(function(){controller.abort();},timeoutMs); }
+  try{ r=await fetch(url,opts); try{ j=await r.json(); }catch(e){ if(controller&&controller.signal.aborted) throw e; j={}; } }
+  catch(e){ throw callPersistenceError(controller&&controller.signal.aborted?'Twilio request timed out with an uncertain outcome':'Twilio request outcome is unknown',controller&&controller.signal.aborted?'TWILIO_REQUEST_TIMEOUT':'TWILIO_REQUEST_UNKNOWN'); }
+  finally{ if(timer) clearTimeout(timer); }
+  if(!r.ok){ const e=callPersistenceError('Twilio API failed ('+r.status+')','TWILIO_HTTP_'+r.status); e.status=r.status; e.detail=String((j&&j.message)||'').slice(0,180); throw e; }
+  return j;
+}
+function twilioIntelligenceServiceSid(){ return String(process.env.TWILIO_INTELLIGENCE_SERVICE_SID||'').trim(); }
+function recordingApiUrl(recSid){ const c=twilioCredentials(); return 'https://api.twilio.com/2010-04-01/Accounts/'+encodeURIComponent(c.sid)+'/Recordings/'+encodeURIComponent(recSid)+'.json'; }
+function callApiUrl(callSid){ const c=twilioCredentials(); return 'https://api.twilio.com/2010-04-01/Accounts/'+encodeURIComponent(c.sid)+'/Calls/'+encodeURIComponent(callSid)+'.json'; }
+function validateRecordingCallbackUrl(value,recSid){
+  if(!value) return true;
+  try{ const u=new URL(String(value)), c=twilioCredentials(); return u.protocol==='https:'&&u.hostname==='api.twilio.com'&&u.pathname.replace(/\.json$/,'')==='/2010-04-01/Accounts/'+c.sid+'/Recordings/'+recSid; }catch(e){ return false; }
+}
+async function loadVictorRecordingMeta(recSid,hints){
+  hints=hints||{}; const c=twilioCredentials();
+  if(!/^RE[a-zA-Z0-9]{20,}$/.test(recSid)) throw callPersistenceError('A valid RecordingSid is required','CALL_RECORDING_SID_REQUIRED');
+  if(!c.sid||!c.token) throw callPersistenceError('Twilio API is not configured','TWILIO_NOT_CONFIGURED');
+  if(hints.recordingUrl&&!validateRecordingCallbackUrl(hints.recordingUrl,recSid)) throw callPersistenceError('Recording URL provenance did not match the configured Twilio account','CALL_PROVENANCE_FAILED');
+  const recording=await twilioJson(recordingApiUrl(recSid));
+  if(String(recording.sid||'')!==recSid||String(recording.account_sid||'')!==c.sid) throw callPersistenceError('Recording metadata did not match the configured Twilio account','CALL_PROVENANCE_FAILED');
+  const recordingStatus=String(recording.status||hints.status||'').toLowerCase();
+  if(recordingStatus&&recordingStatus!=='completed') throw callPersistenceError('Recording is not complete','CALL_PROVIDER_PENDING');
+  const callSid=String(recording.call_sid||hints.callSid||'');
+  if(!/^CA[a-zA-Z0-9]{20,}$/.test(callSid)||(hints.callSid&&String(hints.callSid)!==callSid)) throw callPersistenceError('Recording CallSid provenance could not be confirmed','CALL_PROVENANCE_FAILED');
+  const call=await twilioJson(callApiUrl(callSid));
+  if(String(call.sid||callSid)!==callSid||String(call.account_sid||'')!==c.sid) throw callPersistenceError('Call metadata did not match the configured Twilio account','CALL_PROVENANCE_FAILED');
+  const from=String(call.from||hints.from||'').trim(), cfg=await getNotifyConfig(), expected=phoneDigits(cfg.smsTo||victorNumber()), isVictor=!!(from&&expected&&phoneDigits(from)===expected);
+  const when=String(call.start_time||call.date_created||recording.date_created||hints.when||new Date().toISOString()), at=isFinite(Date.parse(when))?new Date(when).toISOString():new Date().toISOString();
+  return {accountSid:c.sid,recordingSid:recSid,callSid,recordingUrl:'https://api.twilio.com/2010-04-01/Accounts/'+c.sid+'/Recordings/'+recSid,from,date:etDate(at),at,isVictor,duration:Number(recording.duration||hints.duration||0),recordingStatus};
+}
+function transcriptField(obj,snake,camel){ if(!obj||typeof obj!=='object') return ''; if(obj[snake]!=null) return String(obj[snake]); if(obj[camel]!=null) return String(obj[camel]); return ''; }
+function transcriptChannel(obj){ let ch=obj&&obj.channel; if(typeof ch==='string'){ try{ ch=JSON.parse(ch); }catch(e){ ch={}; } } return ch&&typeof ch==='object'?ch:{}; }
+function transcriptSourceSid(obj){ const direct=transcriptField(obj,'source_sid','sourceSid'); if(direct) return direct; const ch=transcriptChannel(obj), media=ch.media_properties||ch.mediaProperties||{}; return String(media.source_sid||media.sourceSid||''); }
+function validateClassicTranscript(obj,expectedRecSid,expectedGtSid){
+  const c=twilioCredentials(), serviceSid=twilioIntelligenceServiceSid();
+  const gt=transcriptField(obj,'sid','sid'), account=transcriptField(obj,'account_sid','accountSid'), service=transcriptField(obj,'service_sid','serviceSid'), source=transcriptSourceSid(obj);
+  if(!/^GT[a-zA-Z0-9]{20,}$/.test(gt)||(expectedGtSid&&gt!==expectedGtSid)) throw callPersistenceError('Twilio transcript SID provenance failed','CALL_PROVENANCE_FAILED');
+  if(account!==c.sid||service!==serviceSid||!/^RE[a-zA-Z0-9]{20,}$/.test(source)||(expectedRecSid&&source!==expectedRecSid)) throw callPersistenceError('Twilio transcript account, service, or source provenance failed','CALL_PROVENANCE_FAILED');
+  return {gt,account,service,source,status:transcriptField(obj,'status','status'),customerKey:transcriptField(obj,'customer_key','customerKey'),raw:obj};
+}
+function validateIntelligencePageUrl(value,gtSid,listMode){
+  const u=new URL(String(value),'https://intelligence.twilio.com');
+  if(u.protocol!=='https:'||u.hostname!=='intelligence.twilio.com') throw callPersistenceError('Twilio pagination URL was rejected','CALL_PROVENANCE_FAILED');
+  const expected=listMode?'/v2/Transcripts':('/v2/Transcripts/'+gtSid+'/Sentences'); if(u.pathname!==expected) throw callPersistenceError('Twilio pagination path was rejected','CALL_PROVENANCE_FAILED');
+  return u.toString();
+}
+async function listClassicTranscripts(recSid){
+  const serviceSid=twilioIntelligenceServiceSid(); if(!serviceSid) throw callPersistenceError('TWILIO_INTELLIGENCE_SERVICE_SID is not configured','TWILIO_NOT_CONFIGURED');
+  let next='https://intelligence.twilio.com/v2/Transcripts?ServiceSid='+encodeURIComponent(serviceSid)+'&SourceSid='+encodeURIComponent(recSid)+'&PageSize=1000'; const found=[], seen=new Set();
+  for(let page=0;next&&page<100;page++){
+    next=validateIntelligencePageUrl(next,'',true); if(seen.has(next)) throw callPersistenceError('Twilio transcript pagination loop detected','CALL_PROVIDER_INVALID'); seen.add(next);
+    const j=await twilioJson(next), rows=Array.isArray(j.transcripts)?j.transcripts:[]; for(const row of rows) found.push(validateClassicTranscript(row,recSid));
+    next=String((j.meta&&(j.meta.next_page_url||j.meta.nextPageUrl))||'');
+  }
+  if(next) throw callPersistenceError('Twilio transcript pagination exceeded the safety limit','CALL_PROVIDER_INVALID');
+  const unique=new Map(); for(const item of found) unique.set(item.gt,item); const rows=[...unique.values()];
+  if(rows.length>1) throw callPersistenceError('More than one Twilio transcript exists for this RecordingSid; owner resolution is required','CALL_PROVIDER_CONFLICT');
+  return rows[0]||null;
+}
+async function fetchClassicTranscript(gtSid,recSid){ const j=await twilioJson('https://intelligence.twilio.com/v2/Transcripts/'+encodeURIComponent(gtSid)); return validateClassicTranscript(j,recSid,gtSid); }
+async function fetchAllClassicSentences(gtSid){
+  let next='https://intelligence.twilio.com/v2/Transcripts/'+encodeURIComponent(gtSid)+'/Sentences?PageSize=5000'; const rows=[], seen=new Set();
+  for(let page=0;next&&page<1000;page++){
+    next=validateIntelligencePageUrl(next,gtSid,false); if(seen.has(next)) throw callPersistenceError('Twilio sentence pagination loop detected','CALL_PROVIDER_INVALID'); seen.add(next);
+    const j=await twilioJson(next), pageRows=Array.isArray(j.sentences)?j.sentences:[];
+    for(const sentence of pageRows){ const sid=transcriptField(sentence,'transcript_sid','transcriptSid'); if(sid&&sid!==gtSid) throw callPersistenceError('Twilio sentence provenance failed','CALL_PROVENANCE_FAILED'); rows.push({index:Number(sentence.sentence_index!=null?sentence.sentence_index:sentence.sentenceIndex),order:rows.length,text:String(sentence.transcript!=null?sentence.transcript:(sentence.text!=null?sentence.text:''))}); }
+    next=String((j.meta&&(j.meta.next_page_url||j.meta.nextPageUrl))||'');
+  }
+  if(next) throw callPersistenceError('Twilio sentence pagination exceeded the safety limit','CALL_PROVIDER_INVALID');
+  rows.sort(function(a,b){ const ai=isFinite(a.index)?a.index:a.order, bi=isFinite(b.index)?b.index:b.order; return ai-bi||a.order-b.order; });
+  return rows.map(function(x){return x.text;}).filter(function(x){return x!=='';}).join('\n').trim();
+}
+async function attachTranscriptSid(job,transcript){
+  if(job.transcriptSid&&job.transcriptSid!==transcript.gt) throw callPersistenceError('Stored job points to a different Twilio transcript','CALL_PROVIDER_CONFLICT');
+  if(job.transcriptSid===transcript.gt) return job;
+  return updateCallJob(job,{status:'submitted',submissionState:'submitted',transcriptSid:transcript.gt,providerStatus:transcript.status||job.providerStatus||'',submittedAt:job.submittedAt||new Date().toISOString()});
+}
+function callSubmissionDeadlineMs(job){
+  const explicit=Date.parse(String(job&&job.submissionDeadlineAt||'')); if(isFinite(explicit)) return explicit;
+  const started=Date.parse(String(job&&(job.submissionStartedAt||job.updatedAt)||'')); return isFinite(started)?started+CLASSIC_CI_SUBMIT_TIMEOUT_MS:Number.POSITIVE_INFINITY;
+}
+function callSubmissionFenceActive(job,nowMs){ return !!(job&&['submitting','uncertain'].includes(String(job.submissionState||''))&&Number(nowMs==null?Date.now():nowMs)<callSubmissionDeadlineMs(job)); }
+function callSubmissionIsActive(job,nowMs){ return !!(job&&job.submissionState==='submitting'&&callSubmissionFenceActive(job,nowMs)); }
+async function submitClassicTranscript(job){
+  if(job.submissionState!=='not_started'||job.transcriptSid) return job;
+  const serviceSid=twilioIntelligenceServiceSid(); if(!serviceSid||job.serviceSid!==serviceSid) throw callPersistenceError('Twilio Intelligence service is not configured for this job','TWILIO_NOT_CONFIGURED');
+  const startedMs=Date.now(), startedAt=new Date(startedMs).toISOString(), submissionDeadlineAt=new Date(startedMs+CLASSIC_CI_SUBMIT_TIMEOUT_MS).toISOString(), submissionAttemptId=require('crypto').randomUUID();
+  job=await updateCallJob(job,{status:'submitting',submissionState:'submitting',submissionAttemptId,submissionStartedAt:startedAt,submissionDeadlineAt,submissionFinishedAt:''});
+  if(job.submissionState!=='submitting'||job.submissionAttemptId!==submissionAttemptId||job.submissionDeadlineAt!==submissionDeadlineAt) throw callPersistenceError('Transcript submission protection changed before the provider request','CALL_PERSISTENCE_CONFLICT');
+  const body=new URLSearchParams(); body.set('ServiceSid',serviceSid); body.set('Channel',JSON.stringify({media_properties:{source_sid:job.recordingSid}})); body.set('CustomerKey',job.customerKey);
+  const remainingMs=callSubmissionDeadlineMs(job)-Date.now();
+  if(!(remainingMs>0)){
+    const submissionFinishedAt=new Date().toISOString();
+    try{ job=await updateCallJob(job,{status:'failed',submissionState:'failed',submissionFinishedAt,providerError:'Twilio create was not launched before the durable submission deadline'}); }catch(persistError){}
+    throw callPersistenceError('Twilio create was not launched before the durable submission deadline; exact provider reconciliation and owner confirmation are required before retry','CALL_PROVIDER_NOT_SUBMITTED');
+  }
+  let created;
+  try{ created=await twilioJson('https://intelligence.twilio.com/v2/Transcripts',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString(),timeoutMs:remainingMs}); }
+  catch(e){
+    const submissionFinishedAt=new Date().toISOString();
+    if(String(e.code||'').startsWith('TWILIO_HTTP_')){ try{ job=await updateCallJob(job,{status:'failed',submissionState:'failed',submissionFinishedAt,providerError:String(e.message||e).slice(0,180)}); }catch(persistError){} throw e; }
+    try{ job=await updateCallJob(job,{status:'uncertain',submissionState:'uncertain',submissionFinishedAt,providerError:'Twilio create response was not confirmed'}); }catch(persistError){}
+    let resolved=null; try{ resolved=await listClassicTranscripts(job.recordingSid); }catch(resolveError){}
+    if(resolved) return attachTranscriptSid(await readCallJob(job.recordingSid),resolved);
+    throw callPersistenceError('Twilio create outcome is uncertain; no automatic resubmission will occur','CALL_PROVIDER_UNCERTAIN');
+  }
+  const gt=transcriptField(created,'sid','sid');
+  if(!/^GT[a-zA-Z0-9]{20,}$/.test(gt)){ try{ job=await updateCallJob(job,{status:'uncertain',submissionState:'uncertain',providerError:'Twilio create response did not include a valid transcript SID'}); }catch(e){} throw callPersistenceError('Twilio create response was incomplete; no automatic resubmission will occur','CALL_PROVIDER_UNCERTAIN'); }
+  const returnedService=transcriptField(created,'service_sid','serviceSid'), returnedAccount=transcriptField(created,'account_sid','accountSid'), returnedSource=transcriptSourceSid(created);
+  if((returnedService&&returnedService!==serviceSid)||(returnedAccount&&returnedAccount!==job.accountSid)||(returnedSource&&returnedSource!==job.recordingSid)) throw callPersistenceError('Twilio create response provenance failed','CALL_PROVENANCE_FAILED');
+  const submittedAt=new Date().toISOString();
+  return updateCallJob(job,{status:'submitted',submissionState:'submitted',transcriptSid:gt,providerStatus:transcriptField(created,'status','status')||'queued',submittedAt,submissionFinishedAt:submittedAt});
+}
+async function materializeCompletedJob(job){
+  if(!job||!String(job.text||'').trim()) throw callPersistenceError('Completed transcript text is not available','CALL_PROVIDER_INCOMPLETE');
+  const meta={from:job.from,date:job.date,at:job.at,recordingUrl:job.recordingUrl,recordingSid:job.recordingSid,callSid:job.callSid,isVictor:job.isVictor,source:String(job.materializationSource||'twilio_classic_ci'),provider:job.provider,providerJobSid:job.transcriptSid,text:job.text,status:'completed'};
+  return upsertCallLog(meta,{job});
+}
+async function readbackClassicJob(job){
+  if(!job||!job.transcriptSid) throw callPersistenceError('Twilio transcript SID is not stored','CALL_PROVIDER_INCOMPLETE');
+  const provider=await fetchClassicTranscript(job.transcriptSid,job.recordingSid);
+  if(provider.customerKey&&provider.customerKey!==job.customerKey) throw callPersistenceError('Twilio transcript customer correlation did not match','CALL_PROVENANCE_FAILED');
+  const providerStatus=String(provider.status||'').toLowerCase();
+  if(/failed|error|canceled/.test(providerStatus)){ job=await updateCallJob(job,{status:'failed',providerStatus,providerError:'Twilio transcript failed'}); throw callPersistenceError('Twilio transcript failed','CALL_PROVIDER_FAILED'); }
+  if(providerStatus!=='completed'){
+    if(String(job.providerStatus||'')!==providerStatus) job=await updateCallJob(job,{status:'submitted',providerStatus,providerError:''});
+    throw callPersistenceError('Twilio transcript is not complete','CALL_PROVIDER_PENDING');
+  }
+  const text=await fetchAllClassicSentences(job.transcriptSid); if(!text) throw callPersistenceError('Twilio transcript sentences are not available yet','CALL_PROVIDER_PENDING');
+  const digest=require('crypto').createHash('sha256').update(text).digest('hex');
+  if(!(job.status==='completed'&&job.textDigest===digest&&String(job.text||'')===text)) job=await updateCallJob(job,{status:'completed',submissionState:'completed',providerStatus:provider.status||'completed',text,textDigest:digest,completedAt:new Date().toISOString()});
+  const entry=await materializeCompletedJob(job); return {job,entry};
+}
+async function readbackOrMaterialize(job){ if(job.status==='completed'&&String(job.text||'').trim()){ const entry=await materializeCompletedJob(job); return {job,entry}; } return readbackClassicJob(job); }
+async function adoptExistingCompletedCall(state,meta){
+  const entry=state&&state.entry, text=String(entry&&entry.text||''), storedStatus=String(entry&&entry.status||'').toLowerCase();
+  if(!entry||!text.trim()||entry.isVictor===false||(storedStatus&&storedStatus!=='completed')) return null;
+  const adoptedMeta={...meta,from:String(entry.from||meta.from||''),date:String(entry.date||state.date||meta.date||''),at:String(entry.at||meta.at||''),recordingUrl:String(entry.recordingUrl||meta.recordingUrl||''),recordingSid:String(entry.recordingSid||meta.recordingSid||''),callSid:String(entry.callSid||meta.callSid||''),isVictor:entry.isVictor!==false&&!!meta.isVictor};
+  let job=state.job||await reserveCallJob(adoptedMeta,'twilio_classic_ci',twilioIntelligenceServiceSid());
+  if(job.status==='completed'&&String(job.text||'').trim()) return readbackOrMaterialize(job);
+  if(job.transcriptSid||String(job.submissionState||'')!=='not_started') return null;
+  const completedAt=new Date().toISOString(), textDigest=require('crypto').createHash('sha256').update(text).digest('hex');
+  job=await updateCallJob(job,{from:adoptedMeta.from,date:adoptedMeta.date,at:adoptedMeta.at,recordingUrl:adoptedMeta.recordingUrl,callSid:adoptedMeta.callSid,isVictor:adoptedMeta.isVictor,status:'completed',submissionState:'completed',providerStatus:'adopted',text,textDigest,completedAt,submissionFinishedAt:completedAt,materializationSource:'existing_completed_call',adoptedExistingAt:completedAt});
+  return readbackOrMaterialize(job);
+}
+async function resumeOrSubmitClassic(meta,allowSubmit){
+  let state=await readCallPersistenceState(meta); if(state.tombstone&&state.tombstone.status==='deleted') throw callPersistenceError('This transcript was deleted and must be explicitly restored','CALL_DELETED');
+  const adopted=await adoptExistingCompletedCall(state,meta); if(adopted) return adopted;
+  let job=state.job||await reserveCallJob(meta,'twilio_classic_ci',twilioIntelligenceServiceSid());
+  if(job.status==='completed'&&String(job.text||'').trim()) return readbackOrMaterialize(job);
+  try{ await upsertCallLog({...meta,status:job.transcriptSid?'submitted':'reserved',provider:job.provider,providerJobSid:job.transcriptSid||''},{expectedState:state,job}); }catch(e){ if(e.code!=='CALL_PERSISTENCE_CONFLICT') throw e; }
+  if(job.transcriptSid) return readbackClassicJob(job);
+  if(['submitting','uncertain','failed'].includes(String(job.submissionState||''))){ const resolved=await listClassicTranscripts(job.recordingSid); if(!resolved) return {job,pending:true,requiresOwnerRetry:!callSubmissionFenceActive(job)}; job=await attachTranscriptSid(job,resolved); return readbackClassicJob(job); }
+  if(!allowSubmit) return {job,pending:true};
+  job=await submitClassicTranscript(job);
+  try{ state=await readCallPersistenceState(meta); await upsertCallLog({...meta,status:'submitted',provider:job.provider,providerJobSid:job.transcriptSid||''},{expectedState:state,job}); }catch(e){}
+  return {job,pending:true};
+}
+async function persistProvidedTranscript(meta,text,providerSid){
+  let job=(await readCallPersistenceState(meta)).job||await reserveCallJob(meta,'twilio_legacy_callback','');
+  const clean=String(text||'').trim(); if(!clean) throw callPersistenceError('Provider callback did not include transcript text','CALL_PROVIDER_INCOMPLETE');
+  const digest=require('crypto').createHash('sha256').update(clean).digest('hex');
+  if(!(job.status==='completed'&&job.textDigest===digest&&String(job.text||'')===clean)) job=await updateCallJob(job,{status:'completed',submissionState:'completed',text:clean,textDigest:digest,transcriptSid:String(providerSid||job.transcriptSid||''),completedAt:new Date().toISOString()});
+  return materializeCompletedJob(job);
+}
+function callbackStatusForError(e){ if(e&&e.code==='CALL_DELETED') return 409; if(e&&['CALL_PROVENANCE_FAILED','CALL_RECORDING_SID_REQUIRED'].includes(e.code)) return 400; if(e&&['CALL_PERSISTENCE_CONFLICT','CALL_PROVIDER_CONFLICT'].includes(e.code)) return 409; if(e&&String(e.code||'').startsWith('TWILIO_HTTP_')) return 502; return 503; }
+function recoveryConfirmation(preview){ return require('crypto').createHmac('sha256',String(process.env.GAVIN_PASSWORD||'__x')).update(JSON.stringify([preview.recordingSid,preview.callSid,preview.date,preview.entryRevision,preview.jobRevision,preview.tombstoneRevision,preview.nextOperation,preview.resolvedTranscriptSid])).digest('hex'); }
+async function restoreDeletedCall(recSid,expectedRevision){
+  if(!redis) throw callPersistenceError('Transcript persistence is unavailable','CALL_PERSISTENCE_UNAVAILABLE');
+  if(!/^RE[a-zA-Z0-9]{20,}$/.test(String(recSid||''))||!expectedRevision) throw callPersistenceError('A valid RecordingSid and restore revision are required','CALL_PERSISTENCE_CONFLICT');
+  const revision=require('crypto').randomUUID(), now=new Date().toISOString(); let raw;
+  try{ raw=await redis.eval(CALL_RESTORE_LUA,[CALL_LOG_KEY,CALL_TOMBSTONE_PREFIX+recSid,CALL_JOB_PREFIX+recSid],[recSid,String(expectedRevision),revision,now]); }
+  catch(e){ throw callPersistenceError('Call restore outcome is unknown','CALL_PERSISTENCE_UNKNOWN'); }
+  const out=parseEvalResult(raw); if(out&&out.ok) return out;
+  throw callPersistenceError('Restore protection changed; request a fresh exact-SID preview','CALL_PERSISTENCE_CONFLICT');
+}
+async function buildCallRecoveryPreview(recSid){
+  const meta=await loadVictorRecordingMeta(recSid,{}); if(!meta.isVictor) throw callPersistenceError('Recording caller does not match the configured Victor number','CALL_PROVENANCE_FAILED');
+  const state=await readCallPersistenceState(meta), job=state.job; let resolved=null;
+  if(!(state.tombstone&&state.tombstone.status==='deleted')&&job&&!job.transcriptSid&&['submitting','uncertain','failed'].includes(String(job.submissionState||''))) resolved=await listClassicTranscripts(recSid);
+  const submissionActive=callSubmissionIsActive(job), submissionFenced=callSubmissionFenceActive(job), deadlineMs=callSubmissionDeadlineMs(job);
+  let nextOperation='submit';
+  const existing=state.entry, canAdoptExisting=!!(existing&&String(existing.text||'').trim()&&existing.isVictor!==false&&(!String(existing.status||'')||String(existing.status||'').toLowerCase()==='completed')&&!job);
+  if(state.tombstone&&state.tombstone.status==='deleted') nextOperation='restore'; else if((job&&job.status==='completed'&&String(job.text||'').trim())||canAdoptExisting) nextOperation='materialize'; else if(job&&(job.transcriptSid||resolved)) nextOperation='readback'; else if(submissionFenced) nextOperation='pending'; else if(job&&['submitting','uncertain','failed'].includes(String(job.submissionState||''))) nextOperation='retry_submission';
+  const tombEntry=state.tombstone&&state.tombstone.entry, displayDate=String(state.entry&&state.entry.date||tombEntry&&tombEntry.date||meta.date);
+  const preview={recordingSid:recSid,callSid:meta.callSid,date:displayDate,duration:meta.duration,caller:'***'+phoneDigits(meta.from).slice(-4),storedStatus:String(state.entry&&state.entry.status||tombEntry&&tombEntry.status||''),textLength:String(state.entry&&state.entry.text||tombEntry&&tombEntry.text||'').length,jobStatus:String(job&&job.status||''),submissionState:String(job&&job.submissionState||''),submissionActive,submissionFenced,submissionDeadlineAt:isFinite(deadlineMs)?new Date(deadlineMs).toISOString():'',providerJobSid:String(job&&job.transcriptSid||''),entryRevision:String(state.entry&&state.entry.persistenceRevision||''),jobRevision:String(job&&job.revision||''),tombstoneRevision:String(state.tombstone&&state.tombstone.revision||''),resolvedTranscriptSid:String(resolved&&resolved.gt||''),nextOperation}; preview.confirmation=recoveryConfirmation(preview);
+  return {preview,meta,state,job,resolved};
+}
+async function executeCallRecovery(recSid,confirmation,operation){
+  const current=await buildCallRecoveryPreview(recSid), p=current.preview;
+  if(!confirmation||confirmation!==p.confirmation||operation!==p.nextOperation) throw callPersistenceError('Recovery preview changed; review the current exact-SID preview before continuing','CALL_PERSISTENCE_CONFLICT');
+  if(operation==='pending') throw callPersistenceError('The provider submission reconciliation window is still protected; no retry was sent','CALL_PROVIDER_PENDING');
+  if(operation==='restore') return {preview:p,result:{restored:true,restore:await restoreDeletedCall(recSid,p.tombstoneRevision)}};
+  let job=current.job;
+  if(operation==='materialize'){
+    const adopted=await adoptExistingCompletedCall(current.state,current.meta); if(adopted) return {preview:p,result:adopted};
+    if(!job) throw callPersistenceError('Durable transcript job is missing','CALL_JOB_MISSING');
+    return {preview:p,result:await readbackOrMaterialize(job)};
+  }
+  if(operation==='readback'){ if(!job) throw callPersistenceError('Durable transcript job is missing','CALL_JOB_MISSING'); if(!job.transcriptSid&&current.resolved) job=await attachTranscriptSid(job,current.resolved); return {preview:p,result:await readbackClassicJob(job)}; }
+  if(operation==='retry_submission'){ if(!job) throw callPersistenceError('Durable transcript job is missing','CALL_JOB_MISSING'); if(callSubmissionFenceActive(job)) throw callPersistenceError('The provider submission reconciliation window is still protected; no retry was sent','CALL_PROVIDER_PENDING'); job=await updateCallJob(job,{status:'reserved',submissionState:'not_started',transcriptSid:'',providerError:'',submissionAttemptId:'',submissionStartedAt:'',submissionDeadlineAt:'',submissionFinishedAt:'',ownerRetryAuthorizedAt:new Date().toISOString()}); }
+  if(!job) job=await reserveCallJob(current.meta,'twilio_classic_ci',twilioIntelligenceServiceSid());
+  const state=await readCallPersistenceState(current.meta); await upsertCallLog({...current.meta,status:'reserved',provider:job.provider,providerJobSid:job.transcriptSid||'',source:'owner_exact_sid_recovery'},{expectedState:state,job});
+  job=await submitClassicTranscript(job); return {preview:p,result:{job,pending:true}};
+}
 async function auditVictorRecordings(days){
   days=Math.max(1,Math.min(365,Number(days)||120)); const c=twilioCredentials(); if(!c.sid||!c.token) throw new Error('Twilio API is not configured');
   const cutoff=Date.now()-days*86400000;
@@ -2377,7 +2975,7 @@ async function scoreDay(date, device){
   const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device, date);
   const screen=await wwScreenActivity(date); const apps=await wwAppsWebsites(date); let todoDoc=""; try{ todoDoc=((await getTodo())||{}).text||""; }catch(e){}
   let gradeExamples=[]; try{ gradeExamples=await getGavinGradeExamples(60); }catch(e){}
-  let report=""; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; } }catch(e){}
+  let report=""; try{ if(redisRaw){ report=await readDailyReport(date); } }catch(e){}
   if(!report || !String(report).trim()) return {error:"no self-report on file for "+date+" (nothing to score against)"};
   let turn=null; try{ const tv=await resolveTurnovers(date,1); turn=tv[date]; }catch(e){}
   // item MW-12: RECORDED time off must NEVER lower Victor's grade. Full day = do not grade at all;
@@ -2774,7 +3372,7 @@ module.exports=async(req,res)=>{
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
       const device=String((req.query&&req.query.id)||"victor").toLowerCase().replace(/[^A-Za-z0-9_\-]/g,"").slice(0,40)||"victor";
       const hours=await wwHoursForDate(date); const zones=await gpsZoneSummary(device,date); const screen=await wwScreenActivity(date); const apps=await wwAppsWebsites(date);
-      let report="", score=null, todo=null, grade=null, graded_count=0; try{ if(redis){ report=(await redis.get("parkside:report:"+date))||""; score=await redis.get("parkside:score:"+date); grade=await redis.get("parkside:grade:"+date); const gz=await redis.zrange("parkside:grades_index",0,-1); graded_count=(gz||[]).length; } }catch(e){} try{ todo=await getTodo(); }catch(e){}
+      let report="", score=null, todo=null, grade=null, graded_count=0; try{ if(redis){ report=redisRaw?await readDailyReport(date):""; score=await redis.get("parkside:score:"+date); grade=await redis.get("parkside:grade:"+date); const gz=await redis.zrange("parkside:grades_index",0,-1); graded_count=(gz||[]).length; } }catch(e){} try{ todo=await getTodo(); }catch(e){}
       let cleaning=null; try{ const _tv=await resolveTurnovers(date,1); const _t=_tv[date]; if(_t) cleaning={ date, occupied:_t.occupied.length, cleaningsNeeded:_t.checkouts.length, checkoutUnits:_t.checkouts, arrivals:_t.arrivals.length }; }catch(e){}
       return res.status(200).json({ date, device, hours, zones, screen, apps, report, score, todo, grade, graded_count, cleaning });
     }
@@ -2783,9 +3381,11 @@ module.exports=async(req,res)=>{
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized"});
       const date=String((req.query&&req.query.date)||"")||etDate(new Date().toISOString());
       if(req.method==="POST"){ let b=req.body; if(typeof b==="string"){try{b=JSON.parse(b);}catch{b={};}} b=b||{};
-        const txt=String(b.report||"").slice(0,8000); try{ if(redis) await redis.set("parkside:report:"+date, txt); }catch(e){}
+        const txt=String(b.report||"").slice(0,8000);
+        if(!redisRaw) return res.status(503).json({ok:false,error:"report persistence unavailable",date});
+        try{ await writeDailyReport(date,txt); }catch(e){ return res.status(503).json({ok:false,error:"report persistence not confirmed",date}); }
         return res.status(200).json({ok:true, date, report:txt}); }
-      let report=""; try{ if(redis) report=(await redis.get("parkside:report:"+date))||""; }catch(e){}
+      let report=""; try{ if(redisRaw) report=await readDailyReport(date); }catch(e){}
       return res.status(200).json({ date, report });
     }
     // Run the Claude truth-score for a date (Gavin-gated OR cron secret).
@@ -4693,12 +5293,12 @@ if(action==="email_recipients"){
       const out=await decideApproval(String(b.id||""), String(b.decision||"").toLowerCase(), b.answer!=null?String(b.answer):null, b.reason!=null?String(b.reason):null);
       return res.status(out.ok?200:400).json(out);
     }
-    // PUBLIC provider webhook: Victor replies YES/NO via text. Provider-agnostic body parse.
-    // ===== StayDeck phone intake: Victor calls the number once/day to report; Twilio records + transcribes =====
+    // ===== StayDeck phone intake: Victor calls once/day; one explicit completed RecordingSid is sent to Classic CI =====
     if(action==="voice"){
-      // Twilio Voice webhook ("A call comes in"). RECORD ONLY (no paid Twilio transcription); we transcribe the
-      // recording ourselves for free via Groq Whisper in the voice_recording callback.
+      // Keep the existing call entry behavior: record only, with auto-transcribe disabled on the CI service.
       const origin=process.env.APP_PUBLIC_ORIGIN||"https://project-jvyw3.vercel.app";
+      // Preserve the existing routing token in generated TwiML for compatibility, but callbacks are authenticated
+      // exclusively by the required X-Twilio-Signature check below (the token is not treated as provider auth).
       const tokQ=(req.query&&req.query.token)?("&amp;token="+encodeURIComponent(req.query.token)):"";
       const cb=origin+"/api/app?action=voice_recording"+tokQ;
       const xml='<?xml version="1.0" encoding="UTF-8"?>'
@@ -4710,44 +5310,49 @@ if(action==="email_recipients"){
       res.setHeader("Content-Type","text/xml"); res.status(200); return res.end(xml);
     }
     if(action==="voice_recording"){
-      // Twilio recording-complete callback. Fetch the audio and transcribe it FREE via Groq Whisper (no Twilio
-      // transcription charge). Stores transcript to the call log and, for Victor, into the daily scorecard report.
-      const cfg=await getNotifyConfig();
       const b=hookBody(req.body);
-      const tok=(req.query&&req.query.token)||""; if(cfg.secret && tok && tok!==cfg.secret){ res.status(200); return res.end(""); }
-      let from=String(b.From||b.from||"").trim();
+      if(!validTwilioSignature(req,b)) return res.status(403).end("invalid Twilio signature");
+      const accountSid=String(b.AccountSid||b.account_sid||""); if(accountSid!==twilioCredentials().sid) return res.status(400).end("Twilio account provenance failed");
       const recUrl=String(b.RecordingUrl||b.recording_url||"").trim();
       const recSid=String(b.RecordingSid||b.recording_sid||recordingSidOf(recUrl)||"");
       const callSid=String(b.CallSid||b.call_sid||"");
-      let callInfo=null; if(!from&&callSid){ try{ const tc=twilioCredentials(); callInfo=await twilioJson('https://api.twilio.com/2010-04-01/Accounts/'+encodeURIComponent(tc.sid)+'/Calls/'+encodeURIComponent(callSid)+'.json'); from=String(callInfo.from||'').trim(); }catch(e){} }
-      const when=String(b.RecordingStartTime||b.Timestamp||b.timestamp||(callInfo&&(callInfo.start_time||callInfo.date_created))||new Date().toISOString());
-      const at=isFinite(Date.parse(when))?new Date(when).toISOString():new Date().toISOString(); const date=etDate(at);
-      const vn=cfg.smsTo||victorNumber();
-      const isVictor=!!(vn&&from&&phoneDigits(from)===phoneDigits(vn));
-      let transcript="", transcriptionError=""; try{ transcript=await transcribeCallRecording(recUrl); }catch(e){ transcriptionError=String(e&&e.message||e); }
-      try{ await upsertCallLog({from,date,at,text:transcript,recordingUrl:recUrl,recordingSid:recSid,callSid,status:transcript?"completed":"failed",isVictor,transcriptionError}); }catch(e){}
-      // A non-2xx response makes Twilio retry a transient recording/transcription failure instead of silently
-      // accepting a blank daily report. upsertCallLog is idempotent by RecordingSid, so retries cannot duplicate it.
-      if(!transcript){ res.status(503); return res.end("transcription pending retry"); }
-      res.setHeader("Content-Type","text/xml"); res.status(200); return res.end('<?xml version="1.0" encoding="UTF-8"?><Response/>');
+      if(!/^RE[a-zA-Z0-9]{20,}$/.test(recSid)){ res.status(400); return res.end("valid RecordingSid required"); }
+      try{
+        if(!twilioIntelligenceServiceSid()) return res.status(503).end("Twilio Intelligence service is not configured");
+        const meta=await loadVictorRecordingMeta(recSid,{recordingUrl:recUrl,callSid,from:String(b.From||b.from||''),when:b.RecordingStartTime||b.Timestamp||b.timestamp,duration:b.RecordingDuration,status:b.RecordingStatus});
+        if(!meta.isVictor) return res.status(200).end("");
+        const out=await resumeOrSubmitClassic({...meta,source:'voice_recording'},true);
+        if(out&&out.requiresOwnerRetry) return res.status(503).end("Twilio create outcome is unresolved; owner review is required before any retry");
+        return res.status(200).end("");
+      }catch(e){ return res.status(callbackStatusForError(e)).end(String(e&&e.message||e)); }
+    }
+    if(action==="voice_intelligence"){
+      const b=hookBody(req.body);
+      if(!validTwilioSignature(req,b)) return res.status(403).end("invalid Twilio signature");
+      const c=twilioCredentials(), serviceSid=twilioIntelligenceServiceSid();
+      if(String(b.account_sid||b.AccountSid||'')!==c.sid||String(b.service_sid||b.ServiceSid||'')!==serviceSid) return res.status(400).end("Twilio Intelligence account or service provenance failed");
+      if(String(b.event_type||b.EventType||'')!=="voice_intelligence_transcript_available") return res.status(400).end("unexpected Twilio Intelligence event");
+      const gtSid=String(b.transcript_sid||b.TranscriptSid||''); if(!/^GT[a-zA-Z0-9]{20,}$/.test(gtSid)) return res.status(400).end("valid TranscriptSid required");
+      try{
+        const provider=await fetchClassicTranscript(gtSid,transcriptSourceSid(b)||'');
+        const recSid=provider.source, job=await readCallJob(recSid); if(!job) return res.status(409).end("durable transcript job was not found");
+        const customerKey=String(b.customer_key||b.CustomerKey||''); if(customerKey&&customerKey!==job.customerKey) return res.status(400).end("Twilio customer correlation failed");
+        const attached=await attachTranscriptSid(job,provider); await readbackClassicJob(attached); return res.status(204).end("");
+      }catch(e){ return res.status(callbackStatusForError(e)).end(String(e&&e.message||e)); }
     }
     if(action==="voice_transcription"){
-      // Twilio transcription callback (POST urlencoded): TranscriptionText, RecordingUrl, From, TranscriptionStatus.
-      const cfg=await getNotifyConfig();
+      // Backward-compatible legacy callback: accepts provider-supplied text only; it never downloads or retranscribes audio.
       const b=hookBody(req.body);
-      const tok=(req.query&&req.query.token)||""; if(cfg.secret && tok && tok!==cfg.secret){ res.status(200); return res.end(""); }
-      let from=String(b.From||b.from||"").trim();
-      let text=String(b.TranscriptionText||b.transcription_text||b.text||"").trim();
+      if(!validTwilioSignature(req,b)) return res.status(403).end("invalid Twilio signature");
+      const accountSid=String(b.AccountSid||b.account_sid||""); if(accountSid!==twilioCredentials().sid) return res.status(400).end("Twilio account provenance failed");
+      const text=String(b.TranscriptionText||b.transcription_text||b.text||"").trim(); if(!text) return res.status(422).end("transcript text required");
       const rec=String(b.RecordingUrl||b.recording_url||"").trim();
       const recSid=String(b.RecordingSid||b.recording_sid||recordingSidOf(rec)||""); const callSid=String(b.CallSid||b.call_sid||"");
-      let callInfo=null; if(!from&&callSid){ try{ const tc=twilioCredentials(); callInfo=await twilioJson('https://api.twilio.com/2010-04-01/Accounts/'+encodeURIComponent(tc.sid)+'/Calls/'+encodeURIComponent(callSid)+'.json'); from=String(callInfo.from||'').trim(); }catch(e){} }
-      let status=String(b.TranscriptionStatus||b.status||"").trim(); let transcriptionError="";
-      if(!text&&rec){ try{ text=await transcribeCallRecording(rec); status="completed"; }catch(e){ transcriptionError=String(e&&e.message||e); } }
-      const when=String(b.RecordingStartTime||b.Timestamp||b.timestamp||(callInfo&&(callInfo.start_time||callInfo.date_created))||new Date().toISOString()); const at=isFinite(Date.parse(when))?new Date(when).toISOString():new Date().toISOString(); const date=etDate(at);
-      const vn=cfg.smsTo||victorNumber();
-      const isVictor=!!(vn&&from&&phoneDigits(from)===phoneDigits(vn));
-      try{ await upsertCallLog({from,date,at,text,recordingUrl:rec,recordingSid:recSid,callSid,status:text?"completed":(status||"failed"),isVictor,transcriptionError}); }catch(e){}
-      res.setHeader("Content-Type","text/xml"); res.status(200); return res.end('<?xml version="1.0" encoding="UTF-8"?><Response/>');
+      try{
+        const meta=await loadVictorRecordingMeta(recSid,{recordingUrl:rec,callSid,from:String(b.From||b.from||''),when:b.RecordingStartTime||b.Timestamp||b.timestamp});
+        if(!meta.isVictor) return res.status(200).end("");
+        await persistProvidedTranscript({...meta,source:'voice_transcription'},text,String(b.TranscriptionSid||b.transcription_sid||'')); return res.status(200).end("");
+      }catch(e){ return res.status(callbackStatusForError(e)).end(String(e&&e.message||e)); }
     }
     if(action==="signal_debug"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
@@ -4769,7 +5374,7 @@ if(action==="email_recipients"){
     }
     if(action==="calls_audit"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
-      try{ const a=await auditVictorRecordings((req.query&&req.query.days)||120); const failed=a.rows.filter(function(x){return !x.textLength||x.existingStatus==="failed";}); return res.status(200).json({days:a.days,providerVictor:a.rows.length,storedVictor:a.stored.filter(function(x){return x&&x.isVictor;}).length,needsRecovery:failed.length,transcriptionProviders:{groq:!!process.env.GROQ_API_KEY,openai:!!process.env.OPENAI_API_KEY},rows:a.rows.map(function(x){return {recordingSid:x.recordingSid,date:x.date,at:x.at,duration:x.duration,providerStatus:x.providerStatus,existingId:x.existingId,existingStatus:x.existingStatus,textLength:x.textLength};})}); }catch(e){ return res.status(502).json({error:String(e&&e.message||e)}); }
+      try{ const a=await auditVictorRecordings((req.query&&req.query.days)||120); const failed=a.rows.filter(function(x){return !x.textLength||x.existingStatus==="failed";}); return res.status(200).json({days:a.days,providerVictor:a.rows.length,storedVictor:a.stored.filter(function(x){return x&&x.isVictor;}).length,needsRecovery:failed.length,transcriptionProvider:{name:"twilio_classic_ci",configured:!!twilioIntelligenceServiceSid(),autoTranscribe:false},rows:a.rows.map(function(x){return {recordingSid:x.recordingSid,date:x.date,at:x.at,duration:x.duration,providerStatus:x.providerStatus,existingId:x.existingId,existingStatus:x.existingStatus,textLength:x.textLength};})}); }catch(e){ return res.status(502).json({error:String(e&&e.message||e)}); }
     }
     if(action==="call_audio"){
       const sid=String((req.query&&req.query.sid)||"").trim();
@@ -4797,18 +5402,38 @@ if(action==="email_recipients"){
     }
     if(action==="calls_reconcile"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
-      let b=hookBody(req.body); const limit=Math.max(1,Math.min(3,Number(b.limit)||1));
-      try{ const a=await auditVictorRecordings(Number(b.days)||120); let wanted=Array.isArray(b.recordingSids)?b.recordingSids.map(String):[]; let rows=a.rows.filter(function(x){return (!wanted.length||wanted.indexOf(x.recordingSid)>=0)&&(!x.textLength||x.existingStatus==="failed");}).slice(0,limit); const processed=[];
-        for(const row of rows){ try{ const text=await transcribeCallRecording(row.recordingUrl); const entry=await upsertCallLog({from:row.from,date:row.date,at:row.at,text,recordingUrl:row.recordingUrl,recordingSid:row.recordingSid,callSid:row.callSid,status:"completed",isVictor:true}); processed.push({recordingSid:row.recordingSid,date:row.date,ok:true,textLength:String(entry&&entry.text||"").length}); }catch(e){ await upsertCallLog({from:row.from,date:row.date,at:row.at,text:"",recordingUrl:row.recordingUrl,recordingSid:row.recordingSid,callSid:row.callSid,status:"failed",isVictor:true,transcriptionError:String(e&&e.message||e)}); processed.push({recordingSid:row.recordingSid,date:row.date,ok:false,error:String(e&&e.message||e)}); } }
-        return res.status(200).json({ok:true,processed,remaining:Math.max(0,a.rows.filter(function(x){return !x.textLength||x.existingStatus==="failed";}).length-processed.filter(function(x){return x.ok;}).length)});
-      }catch(e){ return res.status(502).json({error:String(e&&e.message||e)}); }
+      const b=hookBody(req.body), supplied=Array.isArray(b.recordingSids)?b.recordingSids:[b.recordingSid];
+      const wanted=supplied.map(function(x){return String(x||'').trim();}).filter(Boolean);
+      if(wanted.length!==1||!/^RE[a-zA-Z0-9]{20,}$/.test(wanted[0])) return res.status(400).json({ok:false,error:"Provide exactly one valid RecordingSid"});
+      try{
+        const recSid=wanted[0];
+        if(!b.confirmation||!b.operation){ const current=await buildCallRecoveryPreview(recSid); return res.status(200).json({ok:true,preview:current.preview}); }
+        const out=await executeCallRecovery(recSid,String(b.confirmation),String(b.operation));
+        return res.status(200).json({ok:true,recordingSid:recSid,operation:String(b.operation),pending:!!(out.result&&out.result.pending),restored:!!(out.result&&out.result.restored),providerJobSid:String(out.result&&out.result.job&&out.result.job.transcriptSid||''),textLength:String(out.result&&out.result.entry&&out.result.entry.text||'').length,reportDisposition:out.result&&out.result.entry&&out.result.entry._persistence&&out.result.entry._persistence.reportDisposition});
+      }catch(e){
+        return res.status(callbackStatusForError(e)).json({ok:false,error:String(e&&e.message||e),code:String(e&&e.code||'')});
+      }
     }
     if(action==="calls_delete"){
       if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
       const key=(req.query&&(req.query.id||req.query.at))||(req.body&&(req.body.id||req.body.at))||"";
       if(!key) return res.status(400).json({error:"need id"});
-      try{ if(redis){ let log=(await redis.get("parkside:calllog"))||[]; const before=log.length; log=log.filter(c=>String(c.id||"")!==String(key) && String(c.at||"")!==String(key)); await redis.set("parkside:calllog", log); return res.status(200).json({deleted:before-log.length, remaining:log.length}); } }catch(e){ return res.status(500).json({error:String(e.message||e)}); }
-      return res.status(200).json({deleted:0});
+      if(!redis) return res.status(503).json({error:"call persistence unavailable"});
+      try{
+        const log=(await redis.get(CALL_LOG_KEY))||[]; if(!Array.isArray(log)) return res.status(503).json({error:"stored call log is invalid"});
+        const matches=log.filter(function(row){return String(row.id||'')===String(key)||String(row.at||'')===String(key);}); if(matches.length!==1) return res.status(matches.length?409:404).json({error:matches.length?"call selector is ambiguous":"call not found"});
+        const recSid=String(matches[0].recordingSid||recordingSidOf(matches[0].recordingUrl)||''); if(!/^RE[a-zA-Z0-9]{20,}$/.test(recSid)) return res.status(409).json({error:"call has no protected RecordingSid"});
+        const revision=require('crypto').randomUUID(), now=new Date().toISOString(); let out=parseEvalResult(await redis.eval(CALL_DELETE_LUA,[CALL_LOG_KEY,CALL_TOMBSTONE_PREFIX+recSid,CALL_JOB_PREFIX+recSid],[String(key),recSid,revision,now]));
+        if(!out||!out.ok) return res.status(out&&out.conflict==='not_found'?404:409).json({error:"call changed before deletion",detail:out&&out.conflict}); return res.status(200).json(out);
+      }
+      catch(e){ return res.status(503).json({error:"call persistence not confirmed"}); }
+    }
+    if(action==="calls_restore"){
+      if((req.headers["x-gavin-password"]||"")!==(process.env.GAVIN_PASSWORD||"__x")) return res.status(401).json({error:"unauthorized (Gavin login)"});
+      const b=hookBody(req.body), recSid=String(b.recordingSid||''), expected=String(b.restoreRevision||'');
+      if(!/^RE[a-zA-Z0-9]{20,}$/.test(recSid)||!expected) return res.status(400).json({error:"recordingSid and restoreRevision are required"});
+      try{ return res.status(200).json(await restoreDeletedCall(recSid,expected)); }
+      catch(e){ return res.status(callbackStatusForError(e)).json({ok:false,error:String(e&&e.message||e),code:String(e&&e.code||'')}); }
     }
     // Reassign a phoned-in call/transcript to a different ET day. Gavin-gated. POST {id, date:"YYYY-MM-DD"}. Flat list -> just update the date field (keeps text + recording).
     if(action==="call_move"){
@@ -4818,9 +5443,11 @@ if(action==="email_recipients"){
       const date=String(b.date||(req.query&&req.query.date)||"").slice(0,10);
       if(!id) return res.status(400).json({error:"need id"});
       if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:"need date YYYY-MM-DD"});
-      try{ if(redis){ let log=(await redis.get("parkside:calllog"))||[]; let found=false, oldDate=""; for(const c of log){ if(c && (String(c.id||"")===id || String(c.at||"")===id)){ oldDate=String(c.date||""); c.date=date; found=true; break; } }
-        if(!found) return res.status(404).json({error:"call not found"}); await redis.set("parkside:calllog", log); return res.status(200).json({ok:true, id, from:oldDate, to:date}); } }catch(e){ return res.status(500).json({error:String(e.message||e)}); }
-      return res.status(200).json({ok:false, error:"no redis"});
+      if(!redis) return res.status(503).json({error:"call persistence unavailable"});
+      try{ let out=await redis.eval(CALL_MOVE_LUA,[CALL_LOG_KEY],[id,date]); if(typeof out==='string') out=JSON.parse(out);
+        if(!out||!out.found) return res.status(404).json({error:"call not found"});
+        return res.status(200).json({ok:true,id,from:out.from,to:out.to}); }
+      catch(e){ return res.status(503).json({error:"call persistence not confirmed"}); }
     }
     if(action==="mms_media"){
       const gp=(req.query&&req.query.gp)||(req.headers["x-gavin-password"]||"");
@@ -5272,7 +5899,7 @@ if(action==="email_recipients"){
 
 module.exports.__model={compute,paceMult,scarMult,gapGm,deriveLearned,interp,SENS,MODEL,UNIT_PREM,GAP_SEED,signalFallback,buildLearnedPace,paceFrac,buildAgg,median};
 module.exports.__msg={isObviousPleasantry,processGuestQuestion,kbAutoMatch,normQ,sendSms,decideApproval,aiDraftAnswer,guestFacts};
-module.exports.__calls={hookBody,phoneDigits,recordingSidOf};
+module.exports.__calls={hookBody,phoneDigits,recordingSidOf,upsertCallLog,readCallPersistenceState,validTwilioSignature,callbackPublicUrl,buildCallRecoveryPreview,CALL_UPSERT_LUA,CALL_JOB_RESERVE_LUA,CALL_JOB_CAS_LUA,CALL_DELETE_LUA,CALL_RESTORE_LUA,encodeDailyReportStorage,decodeDailyReportStorage};
 // item MW-12: expose pure helpers for unit tests (attaches to the handler export).
 module.exports.onDutyActivePct=onDutyActivePct;
 module.exports.timeOffForDate=timeOffForDate;

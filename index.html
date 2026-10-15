@@ -1020,6 +1020,12 @@
               <span style="flex:1"></span><span id="callsStatus" class="muted" style="font-size:11px"></span>
             </div>
             <textarea id="scReport" style="display:none"></textarea><span id="scStatus" style="display:none"></span>
+            <div style="display:flex;align-items:end;gap:7px;flex-wrap:wrap;margin:0 0 10px">
+              <label for="callRecoverySid" class="muted" style="font-size:11px;flex:1 1 210px">Recover or restore by exact RecordingSid
+                <input id="callRecoverySid" aria-label="Exact RecordingSid" autocomplete="off" spellcheck="false" placeholder="RE…" onkeydown="if(event.key==='Enter'){event.preventDefault();recoverExactCall()}" style="display:block;width:100%;box-sizing:border-box;margin-top:4px">
+              </label>
+              <button class="ghost" type="button" onclick="recoverExactCall()" style="padding:7px 9px">Preview</button>
+            </div>
             <div id="callsList" class="legend" style="height:320px;overflow-y:auto;overscroll-behavior:contain;padding-right:4px">&hellip;</div>
           </div>
 
@@ -3190,11 +3196,13 @@ async function autoGradeDraft(){ if(!GPW) return; var st=document.getElementById
     if(j&&j.truth_score!=null){ var gv=document.getElementById('gradeVal'); var gn=document.getElementById('gradeNote'); if(gv) gv.value=Math.max(1,Math.min(5,Math.round(Number(j.truth_score)))); if(gn) gn.value=j.summary||''; if(st) st.textContent='Drafted \u2713 review, then Save grade.'; }
     else { if(st) st.textContent=(j&&j.error)?j.error:'Could not auto-grade this day'; }
   }catch(e){ if(st) st.textContent='Error: '+e.message; } }
-async function saveReport(){ const date=(document.getElementById('monDate')||{}).value||''; const st=document.getElementById('scStatus'); st.textContent='Saving…';
-  try{ const r=await fetch(api('scorecard_report')+(date?('&date='+encodeURIComponent(date)):''),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({report:document.getElementById('scReport').value})}); const j=await r.json(); st.textContent=j.ok?'Saved ✓':'Save failed'; }catch(e){ st.textContent='Error: '+e.message; } }
+async function saveReport(){ const date=(document.getElementById('monDate')||{}).value||''; const st=document.getElementById('scStatus'); const ta=document.getElementById('scReport'); st.textContent='Saving…';
+  try{ const r=await fetch(api('scorecard_report')+(date?('&date='+encodeURIComponent(date)):''),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({report:ta.value})}); const j=await r.json().catch(function(){return {};}); if(!r.ok||!j.ok){ st.textContent='Save failed — report kept. Retry Save.'; return false; } st.textContent='Saved ✓'; return true; }
+  catch(e){ st.textContent='Save failed — report kept. Retry Save.'; return false; } }
 async function runScore(){ const date=(document.getElementById('monDate')||{}).value||''; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const st=document.getElementById('scStatus'); st.textContent='Saving report + scoring…';
-  try{ await fetch(api('scorecard_report')+(date?('&date='+encodeURIComponent(date)):''),{method:'POST',headers:{'x-gavin-password':GPW,'Content-Type':'application/json'},body:JSON.stringify({report:document.getElementById('scReport').value})});
-    const r=await fetch(api('score_day')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json();
+  try{ if(!await saveReport()) return; st.textContent='Saved ✓ Scoring…';
+    const r=await fetch(api('score_day')+'&id='+encodeURIComponent(dev)+(date?('&date='+encodeURIComponent(date)):'')+'&cb='+Date.now(),{headers:{'x-gavin-password':GPW}}); const j=await r.json().catch(function(){return {};});
+    if(!r.ok){ st.textContent=(j&&j.error)||'Scoring failed — saved report kept. Retry Generate.'; return; }
     if(j.error){ st.textContent=j.error; return; } st.textContent='Scored ✓'; renderScore(j);
   }catch(e){ st.textContent='Error: '+e.message; } }
 async function saveGrade(){ const date=(document.getElementById('monDate')||{}).value||''; const dev=(document.getElementById('monDevice')||{}).value||'victor'; const st=document.getElementById('gradeStatus'); if(st) st.textContent='Saving…';
@@ -3870,7 +3878,7 @@ function renderCalls(calls){
   var selRaw=(document.getElementById('monDate')||{}).value||'';
   var sel=selRaw||(new Date()).toISOString().slice(0,10);
   calls=(calls||[]).filter(function(c){ var d=c.date||((c.at||'').slice(0,10)); return d===sel; });
-  if(!calls.length){ el.innerHTML='<span class="muted">No call transcripts for this day. Victor’s daily call transcript will appear here once phone intake is wired.</span>'; return; }
+  if(!calls.length){ el.innerHTML='<span class="muted">No stored call transcript for this day. Use the exact RecordingSid preview above if a recording is missing or was deleted.</span>'; return; }
   var groups={}, order=[];
   calls.forEach(function(c){ var d=c.date||((c.at||'').slice(0,10))||'(no date)'; if(!groups[d]){groups[d]=[];order.push(d);} groups[d].push(c); });
   var html='';
@@ -3883,16 +3891,43 @@ function renderCalls(calls){
       var rec=c.recordingUrl?(' · <a href="'+frEsc(c.recordingUrl)+'" target="_blank">audio</a>'):'';
       var key=frEsc(c.id||c.at||'');
       var del=key?(' · <a href="#" onclick="deleteCall(\''+key+'\');return false" style="color:#ff8f6b">delete</a>'):'';
+      var sid=String(c.recordingSid||'');
+      var recover=(!String(c.text||'').trim()&&/^RE[A-Za-z0-9]{20,}$/.test(sid))?(' · <button class="ghost" onclick="recoverCall(\''+sid+'\')" style="padding:2px 7px;color:#8ab4f8">recover transcript</button>'):'';
       var mv=key?('<div style="margin-top:5px;font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="muted">Move to:</span><input type="date" id="mv_'+key+'" value="'+frEsc(c.date||d)+'" style="width:auto;font-size:12px"><a href="#" onclick="moveCall(\''+key+'\');return false" style="color:#8ab4f8">move</a></div>'):'';
-      html+='<div style="border-bottom:1px solid #22303c;padding:8px 0 8px 10px"><div style="margin-bottom:2px">'+who+' <span class="muted">'+when+'</span>'+rec+del+'</div><div>'+txt+'</div>'+mv+'</div>';
+      html+='<div style="border-bottom:1px solid #22303c;padding:8px 0 8px 10px"><div style="margin-bottom:2px">'+who+' <span class="muted">'+when+'</span>'+rec+recover+del+'</div><div>'+txt+'</div>'+mv+'</div>';
     });
   });
   el.innerHTML=html;
 }
+var LAST_CALL_DELETE=null;
 async function deleteCall(key){
   if(!GPW||!key) return; if(!confirm('Delete this transcript? (for removing test calls)')) return;
-  try{ await fetch(api('calls_delete')+'&id='+encodeURIComponent(key),{method:'POST',headers:{'x-gavin-password':GPW}}); }catch(e){}
-  loadCalls();
+  var st=document.getElementById('callsStatus'); if(st) st.textContent='Deleting…';
+  try{ var r=await fetch(api('calls_delete')+'&id='+encodeURIComponent(key),{method:'POST',headers:{'x-gavin-password':GPW}}); var j=await r.json(); if(!r.ok||!j.ok){ if(st) st.textContent=(j&&j.error)||'Delete failed'; return; } LAST_CALL_DELETE=j; if(st) st.innerHTML='Deleted · <button class="ghost" style="padding:2px 7px" onclick="restoreLastCall()">Undo</button>'; await loadCalls(); }catch(e){ if(st) st.textContent='Delete not confirmed'; }
+}
+async function restoreLastCall(){
+  if(!GPW||!LAST_CALL_DELETE) return; var st=document.getElementById('callsStatus'); if(st) st.textContent='Restoring…';
+  try{ var r=await fetch(api('calls_restore'),{method:'POST',headers:{'Content-Type':'application/json','x-gavin-password':GPW},body:JSON.stringify({recordingSid:LAST_CALL_DELETE.recordingSid,restoreRevision:LAST_CALL_DELETE.restoreRevision})}); var j=await r.json(); if(!r.ok||!j.ok){ if(st) st.textContent=(j&&j.error)||'Restore failed'; return; } LAST_CALL_DELETE=null; if(st) st.textContent='Restored ✓'; await loadCalls(); }catch(e){ if(st) st.textContent='Restore not confirmed'; }
+}
+async function recoverExactCall(){
+  var inp=document.getElementById('callRecoverySid'), sid=String(inp&&inp.value||'').trim(), st=document.getElementById('callsStatus');
+  if(!/^RE[A-Za-z0-9]{20,}$/.test(sid)){ if(st) st.textContent='Enter one complete RecordingSid beginning RE'; if(inp) inp.focus(); return; }
+  return recoverCall(sid);
+}
+async function recoverCall(recordingSid){
+  if(!GPW||!recordingSid) return; var st=document.getElementById('callsStatus'); if(st) st.textContent='Checking exact RecordingSid…';
+  try{
+    var h={'Content-Type':'application/json','x-gavin-password':GPW};
+    var pr=await fetch(api('calls_reconcile'),{method:'POST',headers:h,body:JSON.stringify({recordingSid:recordingSid})}); var pj=await pr.json(); if(!pr.ok||!pj.ok||!pj.preview){ if(st) st.textContent=(pj&&pj.error)||'Preview failed'; return; }
+    var p=pj.preview;
+    if(p.nextOperation==='pending'){ if(st) st.textContent=(p.submissionActive?'Twilio submission is still active':'Twilio submission reconciliation is still protected')+(p.submissionDeadlineAt?(' until '+p.submissionDeadlineAt):'')+'; no retry was sent. Preview again after it finishes.'; return; }
+    var warning=p.nextOperation==='retry_submission'?'The bounded create attempt is no longer active and exact provider reconciliation found no job. This explicit retry can create one new billable Twilio transcription.':(p.nextOperation==='restore'?'This restores the deleted row from its current protected revision; its saved date, report, and grade are not replaced.':'This will '+p.nextOperation.replace('_',' ')+' for this one recording.');
+    var detail='Recording '+p.recordingSid+'\nDate '+p.date+' · '+p.duration+' sec · caller '+p.caller+'\nStored '+(p.storedStatus||'none')+' · provider '+(p.jobStatus||'none')+'\n\n'+warning+' Continue?';
+    if(!confirm(detail)){ if(st) st.textContent='Recovery canceled'; return; }
+    if(st) st.textContent='Recovering '+p.recordingSid+'…';
+    var rr=await fetch(api('calls_reconcile'),{method:'POST',headers:h,body:JSON.stringify({recordingSid:p.recordingSid,confirmation:p.confirmation,operation:p.nextOperation})}); var rj=await rr.json(); if(!rr.ok||!rj.ok){ if(st) st.textContent=(rj&&rj.error)||'Recovery failed'; return; }
+    if(st) st.textContent=rj.restored?'Call restored ✓':(rj.pending?'Submitted once; waiting for Twilio callback':'Transcript recovered ✓'); await loadCalls();
+  }catch(e){ if(st) st.textContent='Recovery failed: '+e.message; }
 }
 async function moveCall(key){
   if(!GPW||!key) return; var inp=document.getElementById('mv_'+key); var date=inp?inp.value:''; if(!date){ alert('Pick a date first.'); return; }
