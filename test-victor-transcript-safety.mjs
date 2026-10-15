@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import Module from 'node:module';
 import path from 'node:path';
+import {Readable} from 'node:stream';
 
 const app=path.resolve('api/app.js');
 const htmlPath=path.resolve('index.html');
@@ -61,6 +62,8 @@ function twilioSignature(url,body,token=baseEnv.TWILIO_AUTH_TOKEN){
   }
   return crypto.createHmac('sha1',token).update(material).digest('base64');
 }
+const bodySha256=body=>crypto.createHash('sha256').update(body).digest('hex');
+const twilioJsonSignature=(url,token=baseEnv.TWILIO_AUTH_TOKEN)=>crypto.createHmac('sha1',token).update(url).digest('base64');
 
 function fixture(opt={}){
   const raw=new Map();
@@ -232,25 +235,67 @@ function fixture(opt={}){
   vm.runInContext(source,context,{filename:app});
 
   async function request(body={},action='voice_recording',requestOpt={}){
-    const query={action,...(requestOpt.query||{})}, qs=new URLSearchParams(query).toString(), url='/api/app?'+qs, method=requestOpt.method||'POST';
+    const jsonSigned=action==='voice_intelligence'&&requestOpt.json!==false;
+    const rawBody=jsonSigned?(Buffer.isBuffer(requestOpt.rawBody)?Buffer.from(requestOpt.rawBody):Buffer.from(requestOpt.rawBody===undefined?JSON.stringify(body):String(requestOpt.rawBody))):null;
+    const query={action,...(requestOpt.query||{})};
+    if(jsonSigned)query.bodySHA256=Object.prototype.hasOwnProperty.call(requestOpt,'bodySHA256')?String(requestOpt.bodySHA256):bodySha256(rawBody);
+    const qs=new URLSearchParams(query).toString(), url='/api/app?'+qs, method=requestOpt.method||'POST';
     const headers={...(requestOpt.headers||{})};
-    if(requestOpt.sign!==false&&['voice_recording','voice_transcription','voice_intelligence'].includes(action))headers['x-twilio-signature']=twilioSignature(ORIGIN+url,body,env.TWILIO_AUTH_TOKEN);
+    if(jsonSigned&&!headers['content-type'])headers['content-type']='application/json';
+    if(requestOpt.sign!==false&&['voice_recording','voice_transcription','voice_intelligence'].includes(action))headers['x-twilio-signature']=jsonSigned?twilioJsonSignature(ORIGIN+url,env.TWILIO_AUTH_TOKEN):twilioSignature(ORIGIN+url,body,env.TWILIO_AUTH_TOKEN);
     if(action==='voice_intelligence'){
       const gt=String(body.transcript_sid||body.TranscriptSid||''), provider=[...providers.values()].find(row=>String(row.sid||'')===gt);
       if(provider)provider.status=String(opt.providerStatusOnCallback||'completed');
     }
     const out={status:0,body:null,headers:{}};
     const res={statusCode:200,setHeader(k,v){out.headers[String(k).toLowerCase()]=v;},status(code){this.statusCode=code;out.status=code;return this;},end(value){out.status=out.status||this.statusCode;out.body=String(value||'');return this;},json(value){out.status=out.status||this.statusCode;out.body=clone(value);return this;}};
-    await context.module.exports({query,body,headers,method,url,originalUrl:url},res);return out;
+    const req=jsonSigned?Object.assign(Readable.from([rawBody]),{query,headers,method,url,originalUrl:url}):{query,body,headers,method,url,originalUrl:url};
+    await context.module.exports(req,res);return out;
   }
   return {raw,calls,providers,request,handler:context.module.exports,env,value:getObject,scriptCount,timeoutDelays};
+}
+
+async function requestThroughRestoredIncomingMessage(f,{rawBody,authenticatedBody=rawBody,bodySHA256=bodySha256(authenticatedBody)}={}){
+  const {createServer,request:httpRequest}=realRequire('node:http');
+  const {PassThrough}=realRequire('node:stream');
+  const bytes=Buffer.isBuffer(rawBody)?Buffer.from(rawBody):Buffer.from(String(rawBody));
+  const url='/api/app?action=voice_intelligence&bodySHA256='+encodeURIComponent(String(bodySHA256));
+  const signature=twilioJsonSignature(ORIGIN+url,f.env.TWILIO_AUTH_TOKEN);
+  let bodyGetterReads=0, capturedBody=null, requestState=null;
+  const server=createServer(async(req,res)=>{
+    try{
+      capturedBody=await new Promise((resolve,reject)=>{
+        const chunks=[];req.on('data',chunk=>chunks.push(Buffer.from(chunk)));req.on('end',()=>resolve(Buffer.concat(chunks)));req.on('error',reject);
+      });
+      const restored=new PassThrough(), restoredOn=restored.on.bind(restored), originalOn=req.on.bind(req);
+      req.read=restored.read.bind(restored);
+      req.on=req.addListener=(name,callback)=>name==='data'||name==='end'?restoredOn(name,callback):originalOn(name,callback);
+      restored.end(capturedBody);
+      Object.defineProperty(req,'query',{configurable:true,enumerable:true,get:()=>Object.fromEntries(new URL(req.url,ORIGIN).searchParams)});
+      Object.defineProperty(req,'body',{configurable:true,enumerable:true,get:()=>{bodyGetterReads++;return JSON.parse(capturedBody.toString('utf8'));}});
+      requestState={complete:req.complete,readableEnded:req.readableEnded,exactUrl:ORIGIN+req.url===ORIGIN+url};
+      res.status=function(code){this.statusCode=code;return this;};
+      res.json=function(value){this.setHeader('content-type','application/json');return this.end(JSON.stringify(value));};
+      await f.handler(req,res);
+    }catch(e){res.statusCode=500;res.end(String(e&&e.stack||e));}
+  });
+  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
+  try{
+    const response=await new Promise((resolve,reject)=>{
+      const outgoing=httpRequest({host:'127.0.0.1',port:server.address().port,path:url,method:'POST',headers:{'content-type':'application/json','content-length':bytes.length,'x-twilio-signature':signature}},incoming=>{
+        const chunks=[];incoming.on('data',chunk=>chunks.push(Buffer.from(chunk)));incoming.on('end',()=>resolve({status:incoming.statusCode,body:Buffer.concat(chunks).toString('utf8')}));
+      });
+      outgoing.on('error',reject);outgoing.end(bytes);
+    });
+    return {...response,bodyGetterReads,capturedBody,requestState};
+  }finally{await new Promise(resolve=>server.close(resolve));}
 }
 
 let passed=0;
 async function test(name,fn){await fn();passed++;console.log('PASS '+passed+' '+name);}
 const count=(f,kind)=>f.calls.filter(x=>x.kind===kind).length;
 const ownerHeaders={'x-gavin-password':baseEnv.GAVIN_PASSWORD,'content-type':'application/json'};
-const intelligenceBody=(sid=SID,gt=GT)=>({account_sid:AC,service_sid:GA,transcript_sid:gt,customer_key:'victor-report:'+sid,event_type:'voice_intelligence_transcript_available'});
+const intelligenceBody=(sid=SID,gt=GT)=>({account_sid:AC,service_sid:GA,transcript_sid:gt,customer_key:'victor-report:'+sid,encryption_credential_sid:null,event_type:'voice_intelligence_transcript_available'});
 
 function assertLuaHasNoLiteralLineBreakInShortString(script){
   let quote=null,comment=false;
@@ -279,6 +324,28 @@ await test('signed recording callback submits one Classic CI job by RecordingSid
 
 await test('missing or invalid Twilio signatures fail closed before reads, writes, or provider work',async()=>{
   for(const mode of ['missing','invalid']){const f=fixture();const headers=mode==='invalid'?{'x-twilio-signature':'invalid'}:{};const r=await f.request({...payload},'voice_recording',{sign:false,headers});assert.equal(r.status,403);assert.equal(f.calls.length,0);assert.equal(f.raw.size,0);}
+});
+
+await test('Twilio JSON callback authenticates the full URL and exact raw bytes while signed form callbacks remain compatible',async()=>{
+  const f=fixture();assert.equal((await f.request({...payload})).status,200);
+  const callback=intelligenceBody(), raw=JSON.stringify(callback);assert.equal(Buffer.byteLength(raw),311);
+  const ok=await f.request(callback,'voice_intelligence',{rawBody:raw});assert.equal(ok.status,204);assert.equal(count(f,'sentences'),2);
+});
+
+await test('consumed and Vercel-restored IncomingMessage preserves exact callback bytes without reading the body getter',async()=>{
+  const callback=intelligenceBody(), raw=Buffer.from(JSON.stringify(callback));assert.equal(raw.length,311);
+  const ready=async()=>{const f=fixture();assert.equal((await f.request({...payload})).status,200);f.providers.get(SID).status='completed';return f;};
+  const validFixture=await ready(), valid=await requestThroughRestoredIncomingMessage(validFixture,{rawBody:raw});
+  assert.equal(valid.status,204);assert.equal(valid.bodyGetterReads,0);assert.deepEqual(valid.capturedBody,raw);assert.deepEqual(valid.requestState,{complete:true,readableEnded:true,exactUrl:true});assert.ok(count(validFixture,'transcript')>0);
+  const malformedFixture=await ready(), malformedHash=await requestThroughRestoredIncomingMessage(malformedFixture,{rawBody:raw,bodySHA256:'not-a-sha256'});
+  assert.equal(malformedHash.status,403);assert.equal(malformedHash.bodyGetterReads,0);assert.equal(count(malformedFixture,'transcript'),0);assert.equal(count(malformedFixture,'sentences'),0);
+  const tamperedFixture=await ready(), tampered=await requestThroughRestoredIncomingMessage(tamperedFixture,{rawBody:Buffer.concat([raw,Buffer.from(' ')]),authenticatedBody:raw});
+  assert.equal(tampered.status,403);assert.equal(tampered.bodyGetterReads,0);assert.equal(count(tamperedFixture,'transcript'),0);assert.equal(count(tamperedFixture,'sentences'),0);
+});
+
+await test('Twilio JSON callback rejects raw-body hash tampering before provider readback or persistence',async()=>{
+  const f=fixture();await f.request({...payload});const callback=intelligenceBody(), authentic=JSON.stringify(callback), tampered=authentic.replace('transcript_available','transcript_available_tampered');
+  const r=await f.request(callback,'voice_intelligence',{rawBody:tampered,bodySHA256:bodySha256(authentic)});assert.equal(r.status,403);assert.equal(count(f,'transcript'),0);assert.equal(count(f,'sentences'),0);assert.equal(String(f.value('parkside:calllog')[0].text||''),'');
 });
 
 await test('callback and provider account/service/source provenance fail closed',async()=>{
@@ -408,6 +475,7 @@ await test('B7 save-and-score aborts on failed save, keeps text, and succeeds on
 
 await test('P2 interrupted owner UI exposes exact-SID recovery, blocks active retry, and restores after reload',async()=>{
   assert.match(html,/id="callRecoverySid"[^>]*aria-label="Exact RecordingSid"/);assert.match(html,/callRecoverySid[\s\S]{0,300}event\.key==='Enter'/);
+  assert.match(html,/#gavinBody\{grid-template-columns:minmax\(0,1fr\);min-width:0\}/);assert.match(html,/#gvSubnav\{min-width:0;max-width:100%;overflow-x:auto\}/);assert.match(html,/#gvDayGrid\{grid-template-columns:minmax\(0,1fr\)\}/);assert.match(html,/#gvDetail>\.gv-col>div\{min-width:0;max-width:100%\}/);assert.match(html,/class="call-recovery-row"/);
   const start=html.indexOf('async function recoverExactCall()'), end=html.indexOf('async function moveCall(',start);assert.ok(start>0&&end>start);const code=html.slice(start,end);
   const elements={callRecoverySid:{value:SID,focused:false,focus(){this.focused=true;}},callsStatus:{textContent:''}};let replies=[],requests=[],confirms=0,loads=0;
   const context=vm.createContext({document:{getElementById:id=>elements[id]||null},GPW:'owner',api:a=>'/api/app?action='+a,confirm:()=>{confirms++;return true;},loadCalls:async()=>{loads++;},fetch:async(url,opt)=>{requests.push({url:String(url),body:opt&&opt.body?JSON.parse(opt.body):null});const next=replies.shift();return new Response(JSON.stringify(next.body),{status:next.status,headers:{'content-type':'application/json'}});},Response,JSON,String,console});vm.runInContext(code,context);

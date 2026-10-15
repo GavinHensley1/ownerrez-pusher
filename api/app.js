@@ -2602,14 +2602,55 @@ function callbackPublicUrl(req){
   const q=req&&req.query||{}, pairs=[]; for(const key of Object.keys(q)) if(q[key]!=null) pairs.push(encodeURIComponent(key)+'='+encodeURIComponent(String(q[key])));
   return origin+'/api/app'+(pairs.length?('?'+pairs.join('&')):'');
 }
-function validTwilioSignature(req,body){
+function twilioRequestUsesJsonSignature(req){
+  const q=req&&req.query||{}, contentType=twilioHeader(req,'content-type').split(';')[0].trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(q,'bodySHA256')||contentType==='application/json';
+}
+async function readExactRequestBody(req){
+  for(const name of ['rawBody','body']){
+    const descriptor=req&&Object.getOwnPropertyDescriptor(req,name);
+    if(descriptor&&Object.prototype.hasOwnProperty.call(descriptor,'value')){
+      const value=descriptor.value;
+      if(Buffer.isBuffer(value)) return Buffer.from(value);
+      if(typeof value==='string') return Buffer.from(value,'utf8');
+    }
+  }
+  if(!req||typeof req.on!=='function') throw new Error('Exact request body is unavailable');
+  return await new Promise((resolve,reject)=>{
+    const chunks=[]; let size=0, settled=false;
+    const fail=error=>{ if(settled)return; settled=true; reject(error instanceof Error?error:new Error(String(error||'Exact request body is unavailable'))); };
+    req.on('data',chunk=>{
+      if(settled)return;
+      try{
+        const bytes=Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk); size+=bytes.length;
+        if(size>1024*1024) return fail(new Error('Twilio callback body is too large'));
+        chunks.push(bytes);
+      }catch(e){ fail(e); }
+    });
+    req.on('end',()=>{ if(settled)return; settled=true; resolve(Buffer.concat(chunks,size)); });
+    req.on('error',fail);
+    req.on('aborted',()=>fail(new Error('Exact request body was aborted')));
+  });
+}
+function timingSafeTextEqual(left,right){
+  const a=Buffer.from(String(left||'')), b=Buffer.from(String(right||''));
+  return a.length===b.length&&require('crypto').timingSafeEqual(a,b);
+}
+function validTwilioSignature(req,body,rawBody){
   const token=String(twilioCredentials().token||''), supplied=twilioHeader(req,'x-twilio-signature'); if(!token||!supplied) return false;
   let material=callbackPublicUrl(req);
-  for(const key of Object.keys(body||{}).sort()){
-    const value=body[key]; if(Array.isArray(value)){ for(const item of value.map(String).sort()) material+=key+item; } else material+=key+String(value==null?'':value);
+  if(twilioRequestUsesJsonSignature(req)){
+    const claimed=String(req&&req.query&&req.query.bodySHA256||'').toLowerCase();
+    if(!/^[a-f0-9]{64}$/.test(claimed)||!Buffer.isBuffer(rawBody)) return false;
+    const actual=require('crypto').createHash('sha256').update(rawBody).digest('hex');
+    if(!timingSafeTextEqual(claimed,actual)) return false;
+  }else{
+    for(const key of Object.keys(body||{}).sort()){
+      const value=body[key]; if(Array.isArray(value)){ for(const item of value.map(String).sort()) material+=key+item; } else material+=key+String(value==null?'':value);
+    }
   }
-  const expected=require('crypto').createHmac('sha1',token).update(material).digest('base64'), a=Buffer.from(supplied), b=Buffer.from(expected);
-  return a.length===b.length&&require('crypto').timingSafeEqual(a,b);
+  const expected=require('crypto').createHmac('sha1',token).update(material).digest('base64');
+  return timingSafeTextEqual(supplied,expected);
 }
 const CLASSIC_CI_SUBMIT_TIMEOUT_MS=30000;
 async function twilioJson(url,options){
@@ -5327,8 +5368,16 @@ if(action==="email_recipients"){
       }catch(e){ return res.status(callbackStatusForError(e)).end(String(e&&e.message||e)); }
     }
     if(action==="voice_intelligence"){
-      const b=hookBody(req.body);
-      if(!validTwilioSignature(req,b)) return res.status(403).end("invalid Twilio signature");
+      const jsonSigned=twilioRequestUsesJsonSignature(req); let rawBody=null, b={};
+      if(jsonSigned){
+        try{ rawBody=await readExactRequestBody(req); }catch(e){ return res.status(403).end("invalid Twilio signature"); }
+        if(!validTwilioSignature(req,null,rawBody)) return res.status(403).end("invalid Twilio signature");
+        try{ b=JSON.parse(rawBody.toString('utf8')); }catch(e){ return res.status(400).end("invalid Twilio JSON body"); }
+        if(!b||typeof b!=="object"||Array.isArray(b)) return res.status(400).end("invalid Twilio JSON body");
+      }else{
+        b=hookBody(req.body);
+        if(!validTwilioSignature(req,b)) return res.status(403).end("invalid Twilio signature");
+      }
       const c=twilioCredentials(), serviceSid=twilioIntelligenceServiceSid();
       if(String(b.account_sid||b.AccountSid||'')!==c.sid||String(b.service_sid||b.ServiceSid||'')!==serviceSid) return res.status(400).end("Twilio Intelligence account or service provenance failed");
       if(String(b.event_type||b.EventType||'')!=="voice_intelligence_transcript_available") return res.status(400).end("unexpected Twilio Intelligence event");

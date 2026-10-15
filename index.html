@@ -179,7 +179,16 @@
   #gvConn table{display:block;max-width:100%;overflow-x:auto}
   #gvConn input,#gvConn textarea{max-width:100%;box-sizing:border-box}
   #gvConn .legend,#gvConn a,#gvConn #todoDocPreview{overflow-wrap:anywhere;word-break:break-word}
-  @media(max-width:900px){ #gvDayGrid{grid-template-columns:1fr} #gvside{position:static} #gvDetail{grid-template-columns:1fr} }
+  @media(max-width:900px){
+    #gavinBody{grid-template-columns:minmax(0,1fr);min-width:0}
+    #gvDay{min-width:0}
+    #gvSubnav{min-width:0;max-width:100%;overflow-x:auto}
+    #gvDayGrid{grid-template-columns:minmax(0,1fr)}
+    #gvside{position:static}
+    #gvDetail{grid-template-columns:minmax(0,1fr);min-width:0}
+    #gvDetail>.gv-col>div{min-width:0;max-width:100%}
+    #gvDetail .call-recovery-row,#gvDetail .call-recovery-row>label,#callRecoverySid{min-width:0;max-width:100%}
+  }
 </style></head><body>
 
 <!-- PUBLIC default: read-only booking roster pulled live from OwnerRez (no password) -->
@@ -1020,7 +1029,7 @@
               <span style="flex:1"></span><span id="callsStatus" class="muted" style="font-size:11px"></span>
             </div>
             <textarea id="scReport" style="display:none"></textarea><span id="scStatus" style="display:none"></span>
-            <div style="display:flex;align-items:end;gap:7px;flex-wrap:wrap;margin:0 0 10px">
+            <div class="call-recovery-row" style="display:flex;align-items:end;gap:7px;flex-wrap:wrap;margin:0 0 10px">
               <label for="callRecoverySid" class="muted" style="font-size:11px;flex:1 1 210px">Recover or restore by exact RecordingSid
                 <input id="callRecoverySid" aria-label="Exact RecordingSid" autocomplete="off" spellcheck="false" placeholder="RE…" onkeydown="if(event.key==='Enter'){event.preventDefault();recoverExactCall()}" style="display:block;width:100%;box-sizing:border-box;margin-top:4px">
               </label>
